@@ -1,0 +1,8 @@
+[package]
+name = "opendeck-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clean-room DSP core for OpenDeck: waveform peaks, band split, tempo, key."
+
+[dependencies]

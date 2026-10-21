@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=OpenDeck
+Comment=Open-source DJ application with DVS timecode support
+Exec=opendeck %U
+Terminal=false
+Type=Application
+Icon=io.opendeck.OpenDeck
+Categories=AudioVideo;Audio;Mixer;
+StartupWMClass=OpenDeck

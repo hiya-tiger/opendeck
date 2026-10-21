@@ -1,0 +1,29 @@
+app-id: io.opendeck.OpenDeck
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: "24.08"
+command: opendeck
+separate-locales: false
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=all
+  - --socket=pulseaudio
+  - --filesystem=xdg-music:ro
+  - --filesystem=xdg-download
+modules:
+  - name: opendeck
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/opendeck
+      - cp -r dist renderer package.json node_modules /app/opendeck/
+      - install -Dm755 opendeck.sh /app/bin/opendeck
+      - install -Dm644 io.opendeck.OpenDeck.desktop /app/share/applications/io.opendeck.OpenDeck.desktop
+      - install -Dm644 io.opendeck.OpenDeck.metainfo.xml /app/share/metainfo/io.opendeck.OpenDeck.metainfo.xml
+      - install -Dm644 icon.png /app/share/icons/hicolor/256x256/apps/io.opendeck.OpenDeck.png
+    sources:
+      - type: dir
+        path: .

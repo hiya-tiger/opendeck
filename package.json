@@ -1,0 +1,25 @@
+{
+  "name": "opendeck-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenDeck desktop: MIT-licensed DJ app with DVS timecode support",
+  "type": "module",
+  "license": "MIT",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "prebuild": "node scripts/fetch-ffmpeg.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.24.2": true
+  }
+}

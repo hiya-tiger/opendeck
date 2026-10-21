@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenDeck — open-source DJ</title>
+<meta name="description" content="Open-source DJ app with DVS, stems, beat FX and streaming queue. MIT licensed.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="8" cy="12" r="5.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="12" r="5.2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/></svg>
+      </span>
+      <span class="brand-name">OpenDeck</span>
+      <span class="pill">MIT · open source</span>
+    </div>
+    <div class="topbar-mid">
+      <span class="status-dot" id="engineDot"></span>
+      <span id="engineState" class="muted mono">audio engine idle</span>
+    </div>
+    <div class="topbar-right">
+      <span class="muted mono" id="clock">--:--</span>
+      <span class="rec-time mono" id="recTime">00:00</span>
+      <button id="waveMode" class="pill-btn" type="button" aria-pressed="false">Vertical waves</button>
+      <button id="recBtn" class="pill-btn" type="button" aria-pressed="false"><span class="rec-dot"></span>Record</button>
+      <a id="saveMix" class="pill-btn hidden" download="opendeck-mix.webm">Save mix</a>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div id="deckSlotA" class="deck-slot"></div>
+
+    <section class="mixer" aria-label="Mixer">
+      <div class="mixer-head">
+        <span class="eyebrow">Mixer</span>
+        <span class="chip mono" id="masterBpmChip">-- BPM</span>
+      </div>
+      <div class="meters">
+        <canvas id="meterA" width="14" height="120" aria-label="Deck A level"></canvas>
+        <canvas id="meterMaster" width="14" height="120" aria-label="Master level"></canvas>
+        <canvas id="meterB" width="14" height="120" aria-label="Deck B level"></canvas>
+      </div>
+      <div class="xfader">
+        <div class="xfader-labels"><span>A</span><span class="eyebrow">Crossfader</span><span>B</span></div>
+        <input id="crossfader" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="Crossfader">
+        <select id="xfCurve" class="mini-select" aria-label="Crossfader curve">
+          <option value="smooth">Smooth curve</option>
+          <option value="fast">Fast curve</option>
+          <option value="cut">Cut</option>
+        </select>
+      </div>
+      <div class="fader-row">
+        <label class="vfader">A<input id="chA" type="range" min="0" max="1" step="0.01" value="0.85"></label>
+        <label class="vfader master-fader">MASTER<input id="master" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+        <label class="vfader">B<input id="chB" type="range" min="0" max="1" step="0.01" value="0.85"></label>
+      </div>
+      <div class="aux-card">
+        <div class="aux-head"><span class="eyebrow">System audio</span><span class="chip" id="auxState">off</span></div>
+        <p class="micro">Mix Spotify, YouTube Music or any player through OpenDeck's master.</p>
+        <input id="auxGain" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="System audio level">
+        <button id="auxBtn" type="button" class="ghost small">Capture output</button>
+      </div>
+
+      <div class="midi-card">
+        <div class="aux-head">
+          <span class="eyebrow">MIDI</span>
+          <span class="chip" id="midiState">off</span>
+        </div>
+        <button id="midiEnable" type="button" class="ghost small">Enable MIDI</button>
+        <div id="midiDevices" class="midi-devices"><span class="micro">No devices</span></div>
+        <select id="midiTarget" class="mini-select" aria-label="MIDI learn target"></select>
+        <div class="midi-actions">
+          <button id="midiLearn" type="button" class="ghost small">Learn</button>
+          <button id="midiForget" type="button" class="ghost small">Clear</button>
+        </div>
+        <p class="micro" id="midiHint">Connect a controller, pick a target, then press a knob or pad.</p>
+        <p class="micro mono midi-monitor" id="midiMonitor">no MIDI data</p>
+      </div>
+
+      <div class="sampler-card">
+        <div class="aux-head">
+          <span class="eyebrow">Sampler</span>
+          <span class="chip mono" id="samplerState">8 pads</span>
+        </div>
+        <div class="sampler-pads" id="samplerPads"></div>
+        <input id="samplerVol" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="Sampler level">
+      </div>
+    </section>
+
+    <div id="deckSlotB" class="deck-slot"></div>
+  </main>
+
+  <section class="dvs" aria-label="DVS timecode">
+    <label class="dvs-toggle"><input type="checkbox" id="dvsEnable"> DVS timecode</label>
+    <select id="dvsDevice" aria-label="Audio input"><option value="">Default stereo input</option></select>
+    <select id="dvsTimecode" aria-label="Timecode"></select>
+    <label class="dvs-target">Deck
+      <select id="dvsTarget"><option value="A">A</option><option value="B">B</option></select>
+    </label>
+    <button id="dvsCalibrate" type="button" class="ghost small">Set needle position</button>
+    <span id="dvsStatus" class="chip mono" data-state="off">off</span>
+    <span class="micro">Serato CV02/CD, Traktor MK2, MixVibes, rekordbox timecode</span>
+  </section>
+
+  <section class="console" aria-label="Library, streaming and broadcast">
+    <nav class="tabs" role="tablist" aria-label="Console tabs">
+      <button type="button" class="tab" data-tab="library" role="tab" aria-selected="true">Library</button>
+      <button type="button" class="tab" data-tab="stream" role="tab" aria-selected="false">Stream</button>
+      <button type="button" class="tab" data-tab="broadcast" role="tab" aria-selected="false">Broadcast</button>
+      <div class="spacer"></div>
+      <span class="muted micro" id="consoleHint">Local files, Serato crates and streamed sources</span>
+    </nav>
+
+    <div class="panel" data-panel="library" role="tabpanel">
+      <div class="lib-head">
+        <label class="drop" id="dropZone">
+          <input id="fileInput" type="file" accept="audio/*" multiple hidden>
+          <span class="drop-title">Drop audio files</span>
+          <span class="micro">or click to browse · MP3, WAV, FLAC, M4A, OGG, AIFF</span>
+        </label>
+        <div class="lib-tools">
+          <input id="search" type="search" placeholder="Filter by title or key" aria-label="Filter tracks">
+          <input id="crateInput" type="file" accept=".crate" hidden>
+          <button id="crateBtn" type="button" class="ghost">Import .crate</button>
+          <button id="linkBtn" type="button" class="ghost hidden">Link music folder</button>
+          <span id="libCount" class="chip mono">0 tracks</span>
+        </div>
+      </div>
+      <p id="crateNote" class="note hidden"></p>
+      <div class="table-wrap">
+        <table class="tracks">
+          <thead>
+            <tr><th>#</th><th>Title</th><th>BPM</th><th>Key</th><th>Length</th><th>Load</th></tr>
+          </thead>
+          <tbody id="trackList"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel hidden" data-panel="stream" role="tabpanel">
+      <div class="stream-grid">
+        <aside class="provider-list">
+          <span class="eyebrow">Services</span>
+          <div id="providerList" class="providers"></div>
+          <div class="url-card">
+            <span class="eyebrow">Direct audio URL</span>
+            <div class="inline">
+              <input id="urlInput" type="url" placeholder="https://…/track.mp3">
+              <button id="urlBtn" type="button" class="ghost small">Load</button>
+            </div>
+            <p class="micro">Finite files and hosted mixes. Live radio needs system capture.</p>
+          </div>
+        </aside>
+
+        <div class="stream-main">
+          <div class="stream-head">
+            <div>
+              <h2 id="streamTitle">YouTube Music</h2>
+              <p class="micro" id="streamNote">Sign in with your own account to search and queue.</p>
+            </div>
+            <div class="stream-actions">
+              <span class="chip" id="loginState">signed out</span>
+              <button id="loginBtn" type="button" class="primary small">Sign in</button>
+              <button id="logoutBtn" type="button" class="ghost small hidden">Sign out</button>
+            </div>
+          </div>
+
+          <form id="streamSearchForm" class="search-row">
+            <input id="streamSearch" type="search" placeholder="Search tracks, artists, playlists">
+            <button type="submit" class="primary small">Search</button>
+          </form>
+
+          <div class="stream-body">
+            <div class="results">
+              <div class="section-head"><span class="eyebrow">Results</span><span class="micro" id="resultCount">0</span></div>
+              <div id="resultList" class="result-list empty">Search the signed-in service to queue music.</div>
+            </div>
+            <div class="queue">
+              <div class="section-head">
+                <span class="eyebrow">Queue</span>
+                <div class="queue-actions">
+                  <button id="queuePrev" class="icon-btn" title="Previous">◀</button>
+                  <button id="queueNext" class="icon-btn" title="Next">▶</button>
+                  <button id="queueRepeat" class="icon-btn" title="Repeat">↻</button>
+                  <button id="queueClear" class="icon-btn" title="Clear">✕</button>
+                </div>
+              </div>
+              <div id="queueList" class="queue-list empty">Nothing queued yet.</div>
+              <div class="queue-now">
+                <span class="micro">Now</span>
+                <strong id="queueNow">—</strong>
+                <button id="queueOpen" type="button" class="primary small">Open in service</button>
+              </div>
+            </div>
+          </div>
+          <p class="note warn" id="streamWarn"></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel hidden" data-panel="broadcast" role="tabpanel">
+      <div class="broadcast-grid">
+        <div class="card">
+          <div class="card-head"><span class="eyebrow">Recording</span><span class="chip" id="recState">idle</span></div>
+          <p class="micro">Records the post-limiter master bus as WebM/Opus, 256 kbps.</p>
+          <div class="rec-controls">
+            <button id="broadcastRecBtn" type="button" class="primary">Start recording</button>
+            <span class="mono" id="broadcastRecTime">00:00</span>
+          </div>
+          <p class="micro" id="recPath">Saved through a file dialog when you stop.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="eyebrow">WebRTC · WHIP</span><span class="chip" id="whipState">idle</span></div>
+          <p class="micro">Works with Cloudflare Stream, Dolby Millicast, MediaMTX and other WHIP ingest endpoints.</p>
+          <label class="field"><span>WHIP endpoint</span><input id="whipEndpoint" type="url" placeholder="https://…/whip/endpoint"></label>
+          <label class="field"><span>Bearer token (optional)</span><input id="whipToken" type="password" placeholder="token"></label>
+          <button id="whipBtn" type="button" class="primary">Go live</button>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="eyebrow">RTMP</span><span class="chip" id="rtmpState">checking ffmpeg</span></div>
+          <p class="micro">Push to Twitch, YouTube Live or any RTMP ingest. Needs ffmpeg on PATH.</p>
+          <label class="field"><span>Ingest URL</span><input id="rtmpUrl" type="url" placeholder="rtmp://live.twitch.tv/app"></label>
+          <label class="field"><span>Stream key</span><input id="rtmpKey" type="password" placeholder="kept in memory only"></label>
+          <button id="rtmpBtn" type="button" class="primary" disabled>Go live</button>
+          <pre class="log mono" id="rtmpLog"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="toast" class="toast hidden" role="status"></div>
+
+<template id="deckTemplate">
+  <section class="deck">
+    <header class="deck-head">
+      <span class="deck-chip">A</span>
+      <div class="vinyl" aria-hidden="true">
+        <div class="vinyl-disc">
+          <div class="vinyl-label"><span class="vinyl-initial">A</span></div>
+        </div>
+        <span class="vinyl-hole"></span>
+      </div>
+      <div class="deck-title-wrap">
+        <span class="deck-title">No track</span>
+        <span class="deck-sub">Drop audio or load from the library</span>
+      </div>
+      <span class="chip mono deck-bpm">-- BPM</span>
+      <span class="chip mono deck-key">--</span>
+    </header>
+
+    <div class="wave-card">
+      <canvas class="wf-overview" height="84"></canvas>
+      <canvas class="wf-zoom" height="52"></canvas>
+    </div>
+
+    <div class="time-row">
+      <span class="deck-time mono">0:00 / 0:00</span>
+      <span class="deck-bar mono">1.1.1</span>
+      <span class="deck-tempo mono">+0.0%</span>
+      <span class="deck-sync chip hidden">synced</span>
+    </div>
+
+    <div class="pads" aria-label="Hot cues"></div>
+
+    <div class="transport">
+      <button type="button" class="cue" title="Set or jump to cue">CUE</button>
+      <button type="button" class="play" title="Play / pause">PLAY</button>
+      <button type="button" class="sync" title="Beat sync to the other deck">SYNC</button>
+      <button type="button" class="loop" title="Toggle loop">LOOP</button>
+    </div>
+
+    <div class="control-row">
+      <span class="row-label">Loop</span>
+      <div class="segmented loop-beats"></div>
+      <button type="button" class="mini loop-half" title="Halve loop">÷2</button>
+      <button type="button" class="mini loop-double" title="Double loop">×2</button>
+      <button type="button" class="mini quantize" aria-pressed="true" title="Quantize to beat grid">Q</button>
+    </div>
+
+    <div class="control-row">
+      <span class="row-label">Jump</span>
+      <div class="jump-btns">
+        <button type="button" class="mini" data-beats="-16">−16</button>
+        <button type="button" class="mini" data-beats="-4">−4</button>
+        <button type="button" class="mini" data-beats="-1">−1</button>
+        <button type="button" class="mini" data-beats="1">+1</button>
+        <button type="button" class="mini" data-beats="4">+4</button>
+        <button type="button" class="mini" data-beats="16">+16</button>
+      </div>
+    </div>
+
+    <div class="control-row tempo-row">
+      <span class="row-label">Tempo</span>
+      <input class="pitch" type="range" min="-50" max="50" step="0.1" value="0" aria-label="Tempo">
+      <span class="pitch-val mono">+0.0%</span>
+      <select class="mini-select pitch-range" aria-label="Tempo range">
+        <option value="8">±8%</option>
+        <option value="16">±16%</option>
+        <option value="50" selected>±50%</option>
+      </select>
+      <button type="button" class="mini keylock" aria-pressed="true" title="Key lock">KEY</button>
+    </div>
+
+    <div class="eq-row">
+      <label class="knob">HIGH<input class="eq-high" type="range" min="-24" max="6" step="0.5" value="0"></label>
+      <label class="knob">MID<input class="eq-mid" type="range" min="-24" max="6" step="0.5" value="0"></label>
+      <label class="knob">LOW<input class="eq-low" type="range" min="-24" max="6" step="0.5" value="0"></label>
+      <label class="knob">TRIM<input class="trim" type="range" min="0" max="1.5" step="0.01" value="1"></label>
+    </div>
+
+    <div class="stem-row" aria-label="Stems">
+      <span class="row-label">Stems</span>
+      <div class="stems"></div>
+    </div>
+
+    <div class="fx-row">
+      <span class="row-label">FX</span>
+      <select class="fx-type mini-select" aria-label="Effect"></select>
+      <input class="fx-wet" type="range" min="0" max="1" step="0.01" value="0" aria-label="Effect mix">
+      <select class="fx-div mini-select" aria-label="Beat division"></select>
+    </div>
+  </section>
+</template>
+
+<script src="tauri-bridge.js"></script>
+<script src="app.js"></script>
+<script src="dvs.js"></script>
+</body>
+</html>

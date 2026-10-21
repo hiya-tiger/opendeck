@@ -1,0 +1,15 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.opendeck.OpenDeck</id>
+  <name>OpenDeck</name>
+  <summary>Open-source DJ application with DVS timecode support</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Two-deck DJ mixer with waveform display, BPM analysis, looping, recording, Serato crate import and vinyl timecode control.</p>
+  </description>
+  <launchable type="desktop-id">io.opendeck.OpenDeck.desktop</launchable>
+  <releases>
+    <release version="0.1.0" date="2026-10-20"/>
+  </releases>
+</component>
