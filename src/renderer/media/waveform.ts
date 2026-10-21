@@ -32,9 +32,10 @@ function fit(canvas: HTMLCanvasElement): Fit {
 const BG = "#0b111c";
 const CUE = "#f0a726";
 
-const LOW_RGB: [number, number, number] = [255, 92, 64];
-const MID_RGB: [number, number, number] = [64, 214, 128];
-const HIGH_RGB: [number, number, number] = [88, 156, 255];
+const LOW_HUE = 12;
+const MID_HUE = 138;
+const HIGH_HUE = 214;
+const RAD = Math.PI / 180;
 
 interface Column {
   color: string;
@@ -57,13 +58,20 @@ class WaveColors {
       const low = bands.low[i] ?? 0;
       const mid = bands.mid[i] ?? 0;
       const high = bands.high[i] ?? 0;
-      const total = low + mid + high || 1;
-      const r = (LOW_RGB[0] * low + MID_RGB[0] * mid + HIGH_RGB[0] * high) / total;
-      const g = (LOW_RGB[1] * low + MID_RGB[1] * mid + HIGH_RGB[1] * high) / total;
-      const b = (LOW_RGB[2] * low + MID_RGB[2] * mid + HIGH_RGB[2] * high) / total;
+      const x =
+        Math.cos(LOW_HUE * RAD) * low +
+        Math.cos(MID_HUE * RAD) * mid +
+        Math.cos(HIGH_HUE * RAD) * high;
+      const y =
+        Math.sin(LOW_HUE * RAD) * low +
+        Math.sin(MID_HUE * RAD) * mid +
+        Math.sin(HIGH_HUE * RAD) * high;
+      let hue = Math.atan2(y, x) / RAD;
+      if (hue < 0) hue += 360;
+      const tint = Math.round(hue);
       out[i] = {
-        color: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`,
-        dim: `rgb(${Math.round(r * 0.32)}, ${Math.round(g * 0.32)}, ${Math.round(b * 0.32)})`,
+        color: `hsl(${tint}, 78%, 62%)`,
+        dim: `hsl(${tint}, 64%, 24%)`,
       };
     }
     this.cache = out;
@@ -143,15 +151,6 @@ export class Waveform {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly colors = new WaveColors();
-  private cache: {
-    w: number;
-    h: number;
-    peaks: Float32Array;
-    bands: BandPeaks | null;
-    gain: number;
-    bright: HTMLCanvasElement;
-    dim: HTMLCanvasElement;
-  } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -207,7 +206,6 @@ export class Waveform {
     this.cue = 0;
     this.loop = null;
     this.hotCues = [];
-    this.cache = null;
     this.draw();
   }
 
@@ -219,62 +217,18 @@ export class Waveform {
       return;
     }
 
+    const gradient = c.createLinearGradient(0, 0, 0, h);
+    gradient.addColorStop(0, "#0d1522");
+    gradient.addColorStop(0.5, BG);
+    gradient.addColorStop(1, "#080c14");
+    c.fillStyle = gradient;
+    c.fillRect(0, 0, w, h);
+
     const mid = h / 2;
     const pxPerPeak = w / this.peaks.length;
     const barWidth = Math.max(1, pxPerPeak * 0.78);
     const playedX = (this.progress / this.duration) * w;
     const colors = this.colors.build(this.peaks, this.bands ?? undefined);
-
-    if (
-      !this.cache ||
-      this.cache.w !== w ||
-      this.cache.h !== h ||
-      this.cache.peaks !== this.peaks ||
-      this.cache.bands !== this.bands ||
-      this.cache.gain !== this.gain
-    ) {
-      const bright = document.createElement("canvas");
-      bright.width = w;
-      bright.height = h;
-      const dim = document.createElement("canvas");
-      dim.width = w;
-      dim.height = h;
-      for (const [target, dimmed] of [
-        [bright, false],
-        [dim, true],
-      ] as const) {
-        const layer = target.getContext("2d")!;
-        const gradient = layer.createLinearGradient(0, 0, 0, h);
-        gradient.addColorStop(0, "#0d1522");
-        gradient.addColorStop(0.5, BG);
-        gradient.addColorStop(1, "#080c14");
-        layer.fillStyle = gradient;
-        layer.fillRect(0, 0, w, h);
-        for (let i = 0; i < this.peaks.length; i += 1) {
-          const amp = shaped(this.peaks[i], this.gain) * (h * 0.46);
-          layer.fillStyle = dimmed ? colors[i].dim : colors[i].color;
-          layer.fillRect(i * pxPerPeak, mid - amp, barWidth, amp * 2);
-        }
-        layer.strokeStyle = "rgba(255, 255, 255, 0.06)";
-        layer.lineWidth = 1;
-        layer.beginPath();
-        layer.moveTo(0, mid);
-        layer.lineTo(w, mid);
-        layer.stroke();
-      }
-      this.cache = { w, h, peaks: this.peaks, bands: this.bands, gain: this.gain, bright, dim };
-    }
-
-    c.drawImage(this.cache.bright, 0, 0);
-
-    if (playedX < w) {
-      c.save();
-      c.beginPath();
-      c.rect(playedX, 0, w - playedX, h);
-      c.clip();
-      c.drawImage(this.cache.dim, 0, 0);
-      c.restore();
-    }
 
     if (this.loop) {
       const x1 = (this.loop.start / this.duration) * w;
@@ -282,6 +236,35 @@ export class Waveform {
       c.fillStyle = "rgba(77, 107, 254, 0.16)";
       c.fillRect(x1, 0, Math.max(1, x2 - x1), h);
     }
+
+    c.save();
+    c.beginPath();
+    c.rect(0, 0, playedX, h);
+    c.clip();
+    for (let i = 0; i < this.peaks.length; i += 1) {
+      const amp = shaped(this.peaks[i], this.gain) * (h * 0.46);
+      c.fillStyle = colors[i].color;
+      c.fillRect(i * pxPerPeak, mid - amp, barWidth, amp * 2);
+    }
+    c.restore();
+
+    c.save();
+    c.beginPath();
+    c.rect(playedX, 0, w - playedX, h);
+    c.clip();
+    for (let i = 0; i < this.peaks.length; i += 1) {
+      const amp = shaped(this.peaks[i], this.gain) * (h * 0.46);
+      c.fillStyle = colors[i].dim;
+      c.fillRect(i * pxPerPeak, mid - amp, barWidth, amp * 2);
+    }
+    c.restore();
+
+    c.strokeStyle = "rgba(255, 255, 255, 0.06)";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(0, mid);
+    c.lineTo(w, mid);
+    c.stroke();
 
     for (const cue of this.hotCues) {
       if (!cue.time) continue;
@@ -334,6 +317,7 @@ export class ZoomWaveform {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly colors = new WaveColors();
+  private dirty = true;
 
   constructor(canvas: HTMLCanvasElement, spanSeconds = 8) {
     this.canvas = canvas;
@@ -346,31 +330,43 @@ export class ZoomWaveform {
     this.bands = bands ?? null;
     this.gain = displayGain(peaks);
     this.duration = duration;
+    this.invalidate();
   }
 
   setBpm(bpm: number, beatPhase = 0): void {
     this.bpm = bpm;
     this.beatPhase = beatPhase;
+    this.invalidate();
   }
 
   setLoop(loop: LoopRegion | null): void {
     this.loop = loop;
+    this.invalidate();
   }
 
   setHotCues(cues: WaveMarker[]): void {
     this.hotCues = cues;
+    this.invalidate();
   }
 
   setVertical(value: boolean): void {
     this.vertical = value;
+    this.invalidate();
   }
 
   update(progress: number): void {
+    if (this.progress === progress && !this.dirty) return;
     this.progress = progress;
     this.draw();
   }
 
+  private invalidate(): void {
+    this.dirty = true;
+    this.draw();
+  }
+
   draw(): void {
+    this.dirty = false;
     const { w, h, dpr } = fit(this.canvas);
     const c = this.ctx;
     if (!this.peaks || !this.duration) {

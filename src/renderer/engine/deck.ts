@@ -545,6 +545,7 @@ export class Deck {
   seek(seconds: number): void {
     const limit = this.duration;
     this.el.currentTime = Math.max(0, Math.min(seconds, limit ? limit - 0.02 : 0));
+    this.emit();
   }
 
   setRate(rate: number): void {
