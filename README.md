@@ -1,6 +1,6 @@
 ﻿# OpenDeck (desktop)
 
-Open-source DJ application with real DVS timecode control. TypeScript UI with an Electron shell or a Rust/Tauri shell that runs the same UI, MIT licensed. No Serato binaries, no telemetry.
+Open-source DJ application with real DVS timecode control. TypeScript UI with an Electron shell or a Rust/Tauri shell that runs the same UI, MIT licensed. No telemetry, SeratoDJ inspired.
 
 Windows and Linux (Flatpak manifest included).
 
