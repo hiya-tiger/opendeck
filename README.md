@@ -4,6 +4,12 @@ Open-source DJ application with real DVS timecode control. TypeScript UI with an
 
 Windows and Linux (Flatpak manifest included).
 
+## Screenshots
+
+![Two decks with frequency-coloured waveforms](screenshots/opendeck-v013-two-decks.png)
+
+![Vertical waveform mode](screenshots/opendeck-v013-vertical.png)
+
 ## Features
 
 - Dark Serato-style interface with frequency-colored waveforms (bass/mid/high bands), cue flags and beat grid.
