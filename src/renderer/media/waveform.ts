@@ -43,11 +43,11 @@ interface Column {
 
 class WaveColors {
   private cache: Column[] | null = null;
-  private signature = "";
+  private peaks: Float32Array | null = null;
+  private bands: BandPeaks | null = null;
 
   build(peaks: Float32Array, bands?: BandPeaks): Column[] {
-    const key = `${peaks.length}:${bands ? bands.low.length : 0}`;
-    if (this.cache && this.signature === key) return this.cache;
+    if (this.cache && this.peaks === peaks && this.bands === (bands ?? null)) return this.cache;
     const out: Column[] = new Array(peaks.length);
     for (let i = 0; i < peaks.length; i += 1) {
       if (!bands) {
@@ -67,7 +67,8 @@ class WaveColors {
       };
     }
     this.cache = out;
-    this.signature = key;
+    this.peaks = peaks;
+    this.bands = bands ?? null;
     return out;
   }
 }
@@ -142,6 +143,15 @@ export class Waveform {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly colors = new WaveColors();
+  private cache: {
+    w: number;
+    h: number;
+    peaks: Float32Array;
+    bands: BandPeaks | null;
+    gain: number;
+    bright: HTMLCanvasElement;
+    dim: HTMLCanvasElement;
+  } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -168,6 +178,7 @@ export class Waveform {
   }
 
   setProgress(seconds: number): void {
+    if (this.progress === seconds) return;
     this.progress = seconds;
     this.draw();
   }
@@ -196,6 +207,7 @@ export class Waveform {
     this.cue = 0;
     this.loop = null;
     this.hotCues = [];
+    this.cache = null;
     this.draw();
   }
 
@@ -207,18 +219,62 @@ export class Waveform {
       return;
     }
 
-    const gradient = c.createLinearGradient(0, 0, 0, h);
-    gradient.addColorStop(0, "#0d1522");
-    gradient.addColorStop(0.5, BG);
-    gradient.addColorStop(1, "#080c14");
-    c.fillStyle = gradient;
-    c.fillRect(0, 0, w, h);
-
     const mid = h / 2;
     const pxPerPeak = w / this.peaks.length;
     const barWidth = Math.max(1, pxPerPeak * 0.78);
     const playedX = (this.progress / this.duration) * w;
     const colors = this.colors.build(this.peaks, this.bands ?? undefined);
+
+    if (
+      !this.cache ||
+      this.cache.w !== w ||
+      this.cache.h !== h ||
+      this.cache.peaks !== this.peaks ||
+      this.cache.bands !== this.bands ||
+      this.cache.gain !== this.gain
+    ) {
+      const bright = document.createElement("canvas");
+      bright.width = w;
+      bright.height = h;
+      const dim = document.createElement("canvas");
+      dim.width = w;
+      dim.height = h;
+      for (const [target, dimmed] of [
+        [bright, false],
+        [dim, true],
+      ] as const) {
+        const layer = target.getContext("2d")!;
+        const gradient = layer.createLinearGradient(0, 0, 0, h);
+        gradient.addColorStop(0, "#0d1522");
+        gradient.addColorStop(0.5, BG);
+        gradient.addColorStop(1, "#080c14");
+        layer.fillStyle = gradient;
+        layer.fillRect(0, 0, w, h);
+        for (let i = 0; i < this.peaks.length; i += 1) {
+          const amp = shaped(this.peaks[i], this.gain) * (h * 0.46);
+          layer.fillStyle = dimmed ? colors[i].dim : colors[i].color;
+          layer.fillRect(i * pxPerPeak, mid - amp, barWidth, amp * 2);
+        }
+        layer.strokeStyle = "rgba(255, 255, 255, 0.06)";
+        layer.lineWidth = 1;
+        layer.beginPath();
+        layer.moveTo(0, mid);
+        layer.lineTo(w, mid);
+        layer.stroke();
+      }
+      this.cache = { w, h, peaks: this.peaks, bands: this.bands, gain: this.gain, bright, dim };
+    }
+
+    c.drawImage(this.cache.bright, 0, 0);
+
+    if (playedX < w) {
+      c.save();
+      c.beginPath();
+      c.rect(playedX, 0, w - playedX, h);
+      c.clip();
+      c.drawImage(this.cache.dim, 0, 0);
+      c.restore();
+    }
 
     if (this.loop) {
       const x1 = (this.loop.start / this.duration) * w;
@@ -226,35 +282,6 @@ export class Waveform {
       c.fillStyle = "rgba(77, 107, 254, 0.16)";
       c.fillRect(x1, 0, Math.max(1, x2 - x1), h);
     }
-
-    c.save();
-    c.beginPath();
-    c.rect(0, 0, playedX, h);
-    c.clip();
-    for (let i = 0; i < this.peaks.length; i += 1) {
-      const amp = shaped(this.peaks[i], this.gain) * (h * 0.46);
-      c.fillStyle = colors[i].color;
-      c.fillRect(i * pxPerPeak, mid - amp, barWidth, amp * 2);
-    }
-    c.restore();
-
-    c.save();
-    c.beginPath();
-    c.rect(playedX, 0, w - playedX, h);
-    c.clip();
-    for (let i = 0; i < this.peaks.length; i += 1) {
-      const amp = shaped(this.peaks[i], this.gain) * (h * 0.46);
-      c.fillStyle = colors[i].dim;
-      c.fillRect(i * pxPerPeak, mid - amp, barWidth, amp * 2);
-    }
-    c.restore();
-
-    c.strokeStyle = "rgba(255, 255, 255, 0.06)";
-    c.lineWidth = 1;
-    c.beginPath();
-    c.moveTo(0, mid);
-    c.lineTo(w, mid);
-    c.stroke();
 
     for (const cue of this.hotCues) {
       if (!cue.time) continue;

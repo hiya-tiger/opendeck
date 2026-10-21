@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const BUCKETS: usize = 2000;
@@ -88,6 +89,39 @@ async fn analyze_bytes(bytes: Vec<u8>) -> Result<AnalysisPayload, String> {
 }
 
 #[tauri::command]
+async fn analyze_bytes_raw(request: Request<'_>) -> Result<AnalysisPayload, String> {
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        InvokeBody::Json(_) => return Err("expected raw WAV bytes".into()),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let (samples, sample_rate) =
+            opendeck_core::read_wav_mono(&bytes).map_err(|error| error.to_string())?;
+        Ok(analyse(samples, sample_rate))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn media_fetch_raw(url: String) -> Result<Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let response = ureq::get(&url)
+            .set("User-Agent", "OpenDeck/0.1 (open source DJ app)")
+            .call()
+            .map_err(|error| error.to_string())?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("cannot read response: {error}"))?;
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn media_fetch(url: String) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let response = ureq::get(&url)
@@ -120,6 +154,30 @@ async fn recording_save(name: String, bytes: Vec<u8>) -> Result<serde_json::Valu
         let chosen = rfd::FileDialog::new()
             .set_title("Save OpenDeck mix")
             .set_file_name(&name)
+            .save_file();
+        match chosen {
+            Some(path) => {
+                fs::write(&path, &bytes)
+                    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+                Ok(serde_json::json!({ "ok": true, "path": path.display().to_string() }))
+            }
+            None => Ok(serde_json::json!({ "ok": false })),
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn recording_save_raw(request: Request<'_>) -> Result<serde_json::Value, String> {
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        InvokeBody::Json(_) => return Err("expected raw recording bytes".into()),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let chosen = rfd::FileDialog::new()
+            .set_title("Save OpenDeck mix")
+            .set_file_name("opendeck-mix.webm")
             .save_file();
         match chosen {
             Some(path) => {
@@ -667,6 +725,27 @@ fn rtmp_chunk(state: tauri::State<'_, RtmpState>, chunk: Vec<u8>) -> Result<serd
 }
 
 #[tauri::command]
+fn rtmp_chunk_raw(
+    state: tauri::State<'_, RtmpState>,
+    request: Request<'_>,
+) -> Result<serde_json::Value, String> {
+    let chunk = match request.body() {
+        InvokeBody::Raw(bytes) => bytes,
+        InvokeBody::Json(_) => return Err("expected raw RTMP bytes".into()),
+    };
+    let mut slot = state.0.lock().map_err(|_| "RTMP state is locked")?;
+    if let Some(child) = slot.as_mut() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            if stdin.write_all(chunk).is_ok() {
+                let _ = stdin.flush();
+                return Ok(serde_json::json!({ "ok": true }));
+            }
+        }
+    }
+    Ok(serde_json::json!({ "ok": false }))
+}
+
+#[tauri::command]
 fn rtmp_stop(state: tauri::State<'_, RtmpState>) -> Result<serde_json::Value, String> {
     let mut slot = state.0.lock().map_err(|_| "RTMP state is locked")?;
     if let Some(mut child) = slot.take() {
@@ -723,8 +802,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             analyze_file,
             analyze_bytes,
+            analyze_bytes_raw,
             media_fetch,
+            media_fetch_raw,
             recording_save,
+            recording_save_raw,
             streaming_status,
             streaming_login,
             streaming_open,
@@ -733,6 +815,7 @@ fn main() {
             rtmp_available,
             rtmp_start,
             rtmp_chunk,
+            rtmp_chunk_raw,
             rtmp_stop
         ])
         .run(tauri::generate_context!())

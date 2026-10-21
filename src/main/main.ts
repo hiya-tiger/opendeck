@@ -36,7 +36,7 @@ const createWindow = (): void => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      backgroundThrottling: false,
+      backgroundThrottling: true,
     },
   });
   mainWindow.loadFile(path.join(root(), "renderer", "index.html"));

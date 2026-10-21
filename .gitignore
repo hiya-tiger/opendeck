@@ -3,5 +3,6 @@ dist/
 rust/target/
 renderer/app.js
 renderer/dvs.js
+renderer/analysis-worker.js
 *.log
 .DS_Store

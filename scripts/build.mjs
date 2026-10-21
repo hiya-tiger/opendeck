@@ -34,6 +34,7 @@ await build({
   bundle: true,
   format: "iife",
   target: "chrome120",
+  minify: true,
   loader: { ".ts": "ts" },
 });
 
@@ -43,8 +44,20 @@ await build({
   bundle: true,
   format: "iife",
   target: "chrome120",
+  minify: true,
 });
 
-console.log("built dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js");
+await build({
+  entryPoints: [`${root}src/renderer/engine/analysis-worker.ts`],
+  outfile: `${root}renderer/analysis-worker.js`,
+  bundle: true,
+  format: "iife",
+  target: "chrome120",
+  minify: true,
+});
+
+console.log(
+  "built dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js",
+);
 
 

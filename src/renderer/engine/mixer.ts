@@ -31,6 +31,7 @@ export class Mixer {
   readonly streamDest: MediaStreamAudioDestinationNode;
   readonly masterAnalyser: AnalyserNode;
   readonly decks: Partial<Record<DeckId, Deck>> = {};
+  private readonly levelData = new Uint8Array(256);
 
   private auxGain: GainNode;
   private auxSource: MediaStreamAudioSourceNode | null = null;
@@ -118,7 +119,7 @@ export class Mixer {
   }
 
   level(): number {
-    const data = new Uint8Array(this.masterAnalyser.fftSize);
+    const data = this.levelData;
     this.masterAnalyser.getByteTimeDomainData(data);
     let sum = 0;
     for (let i = 0; i < data.length; i += 1) {

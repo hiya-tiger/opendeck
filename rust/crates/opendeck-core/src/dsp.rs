@@ -52,13 +52,32 @@ pub fn fft_in_place(re: &mut [f32], im: &mut [f32]) {
     }
 }
 
+pub fn magnitudes_into(
+    frame: &[f32],
+    window: &[f32],
+    re: &mut [f32],
+    im: &mut [f32],
+    out: &mut [f32],
+) {
+    let n = frame.len().min(window.len()).min(re.len()).min(im.len());
+    let half = n / 2;
+    for i in 0..n {
+        re[i] = frame[i] * window[i];
+        im[i] = 0.0;
+    }
+    fft_in_place(&mut re[..n], &mut im[..n]);
+    for i in 0..half.min(out.len()) {
+        out[i] = (re[i] * re[i] + im[i] * im[i]).sqrt();
+    }
+}
+
 pub fn magnitudes(frame: &[f32], window: &[f32]) -> Vec<f32> {
     let n = frame.len().min(window.len());
-    let mut re: Vec<f32> = (0..n).map(|i| frame[i] * window[i]).collect();
+    let mut re = vec![0.0f32; n];
     let mut im = vec![0.0f32; n];
-    fft_in_place(&mut re, &mut im);
-    let half = n / 2;
-    (0..half).map(|i| (re[i] * re[i] + im[i] * im[i]).sqrt()).collect()
+    let mut out = vec![0.0f32; n / 2];
+    magnitudes_into(frame, window, &mut re, &mut im, &mut out);
+    out
 }
 
 pub fn rms(samples: &[f32]) -> f32 {

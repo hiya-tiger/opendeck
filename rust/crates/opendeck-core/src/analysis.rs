@@ -1,4 +1,4 @@
-use crate::dsp::{hann, magnitudes, rms};
+use crate::dsp::{hann, magnitudes, magnitudes_into, rms};
 
 #[derive(Clone, Debug, Default)]
 pub struct BandPeaks {
@@ -114,24 +114,35 @@ pub fn spectral_flux(samples: &[f32], window: usize) -> (Vec<f32>, f32) {
     }
     let hop = window / 2;
     let hann_window = hann(window);
+    let half = window / 2;
+    let mut re = vec![0.0f32; window];
+    let mut im = vec![0.0f32; window];
+    let mut mag = vec![0.0f32; half];
+    let mut previous = vec![0.0f32; half];
+    let mut has_previous = false;
     let mut flux = Vec::new();
-    let mut previous: Vec<f32> = Vec::new();
     let mut cursor = 0usize;
     while cursor + window <= samples.len() {
-        let mag = magnitudes(&samples[cursor..cursor + window], &hann_window);
-        if previous.is_empty() {
-            previous = mag;
-        } else {
+        magnitudes_into(
+            &samples[cursor..cursor + window],
+            &hann_window,
+            &mut re,
+            &mut im,
+            &mut mag,
+        );
+        if has_previous {
             let mut sum = 0.0f32;
-            for i in 0..mag.len().min(previous.len()) {
+            for i in 0..half {
                 let diff = mag[i] - previous[i];
                 if diff > 0.0 {
                     sum += diff;
                 }
             }
             flux.push(sum);
-            previous = mag;
+        } else {
+            has_previous = true;
         }
+        previous.copy_from_slice(&mag);
         cursor += hop;
     }
     let peak = flux.iter().cloned().fold(0.0f32, f32::max);

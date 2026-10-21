@@ -25,7 +25,13 @@ export interface Track {
   crate: string;
 }
 
+export const AUDIO_ACCEPT =
+  "audio/*,.mp3,.wav,.ogg,.flac,.m4a,.aac,.aif,.aiff,.opus,.webm";
 const AUDIO_RE = /\.(mp3|wav|ogg|flac|m4a|aac|aiff?|opus|webm)$/i;
+
+export function isAudioFile(name: string): boolean {
+  return AUDIO_RE.test(name);
+}
 
 export function trackFromFile(file: File): Track {
   return {
@@ -82,11 +88,23 @@ interface LibraryElements {
   onQueue: (track: Track) => void;
 }
 
+interface LibraryRow {
+  row: HTMLTableRowElement;
+  num: HTMLTableCellElement;
+  title: HTMLTableCellElement;
+  bpm: HTMLTableCellElement;
+  key: HTMLTableCellElement;
+  length: HTMLTableCellElement;
+  actions: HTMLTableCellElement;
+  buttons: HTMLButtonElement[];
+}
+
 export class Library {
   tracks: Track[] = [];
   filter = "";
   crateName = "";
   private elements: LibraryElements;
+  private rows = new Map<string, LibraryRow>();
 
   constructor(elements: LibraryElements) {
     this.elements = elements;
@@ -175,70 +193,86 @@ export class Library {
     );
   }
 
-  render(): void {
-    const visible = this.visible();
-    const frag = document.createDocumentFragment();
-
-    visible.forEach((track) => {
-      const row = document.createElement("tr");
-      if (track.missing) row.className = "missing";
-
-      const num = document.createElement("td");
-      num.className = "num";
-      num.textContent = String(this.tracks.indexOf(track) + 1);
-      row.append(num);
-
-      const title = document.createElement("td");
-      title.className = "title-cell";
-      title.textContent = track.name;
-      title.title = track.path || track.name;
-      row.append(title);
-
-      const bpm = document.createElement("td");
-      bpm.className = "mono";
-      bpm.textContent = track.bpm ? track.bpm.toFixed(1) : "--";
-      row.append(bpm);
-
-      const key = document.createElement("td");
-      key.className = "mono";
-      key.textContent = track.key === "--" ? "--" : `${track.camelot} ${track.key}`;
-      row.append(key);
-
-      const len = document.createElement("td");
-      len.className = "mono";
-      len.textContent = track.duration ? formatTime(track.duration) : "--:--";
-      row.append(len);
-
-      const actions = document.createElement("td");
-      actions.className = "load-btns";
-      for (const deckId of ["A", "B"] as const) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "mini";
-        button.textContent = deckId;
-        button.title = track.missing ? "File not linked: link the music folder first" : `Load into deck ${deckId}`;
-        button.disabled = Boolean(track.missing) || (!track.file && !track.url);
-        button.addEventListener("click", () => {
-          if (!track.missing) this.elements.onLoad(track, deckId);
-        });
-        actions.append(button);
-      }
-      const queueButton = document.createElement("button");
-      queueButton.type = "button";
-      queueButton.className = "mini";
-      queueButton.textContent = "+Q";
-      queueButton.title = "Add to stream queue";
-      queueButton.addEventListener("click", () => this.elements.onQueue(track));
-      actions.append(queueButton);
-      row.append(actions);
-
-      row.addEventListener("dblclick", () => {
-        if (!track.missing) this.elements.onLoad(track, "A");
+  private createRow(track: Track): LibraryRow {
+    const row = document.createElement("tr");
+    const num = document.createElement("td");
+    num.className = "num";
+    const title = document.createElement("td");
+    title.className = "title-cell";
+    const bpm = document.createElement("td");
+    bpm.className = "mono";
+    const key = document.createElement("td");
+    key.className = "mono";
+    const length = document.createElement("td");
+    length.className = "mono";
+    const actions = document.createElement("td");
+    actions.className = "load-btns";
+    const buttons: HTMLButtonElement[] = [];
+    for (const deckId of ["A", "B"] as const) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mini";
+      button.textContent = deckId;
+      button.addEventListener("click", () => {
+        if (!track.missing) this.elements.onLoad(track, deckId);
       });
-      frag.append(row);
+      buttons.push(button);
+      actions.append(button);
+    }
+    const queueButton = document.createElement("button");
+    queueButton.type = "button";
+    queueButton.className = "mini";
+    queueButton.textContent = "+Q";
+    queueButton.title = "Add to stream queue";
+    queueButton.addEventListener("click", () => this.elements.onQueue(track));
+    actions.append(queueButton);
+    row.addEventListener("dblclick", () => {
+      if (!track.missing) this.elements.onLoad(track, "A");
     });
+    row.append(num, title, bpm, key, length, actions);
+    return { row, num, title, bpm, key, length, actions, buttons };
+  }
 
-    this.elements.listEl.replaceChildren(frag);
+  private updateRow(entry: LibraryRow, track: Track, position: number): void {
+    entry.row.className = track.missing ? "missing" : "";
+    entry.num.textContent = String(position);
+    entry.title.textContent = track.name;
+    entry.title.title = track.path || track.name;
+    entry.bpm.textContent = track.bpm ? track.bpm.toFixed(1) : "--";
+    entry.key.textContent = track.key === "--" ? "--" : `${track.camelot} ${track.key}`;
+    entry.length.textContent = track.duration ? formatTime(track.duration) : "--:--";
+    for (const [index, button] of entry.buttons.entries()) {
+      const deckId = index === 0 ? "A" : "B";
+      button.title = track.missing ? "File not linked: link the music folder first" : `Load into deck ${deckId}`;
+      button.disabled = Boolean(track.missing) || (!track.file && !track.url);
+    }
+  }
+
+  render(): void {
+    const positions = new Map<string, number>();
+    this.tracks.forEach((track, index) => positions.set(track.id, index + 1));
+
+    const visible = this.visible();
+    const visibleIds = new Set(visible.map((track) => track.id));
+    for (const [id, entry] of this.rows) {
+      if (!visibleIds.has(id)) {
+        entry.row.remove();
+        this.rows.delete(id);
+      }
+    }
+
+    let cursor = this.elements.listEl.firstElementChild;
+    for (const track of visible) {
+      let entry = this.rows.get(track.id);
+      if (!entry) {
+        entry = this.createRow(track);
+        this.rows.set(track.id, entry);
+      }
+      this.updateRow(entry, track, positions.get(track.id) ?? 0);
+      if (entry.row !== cursor) this.elements.listEl.insertBefore(entry.row, cursor);
+      else cursor = cursor.nextElementSibling;
+    }
+
     const parts = [`${this.tracks.length} track${this.tracks.length === 1 ? "" : "s"}`];
     if (this.crateName) parts.push(this.crateName);
     if (this.missingCount) parts.push(`${this.missingCount} unlinked`);

@@ -82,7 +82,6 @@ export class Deck {
   private fxChain: FxChain;
   private analyser: AnalyserNode;
   private scratch: ScratchVoice;
-  private scratchBuffer: AudioBuffer | null = null;
   private scratchToken = 0;
   private scratching = false;
 
@@ -91,7 +90,10 @@ export class Deck {
   loopEnd = 0;
   loopBeats = 4;
   loopActive = false;
-  hotCues: (HotCue | null)[] = new Array(8).fill(null);
+  private cueList: (HotCue | null)[] = new Array(8).fill(null);
+  private cueVersion = 0;
+  private readonly levelData = new Uint8Array(256);
+  private stateCache: DeckState | null = null;
   private rate = 1;
   private tempoPercent = 0;
   private keylock = true;
@@ -210,6 +212,19 @@ export class Deck {
     this.el.addEventListener("play", () => this.emit());
     this.el.addEventListener("pause", () => this.emit());
     this.setFx("off");
+  }
+
+  get hotCues(): (HotCue | null)[] {
+    return this.cueList;
+  }
+
+  set hotCues(value: (HotCue | null)[]) {
+    this.cueList = value;
+    this.cueVersion += 1;
+  }
+
+  get hotCueVersion(): number {
+    return this.cueVersion;
   }
 
   private buildFx(): FxChain {
@@ -384,10 +399,13 @@ export class Deck {
     for (let channel = 0; channel < 2; channel += 1) {
       const data = buffer.getChannelData(channel);
       let seed = channel === 0 ? 1234 : 5678;
+      const step = Math.pow(0.015, decay / length);
+      let envelope = 1;
       for (let i = 0; i < length; i += 1) {
         seed = (seed * 1103515245 + 12345) & 0x7fffffff;
         const noise = (seed / 0x7fffffff) * 2 - 1;
-        data[i] = noise * Math.pow(1 - i / length, decay);
+        data[i] = noise * envelope;
+        envelope *= step;
       }
     }
     return buffer;
@@ -400,11 +418,10 @@ export class Deck {
       const data = await response.arrayBuffer();
       const buffer = await this.ctx.decodeAudioData(data);
       if (token !== this.scratchToken) return;
-      this.scratchBuffer = buffer;
       this.scratch.setBuffer(buffer);
       if (this.scratching) void this.scratch.start(this.currentTime);
     } catch {
-      if (token === this.scratchToken) this.scratchBuffer = null;
+      if (token === this.scratchToken) this.scratch.clear();
     }
   }
 
@@ -412,7 +429,7 @@ export class Deck {
     this.pause();
     this.scratch.stop();
     this.scratching = false;
-    this.scratchBuffer = null;
+    this.scratch.clear();
     this.scratchToken += 1;
     const token = this.scratchToken;
     const url = typeof source === "string" ? source : URL.createObjectURL(source);
@@ -455,7 +472,11 @@ export class Deck {
   }
 
   get scratchReady(): boolean {
-    return Boolean(this.scratchBuffer);
+    return this.scratch.hasBuffer;
+  }
+
+  get scratchingActive(): boolean {
+    return this.scratching;
   }
 
   beginScratch(): void {
@@ -492,7 +513,7 @@ export class Deck {
   }
 
   get level(): number {
-    const data = new Uint8Array(this.analyser.fftSize);
+    const data = this.levelData;
     this.analyser.getByteTimeDomainData(data);
     let sum = 0;
     for (let i = 0; i < data.length; i += 1) {
@@ -681,12 +702,14 @@ export class Deck {
     if (index < 0 || index >= 8) return;
     const at = time ?? this.currentTime;
     const snapped = this.quantize && this.info.bpm ? snapToBeat(at, this.info.bpm) : at;
-    this.hotCues[index] = { time: Math.max(0, Math.min(snapped, this.duration)), color: HOT_CUE_COLORS[index] };
+    this.cueList[index] = { time: Math.max(0, Math.min(snapped, this.duration)), color: HOT_CUE_COLORS[index] };
+    this.cueVersion += 1;
     this.emit();
   }
 
   clearHotCue(index: number): void {
-    this.hotCues[index] = null;
+    this.cueList[index] = null;
+    this.cueVersion += 1;
     this.emit();
   }
 
@@ -767,24 +790,43 @@ export class Deck {
   }
 
   state(): DeckState {
-    return {
-      playing: this.playing,
-      currentTime: this.currentTime,
-      duration: this.duration,
-      rate: this.rate,
-      tempoPercent: this.tempoPercent,
-      bpm: this.info.bpm,
-      loopActive: this.loopActive,
-      loopStart: this.loopStart,
-      loopEnd: this.loopEnd,
-      loopBeats: this.loopBeats,
-      cue: this.cuePoint,
-      hotCues: [...this.hotCues],
-      fx: this.fxType,
-      fxWet: this.fxWet,
-      keylock: this.keylock,
-      title: this.info.title,
-    };
+    const state =
+      this.stateCache ??
+      (this.stateCache = {
+        playing: false,
+        currentTime: 0,
+        duration: 0,
+        rate: 1,
+        tempoPercent: 0,
+        bpm: 0,
+        loopActive: false,
+        loopStart: 0,
+        loopEnd: 0,
+        loopBeats: 4,
+        cue: 0,
+        hotCues: this.cueList,
+        fx: "off",
+        fxWet: 0,
+        keylock: true,
+        title: "",
+      });
+    state.playing = this.playing;
+    state.currentTime = this.currentTime;
+    state.duration = this.duration;
+    state.rate = this.rate;
+    state.tempoPercent = this.tempoPercent;
+    state.bpm = this.info.bpm;
+    state.loopActive = this.loopActive;
+    state.loopStart = this.loopStart;
+    state.loopEnd = this.loopEnd;
+    state.loopBeats = this.loopBeats;
+    state.cue = this.cuePoint;
+    state.hotCues = this.cueList;
+    state.fx = this.fxType;
+    state.fxWet = this.fxWet;
+    state.keylock = this.keylock;
+    state.title = this.info.title;
+    return state;
   }
 
   private emit(): void {

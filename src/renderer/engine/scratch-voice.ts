@@ -22,6 +22,10 @@ class OpenDeckScratchProcessor extends AudioWorkletProcessor {
       } else if (data.type === "stop") {
         this.active = false;
         this.rate = 0;
+      } else if (data.type === "clear") {
+        this.active = false;
+        this.left = null;
+        this.right = null;
       }
     };
   }
@@ -72,7 +76,9 @@ export class ScratchVoice {
   private readonly gain: GainNode;
   private node: AudioWorkletNode | null = null;
   private ready: Promise<void> | null = null;
-  private buffer: AudioBuffer | null = null;
+  private left: Float32Array | null = null;
+  private right: Float32Array | null = null;
+  private loaded = false;
   private active = false;
   private pendingRate = 0;
 
@@ -84,19 +90,34 @@ export class ScratchVoice {
   }
 
   get hasBuffer(): boolean {
-    return Boolean(this.buffer);
+    return this.loaded;
   }
 
   setBuffer(buffer: AudioBuffer): void {
-    this.buffer = buffer;
-    if (this.node) {
-      this.node.port.postMessage({
-        type: "buffer",
-        left: buffer.getChannelData(0),
-        right: buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : buffer.getChannelData(0),
-        position: 0,
-      });
-    }
+    const left = buffer.getChannelData(0).slice();
+    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1).slice() : left.slice();
+    this.left = left;
+    this.right = right;
+    this.loaded = true;
+    this.sendBuffer(0);
+  }
+
+  private sendBuffer(position: number): void {
+    if (!this.node || !this.left || !this.right) return;
+    this.node.port.postMessage(
+      { type: "buffer", left: this.left, right: this.right, position },
+      [this.left.buffer, this.right.buffer],
+    );
+    this.left = null;
+    this.right = null;
+  }
+
+  clear(): void {
+    this.stop();
+    this.left = null;
+    this.right = null;
+    this.loaded = false;
+    this.node?.port.postMessage({ type: "clear" });
   }
 
   private prepare(): Promise<void> {
@@ -116,23 +137,13 @@ export class ScratchVoice {
       });
       node.connect(this.gain);
       this.node = node;
-      if (this.buffer) {
-        node.port.postMessage({
-          type: "buffer",
-          left: this.buffer.getChannelData(0),
-          right:
-            this.buffer.numberOfChannels > 1
-              ? this.buffer.getChannelData(1)
-              : this.buffer.getChannelData(0),
-          position: 0,
-        });
-      }
+      this.sendBuffer(0);
     })();
     return this.ready;
   }
 
   async start(position: number): Promise<void> {
-    if (!this.buffer) return;
+    if (!this.loaded) return;
     try {
       await this.prepare();
     } catch {

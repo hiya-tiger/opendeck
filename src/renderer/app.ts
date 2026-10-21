@@ -1,12 +1,12 @@
 import { Mixer, type CrossfaderCurve } from "./engine/mixer.ts";
 import { Deck, HOT_CUE_COLORS, type DeckState, type DeckId } from "./engine/deck.ts";
-import { analyzeBuffer, formatTime, formatClock } from "./engine/analyze.ts";
+import { analyzeBuffer, formatTime, formatClock, type AnalysisResult } from "./engine/analyze.ts";
 import { formatBeatPosition, LOOP_BEATS } from "./engine/beatgrid.ts";
 import { syncDeck } from "./engine/sync.ts";
 import { FX_DEFS, DIVISIONS, fxDefault, type Division, type FxType } from "./engine/fx.ts";
 import { STEMS, type StemId } from "./engine/stems.ts";
 import { Waveform, ZoomWaveform } from "./media/waveform.ts";
-import { Library, type Track } from "./media/library.ts";
+import { Library, isAudioFile, type Track } from "./media/library.ts";
 import { parseCrate, isSerato } from "./media/serato.ts";
 import { readMediaInfo, type Artwork } from "./media/artwork.ts";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
@@ -85,11 +85,52 @@ const meta: Partial<Record<DeckId, Track>> = {};
 const ui: Partial<Record<DeckId, Record<string, HTMLElement>>> = {};
 const synced: Record<DeckId, boolean> = { A: false, B: false };
 const states: Partial<Record<DeckId, DeckState>> = {};
-let lastPadSignature: Partial<Record<DeckId, string>> = {};
+let lastPadVersion: Partial<Record<DeckId, number>> = {};
+let rafPending = false;
 
 const analysisQueue: Track[] = [];
 let analysing = false;
+let analysisWorker: Worker | null = null;
+let analysisRequestId = 0;
+const analysisRequests = new Map<
+  number,
+  { resolve: (result: AnalysisResult) => void; reject: (error: Error) => void }
+>();
 const desktop = window.opendeckDesktop;
+
+function workerAnalysis(buffer: AudioBuffer): Promise<AnalysisResult> {
+  if (!analysisWorker) {
+    analysisWorker = new Worker("analysis-worker.js");
+    analysisWorker.addEventListener("message", (event: MessageEvent<{ id: number; result: AnalysisResult }>) => {
+      const request = analysisRequests.get(event.data.id);
+      request?.resolve(event.data.result);
+      analysisRequests.delete(event.data.id);
+    });
+    analysisWorker.addEventListener("error", () => {
+      for (const request of analysisRequests.values()) request.reject(new Error("Analysis worker failed"));
+      analysisRequests.clear();
+      analysisWorker?.terminate();
+      analysisWorker = null;
+    });
+  }
+  const id = (analysisRequestId += 1);
+  const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) =>
+    buffer.getChannelData(channel).slice(),
+  );
+  return new Promise((resolve, reject) => {
+    analysisRequests.set(id, { resolve, reject });
+    analysisWorker!.postMessage(
+      {
+        id,
+        sampleRate: buffer.sampleRate,
+        length: buffer.length,
+        duration: buffer.duration,
+        channels,
+      },
+      channels.map((channel) => channel.buffer),
+    );
+  });
+}
 
 function toast(message: string, ms = 3200): void {
   const el = $("toast");
@@ -465,6 +506,7 @@ function buildDeck(deckId: DeckId): void {
 
   deck.onUpdate = (state) => {
     states[deckId] = state;
+    requestFrame();
   };
 
   node.addEventListener("dragover", (event) => event.preventDefault());
@@ -667,7 +709,12 @@ async function analyseTrack(track: Track): Promise<void> {
   } else {
     if (!data) return;
     const buffer = await mixer.ctx.decodeAudioData(data);
-    const result = analyzeBuffer(buffer, 2000);
+    let result: AnalysisResult;
+    try {
+      result = await workerAnalysis(buffer);
+    } catch {
+      result = analyzeBuffer(buffer, 2000);
+    }
     track.bpm = result.bpm;
     track.beatPhase = result.beatPhase;
     track.key = result.key.key;
@@ -812,9 +859,9 @@ function loadCues(deckId: DeckId, trackId: string): void {
 function updatePads(deckId: DeckId, force = false): void {
   const deck = decks[deckId];
   const refs = ui[deckId]!;
-  const signature = deck.hotCues.map((cue) => (cue ? cue.time.toFixed(2) : "-")).join("|");
-  if (!force && lastPadSignature[deckId] === signature) return;
-  lastPadSignature[deckId] = signature;
+  const version = deck.hotCueVersion;
+  if (!force && lastPadVersion[deckId] === version) return;
+  lastPadVersion[deckId] = version;
   const pads = Array.from(refs.pads.querySelectorAll<HTMLButtonElement>(".pad"));
   pads.forEach((pad, index) => {
     const cue = deck.hotCues[index];
@@ -929,7 +976,7 @@ async function collectAudio(dir: FileSystemDirectoryHandle, depth: number): Prom
   for await (const entry of (dir as unknown as { values(): AsyncIterable<FileSystemHandle> }).values()) {
     if (entry.kind === "file") {
       const file = await (entry as FileSystemFileHandle).getFile();
-      if (/\.(mp3|wav|ogg|flac|m4a|aac|aiff?|opus)$/i.test(file.name)) found.push(file);
+      if (isAudioFile(file.name)) found.push(file);
     } else if (entry.kind === "directory" && depth > 0) {
       found.push(...(await collectAudio(entry as FileSystemDirectoryHandle, depth - 1)));
     }
@@ -1267,10 +1314,12 @@ async function toggleRecording(): Promise<void> {
     await mixer.resume();
     mixer.startRecording();
     setRecordUI(true);
+    requestFrame();
     return;
   }
   const result = await mixer.stopRecording();
   setRecordUI(false);
+  requestFrame();
   $("recTime").textContent = "00:00";
   $("broadcastRecTime").textContent = "00:00";
   if (!result) return;
@@ -1434,11 +1483,13 @@ function drawMeter(canvas: HTMLCanvasElement, level: number, accent = "brand"): 
   ctx.fillRect(0, 0, w, h);
   const scaled = Math.min(1, level * 2.6);
   const bars = 20;
+  let style = "";
+  ctx.beginPath();
   for (let i = 0; i < bars; i += 1) {
     const lit = i / bars < scaled;
     const y = h - ((i + 1) * h) / bars;
     const ratio = i / bars;
-    ctx.fillStyle = lit
+    const next = lit
       ? ratio > 0.88
         ? "#e8567a"
         : ratio > 0.7
@@ -1447,13 +1498,22 @@ function drawMeter(canvas: HTMLCanvasElement, level: number, accent = "brand"): 
             ? "#8aa2ff"
             : "#4d6bfe"
       : "#1c2637";
-    ctx.fillRect(2, y + 2, w - 4, h / bars - 3);
+    if (next !== style) {
+      if (style) ctx.fill();
+      ctx.beginPath();
+      ctx.fillStyle = next;
+      style = next;
+    }
+    ctx.rect(2, y + 2, w - 4, h / bars - 3);
   }
+  ctx.fill();
 }
 
 /* ------------------------------------------------------------- main loop */
 
-let clockTick = 0;
+function updateClock(): void {
+  $("clock").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 function renderDeckFrame(deckId: DeckId): void {
   const state = states[deckId];
@@ -1482,6 +1542,7 @@ function renderDeckFrame(deckId: DeckId): void {
 }
 
 function frame(): void {
+  rafPending = true;
   decks.A.tick();
   decks.B.tick();
   renderDeckFrame("A");
@@ -1494,16 +1555,24 @@ function frame(): void {
   const bpm = playing ? decks[playing].info.bpm : decks.A.info.bpm || decks.B.info.bpm;
   $("masterBpmChip").textContent = bpm ? `${bpm.toFixed(1)} BPM` : "-- BPM";
 
-  clockTick += 1;
-  if (clockTick % 20 === 0) {
-    $("clock").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-
   if (mixer.recording) {
     const seconds = mixer.recordedSeconds;
     $("recTime").textContent = formatClock(seconds).slice(3);
     $("broadcastRecTime").textContent = formatClock(seconds);
   }
+  const active =
+    decks.A.playing ||
+    decks.B.playing ||
+    decks.A.scratchingActive ||
+    decks.B.scratchingActive ||
+    mixer.recording;
+  rafPending = false;
+  if (active) requestFrame();
+}
+
+function requestFrame(): void {
+  if (rafPending) return;
+  rafPending = true;
   requestAnimationFrame(frame);
 }
 
@@ -1889,7 +1958,9 @@ document.addEventListener("keydown", keyHandler);
 renderProviders();
 renderStreamHead();
 renderQueue();
-requestAnimationFrame(frame);
+updateClock();
+window.setInterval(updateClock, 30_000);
+requestFrame();
 
 if (desktop) {
   for (const provider of PROVIDERS) void refreshLogin(provider.id);
