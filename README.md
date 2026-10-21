@@ -23,7 +23,7 @@ Windows and Linux (Flatpak manifest included).
 - Streaming tab: provider login windows, YouTube Music search inside the signed-in session, play queue. "A"/"B" buttons on each result and queue row load the track into a mini-player layered over that deck using YouTube's own embedded player. Iframe audio cannot be fed into Web Audio, so the stream is mixed with system capture (AUX): the deck faders and EQ act on the captured signal, not on the stream directly. "Open" still opens the full service page. Spotify, Apple Music, TIDAL, Beatport, Beatsource, SoundCloud and Deezer are registered as service windows; their developer-app requirements, OAuth flows, DRM constraints and current status are documented in `docs/streaming-setup.md`.
 - DRM: the Tauri/WebView2 build reports Widevine and PlayReady support, so DRM services can later be embedded. Standard Electron 33 ships neither CDM, so DRM services stay in their own windows there. YouTube Music embeds do not need Widevine.
 - Recording to WebM/Opus via a native save dialog.
-- Broadcast: WHIP (WebRTC) out of the box; RTMP via a bundled FFmpeg binary, so no separate install is needed (Windows x64; other platforms fall back to `ffmpeg` on `PATH`).
+- Broadcast: WHIP (WebRTC) out of the box; RTMP through FFmpeg, which must be installed separately and available on `PATH`. The installer does not include FFmpeg, and OpenDeck shows install guidance when it is missing.
 
 ## DVS
 
@@ -76,7 +76,7 @@ The Tauri window embeds `renderer/` at compile time, so rebuild after changing a
 - `recording_save`: native save dialog for recorded mixes.
 - `streaming_login` / `streaming_open`: opens the provider in a separate persistent WebView2 window.
 - `streaming_status` / `streaming_search`: reads the shared WebView2 cookie store for login detection, and searches YouTube Music through its signed-in InnerTube API (SAPISIDHASH).
-- `rtmp_available` / `rtmp_start` / `rtmp_chunk` / `rtmp_stop`: pipe the recorded stream into the bundled FFmpeg binary (Tauri resource `ffmpeg/ffmpeg.exe`, Electron `dist/ffmpeg/ffmpeg.exe`), falling back to `ffmpeg` on `PATH`.
+- `rtmp_available` / `rtmp_start` / `rtmp_chunk` / `rtmp_stop`: pipe the recorded stream into `ffmpeg` from `PATH` (or `OPENDECK_FFMPEG` when set).
 
 Not ported yet: DVS input and system-audio loopback capture.
 
@@ -85,7 +85,7 @@ Not ported yet: DVS input and system-audio loopback capture.
 - In Electron, providers are opened in their own windows under persistent sessions (`persist:provider-<id>`). Login detection uses cookie hints; credentials never touch OpenDeck.
 - Search and queueing use the signed-in session. Playback happens in the provider player and is mixed through the Windows loopback capture (`setDisplayMediaRequestHandler` with `audio: "loopback"`), so nothing is downloaded or decrypted. DRM is not bypassed.
 - YouTube Music search parses `ytInitialData`; markup changes can break it.
-- WHIP needs a WebRTC endpoint. RTMP uses the bundled FFmpeg and falls back to `ffmpeg` on `PATH` if the bundled binary is missing.
+- WHIP needs a WebRTC endpoint. RTMP needs FFmpeg installed and on `PATH`; it is not bundled with the installer. Download it from <https://ffmpeg.org/download.html>, add its `bin` directory to `PATH`, and restart OpenDeck. Windows builds are also available from <https://www.gyan.dev/ffmpeg/builds/> or <https://github.com/BtbN/FFmpeg-Builds/releases>.
 
 ## Run
 
@@ -94,12 +94,11 @@ npm install
 npm start
 ```
 
-`npm start` builds the Electron bundles and opens the app. The FFmpeg binary is not stored in git (it is over GitHub's 100 MB limit); `npm run build` downloads the pinned LGPL build once, verifies its SHA-256, and places it in `vendor/ffmpeg/win32-x64/`. Run `npm run fetch:ffmpeg` before a Tauri build.
+`npm start` builds the Electron bundles and opens the app. FFmpeg is not bundled; install it and add it to `PATH` before using RTMP.
 
 ```
-npm test            # engine, streaming, timecode and DVS transport tests (node:test)
-npm run build       # dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, dist/ffmpeg
-npm run fetch:ffmpeg  # download and verify the bundled FFmpeg build
+npm test        # engine, streaming, timecode and DVS transport tests (node:test)
+npm run build   # dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js
 ```
 
 Tests generate timecode signals for every supported media, add noise and gain changes, run them through the real decoder in 480-sample blocks, and check lock, speed, absolute position, needle drops, stalls and reverse. Engine tests cover FFT, BPM/key analysis, beat grids, sync, FX maths, stem gains and the play queue.
@@ -121,7 +120,7 @@ Verified on Windows with the Tauri v2 shell (WebView2 155, Rust 1.99):
 - `analyze_file` on the 128 BPM demo: BPM 128.42, duration 20 s, 2000 peaks, 2000 points per band, key/Camelot returned.
 - `media_fetch` against a local HTTP server returned a real `Uint8Array` (audio/wav, 1,764,044 bytes).
 - `streaming_search` returned HTTP 200 and the page body.
-- `rtmp_available` returned true in both shells with no `ffmpeg` on `PATH`, resolving the bundled binary; Electron and Tauri were restarted without an install step.
+- `rtmp_available` returned false without FFmpeg on `PATH`, and the broadcast panel showed the install guidance instead of enabling RTMP.
 - Loading a WAV through the real UI pipeline used the Rust result (128.42 BPM in the library and deck header), rendered the band waveform and enabled the deck.
 - ID3v2 artwork: a generated APIC tag embedded in a test file was read into a blob URL, applied to both deck vinyls, and the spin animation reported `running` while playing and `paused` when stopped. The parser has 7 unit tests (v2.3, v2.4, front-cover preference, no tag, text frames, query building, iTunes response).
 - Artwork web fallback: a WAV named "Daft Punk - One More Time.wav" with no ID3 tag was searched on iTunes, the cover downloaded and decoded (`naturalWidth > 0`), and applied to the vinyl when loaded.
@@ -142,7 +141,7 @@ Not verified on this machine:
 
 - Live DVS input (no audio interface available).
 - SDK playback for Spotify, Apple Music and SoundCloud (needs credentials: Spotify Premium + client ID, Apple MusicKit developer token, SoundCloud client ID). TIDAL, Beatport and Beatsource have no public playback SDK, so they remain service windows; see `docs/streaming-setup.md`.
-- RTMP broadcast to a live ingest server (no server or stream key available); the bundled FFmpeg was only checked with `-version` and process startup.
+- RTMP broadcast to a live ingest server (no server or stream key available), and RTMP with FFmpeg installed. The installer intentionally excludes FFmpeg.
 - Native save dialog in the Tauri build (cannot be scripted headlessly).
 - System-audio loopback capture and DVS in the Tauri build, and therefore mixing the deck mini-player through AUX.
 - Flatpak build (no `flatpak-builder`).
@@ -174,14 +173,13 @@ src/preload/preload.ts       window.opendeckDesktop bridge
 rust/crates/opendeck-core/   Rust DSP, WAV reader and analysis
 rust/crates/opendeck-app/    Tauri commands, streaming windows, RTMP bridge
 renderer/                    HTML, CSS, built scripts, tauri-bridge.js
-vendor/ffmpeg/               bundled FFmpeg binary, license and update notes
 test/                        node:test suites
 packaging/                   Flatpak manifest and desktop files
 ```
 
 ## License
 
-MIT. The bundled FFmpeg executable is an LGPLv3 build run as a separate process; see `vendor/ffmpeg/README.md` and `vendor/ffmpeg/win32-x64/LICENSE.txt`.
+MIT. FFmpeg is not bundled or redistributed; install it separately under its own license.
 
 
 

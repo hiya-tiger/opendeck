@@ -24,13 +24,8 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all",
-    "resources": {
-      "../../../vendor/ffmpeg/win32-x64/ffmpeg.exe": "ffmpeg/ffmpeg.exe",
-      "../../../vendor/ffmpeg/win32-x64/LICENSE.txt": "ffmpeg/LICENSE.txt",
-      "../../../vendor/ffmpeg/README.md": "ffmpeg/README.md"
-    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,3 +34,4 @@
     ]
   }
 }
+

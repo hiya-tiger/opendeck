@@ -1347,7 +1347,7 @@ desktop?.rtmp.available().then((available) => {
   $("rtmpState").classList.toggle("live", available);
   $<HTMLButtonElement>("rtmpBtn").disabled = !available;
   if (!available) {
-    $("rtmpLog").textContent = "Bundled ffmpeg was not found. Reinstall OpenDeck or set OPENDECK_FFMPEG to an ffmpeg executable.";
+    $("rtmpLog").textContent = "RTMP needs FFmpeg. Install it, add ffmpeg to PATH, then restart OpenDeck.";
   }
 });
 

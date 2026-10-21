@@ -522,43 +522,18 @@ fn parse_yt_duration(text: &str) -> u64 {
 #[derive(Clone, Default)]
 struct RtmpState(Arc<Mutex<Option<Child>>>);
 
-#[cfg(windows)]
-const FFMPEG_BIN: &str = "ffmpeg.exe";
-#[cfg(not(windows))]
-const FFMPEG_BIN: &str = "ffmpeg";
-
-fn ffmpeg_path(app: &tauri::AppHandle) -> PathBuf {
+fn ffmpeg_path() -> PathBuf {
     if let Ok(explicit) = std::env::var("OPENDECK_FFMPEG") {
         let path = PathBuf::from(explicit);
         if path.is_file() {
             return path;
         }
     }
-    let mut candidates = Vec::new();
-    if let Ok(dir) = app.path().resource_dir() {
-        candidates.push(dir.join("ffmpeg").join(FFMPEG_BIN));
-        candidates.push(dir.join(FFMPEG_BIN));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(FFMPEG_BIN));
-            candidates.push(dir.join("ffmpeg").join(FFMPEG_BIN));
-        }
-    }
-    #[cfg(windows)]
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../vendor/ffmpeg/win32-x64")
-            .join(FFMPEG_BIN),
-    );
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
+    PathBuf::from("ffmpeg")
 }
 
-fn ffmpeg_command(app: &tauri::AppHandle) -> Command {
-    let mut command = Command::new(ffmpeg_path(app));
+fn ffmpeg_command() -> Command {
+    let mut command = Command::new(ffmpeg_path());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -568,8 +543,8 @@ fn ffmpeg_command(app: &tauri::AppHandle) -> Command {
 }
 
 #[tauri::command]
-fn rtmp_available(app: tauri::AppHandle) -> bool {
-    ffmpeg_command(&app)
+fn rtmp_available() -> bool {
+    ffmpeg_command()
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -600,7 +575,7 @@ fn rtmp_start(
     } else {
         format!("{}/{}", endpoint.trim_end_matches('/'), key)
     };
-    let mut child = ffmpeg_command(&app)
+    let mut child = ffmpeg_command()
         .args([
             "-hide_banner",
             "-loglevel",
@@ -763,4 +738,5 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running OpenDeck");
 }
+
 

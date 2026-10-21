@@ -1,9 +1,7 @@
-node_modules/
+﻿node_modules/
 dist/
 rust/target/
 renderer/app.js
 renderer/dvs.js
-vendor/ffmpeg/win32-x64/ffmpeg.exe
-vendor/ffmpeg/win32-x64/*.zip
 *.log
 .DS_Store

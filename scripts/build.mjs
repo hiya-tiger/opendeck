@@ -1,5 +1,5 @@
 ﻿import { build } from "esbuild";
-import { copyFile, mkdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -45,15 +45,6 @@ await build({
   target: "chrome120",
 });
 
-if (process.platform === "win32") {
-  try {
-    await mkdir(`${out}/ffmpeg`, { recursive: true });
-    await copyFile(`${root}vendor/ffmpeg/win32-x64/ffmpeg.exe`, `${out}/ffmpeg/ffmpeg.exe`);
-    await copyFile(`${root}vendor/ffmpeg/win32-x64/LICENSE.txt`, `${out}/ffmpeg/LICENSE.txt`);
-  } catch (error) {
-    console.warn("ffmpeg was not copied:", error.message);
-  }
-}
+console.log("built dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js");
 
-console.log("built dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, ffmpeg");
 

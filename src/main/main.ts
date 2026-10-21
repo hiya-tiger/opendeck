@@ -1,23 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+﻿import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
-import { existsSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 
 const root = (): string => app.getAppPath();
 
-const binName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
-const platformDir = process.platform === "win32" ? "win32-x64" : `${process.platform}-x64`;
 
-const resolveFfmpeg = (): string => {
-  const explicit = process.env.OPENDECK_FFMPEG;
-  if (explicit && existsSync(explicit)) return explicit;
-  const candidates = [
-    path.join(process.resourcesPath ?? "", "ffmpeg", binName),
-    path.join(__dirname, "ffmpeg", binName),
-    path.join(app.getAppPath(), "vendor", "ffmpeg", platformDir, binName),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? "ffmpeg";
-};
 
 const ALLOWED_HOSTS = [
   "music.youtube.com",
@@ -193,7 +181,7 @@ ipcMain.handle("recording:save", async (_event, name: string, bytes: Uint8Array)
 ipcMain.handle("rtmp:available", async () => {
   return await new Promise<boolean>((resolve) => {
     try {
-      const probe = spawn(resolveFfmpeg(), ["-version"]);
+      const probe = spawn("ffmpeg", ["-version"]);
       probe.on("error", () => resolve(false));
       probe.on("exit", (code) => resolve(code === 0));
     } catch {
@@ -207,7 +195,7 @@ ipcMain.handle("rtmp:start", async (_event, endpoint: string, key: string) => {
   if (!/^rtmps?:\/\//.test(endpoint)) return { ok: false, detail: "endpoint must be rtmp:// or rtmps://" };
   rtmpKey = key;
   const url = key ? `${endpoint.replace(/\/$/, "")}/${key}` : endpoint;
-  const child = spawn(resolveFfmpeg(), [
+  const child = spawn("ffmpeg", [
     "-hide_banner",
     "-loglevel",
     "warning",
@@ -296,3 +284,4 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
   rtmp?.kill();
 });
+

@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "opendeck-desktop",
   "version": "0.1.0",
   "private": true,
@@ -7,8 +7,6 @@
   "license": "MIT",
   "main": "dist/main.cjs",
   "scripts": {
-    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
-    "prebuild": "node scripts/fetch-ffmpeg.mjs",
     "build": "node scripts/build.mjs",
     "start": "npm run build && electron .",
     "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts"
@@ -23,3 +21,4 @@
     "esbuild@0.24.2": true
   }
 }
+
