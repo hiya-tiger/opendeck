@@ -32,10 +32,9 @@ function fit(canvas: HTMLCanvasElement): Fit {
 const BG = "#0b111c";
 const CUE = "#f0a726";
 
-const LOW_HUE = 12;
-const MID_HUE = 138;
-const HIGH_HUE = 214;
-const RAD = Math.PI / 180;
+const LOW_RGB: [number, number, number] = [255, 92, 64];
+const MID_RGB: [number, number, number] = [64, 214, 128];
+const HIGH_RGB: [number, number, number] = [88, 156, 255];
 
 interface Column {
   color: string;
@@ -44,11 +43,11 @@ interface Column {
 
 class WaveColors {
   private cache: Column[] | null = null;
-  private peaks: Float32Array | null = null;
-  private bands: BandPeaks | null = null;
+  private signature = "";
 
   build(peaks: Float32Array, bands?: BandPeaks): Column[] {
-    if (this.cache && this.peaks === peaks && this.bands === (bands ?? null)) return this.cache;
+    const key = `${peaks.length}:${bands ? bands.low.length : 0}`;
+    if (this.cache && this.signature === key) return this.cache;
     const out: Column[] = new Array(peaks.length);
     for (let i = 0; i < peaks.length; i += 1) {
       if (!bands) {
@@ -58,25 +57,17 @@ class WaveColors {
       const low = bands.low[i] ?? 0;
       const mid = bands.mid[i] ?? 0;
       const high = bands.high[i] ?? 0;
-      const x =
-        Math.cos(LOW_HUE * RAD) * low +
-        Math.cos(MID_HUE * RAD) * mid +
-        Math.cos(HIGH_HUE * RAD) * high;
-      const y =
-        Math.sin(LOW_HUE * RAD) * low +
-        Math.sin(MID_HUE * RAD) * mid +
-        Math.sin(HIGH_HUE * RAD) * high;
-      let hue = Math.atan2(y, x) / RAD;
-      if (hue < 0) hue += 360;
-      const tint = Math.round(hue);
+      const total = low + mid + high || 1;
+      const r = (LOW_RGB[0] * low + MID_RGB[0] * mid + HIGH_RGB[0] * high) / total;
+      const g = (LOW_RGB[1] * low + MID_RGB[1] * mid + HIGH_RGB[1] * high) / total;
+      const b = (LOW_RGB[2] * low + MID_RGB[2] * mid + HIGH_RGB[2] * high) / total;
       out[i] = {
-        color: `hsl(${tint}, 78%, 62%)`,
-        dim: `hsl(${tint}, 64%, 24%)`,
+        color: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`,
+        dim: `rgb(${Math.round(r * 0.32)}, ${Math.round(g * 0.32)}, ${Math.round(b * 0.32)})`,
       };
     }
     this.cache = out;
-    this.peaks = peaks;
-    this.bands = bands ?? null;
+    this.signature = key;
     return out;
   }
 }
