@@ -4,6 +4,7 @@ import { readId3, readSeratoGeoB, writeSeratoGeoB } from "../src/renderer/media/
 import { readSeratoTagsFromFile } from "../src/renderer/media/serato-file.ts";
 import { beatgridTempo, firstSavedLoop } from "../src/renderer/media/serato-import.ts";
 import { buildSeratoExport } from "../src/renderer/media/serato-export.ts";
+import { detectRiffKind, readRiffId3, writeRiffId3 } from "../src/renderer/media/serato-riff.ts";
 import {
   decodeCrate,
   decodeDatabase,
@@ -39,6 +40,32 @@ const BEATGRID = "AQAAAAABP4jnpELOR64=";
 
 function fixture(text: string): Uint8Array {
   return base64Decode(text);
+}
+
+function riffChunk(id: string, payload: Uint8Array, little: boolean): Uint8Array {
+  const out = new Uint8Array(8 + payload.length + (payload.length & 1));
+  for (let i = 0; i < 4; i += 1) out[i] = id.charCodeAt(i);
+  new DataView(out.buffer).setUint32(4, payload.length, little);
+  out.set(payload, 8);
+  return out;
+}
+
+function riffContainer(kind: "wav" | "aiff", chunks: Uint8Array[]): Uint8Array {
+  const body = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(12 + body);
+  const magic = kind === "wav" ? "RIFF" : "FORM";
+  const form = kind === "wav" ? "WAVE" : "AIFF";
+  for (let i = 0; i < 4; i += 1) {
+    out[i] = magic.charCodeAt(i);
+    out[8 + i] = form.charCodeAt(i);
+  }
+  new DataView(out.buffer).setUint32(4, out.length - 8, kind === "wav");
+  let offset = 12;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }
 
 test("serato32 round-trips 24-bit values and matches Serato's layout", () => {
@@ -279,6 +306,31 @@ test("BeatGrid gives BPM and phase, saved loops give a valid range", () => {
     end: 8,
   });
   assert.equal(firstSavedLoop([{ index: 0, startMs: 8000, endMs: 4000, color: "#27AAE1", name: "", locked: false }]), null);
+});
+
+test("reads and replaces Serato tags in WAV and AIFF RIFF chunks", async () => {
+  const audio = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+  const markers = encodeMarkers2(decodeMarkers2(fixture(MARKERS2)));
+  const id3 = writeSeratoGeoB(id3v23([], audio), [{ description: "Serato Markers2", data: markers }]);
+  for (const kind of ["wav", "aiff"] as const) {
+    const little = kind === "wav";
+    const base = riffContainer(kind, [
+      riffChunk("fmt ", new Uint8Array(16), little),
+      riffChunk("data", audio, little),
+    ]);
+    const output = writeRiffId3(base, kind, id3);
+    assert.equal(detectRiffKind(output), kind);
+    assert.deepEqual(Array.from(readRiffId3(output)!), Array.from(id3));
+
+    const replaced = writeRiffId3(output, kind, id3);
+    assert.deepEqual(Array.from(replaced), Array.from(output));
+    assert.equal(new DataView(replaced.buffer).getUint32(4, little), replaced.length - 8);
+    assert.ok(Buffer.from(replaced).includes(Buffer.from(audio)));
+
+    const file = new File([output], `track.${kind}`, { type: kind === "wav" ? "audio/wav" : "audio/aiff" });
+    const tags = await readSeratoTagsFromFile(file);
+    assert.equal(tags?.markers?.cues[0]?.positionMs, 1066);
+  }
 });
 
 test("Serato export writes database, neworder and relative crate paths", () => {
