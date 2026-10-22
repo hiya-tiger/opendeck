@@ -16,8 +16,9 @@ following work is not done, in the order it should be picked up.
 
 ## 2. Serato export UI
 
-The library panel now downloads a zip with `database V2`, `neworder.pref` and
-each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
+The library panel writes `database V2`, `neworder.pref` and each crate into a
+chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
+`id3 ` writing are implemented.
 
 - Refuse the folder export while Serato is running. A timestamped backup is
   written, but there is no undo command yet.
@@ -40,8 +41,8 @@ each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
   local track to `PcmSource`, enabling it switches back to the media element.
 - The PCM path has no runtime audio smoke test on real hardware yet; the worklet
   source is covered by Node tests for playback, seek, pause and sample loops.
-- Serato cue import is MP3-only. The first saved loop and BeatGrid BPM/phase
-  are applied; remaining loops and per-beat detail are not.
+- Serato cue import covers MP3, WAV and AIFF. The first saved loop and
+  BeatGrid BPM/phase are applied; remaining loops and per-beat detail are not.
 - Folder export backs up existing files but has no undo command and does not
   detect a running Serato instance.
 - No in-app tag writing, no FLAC/MP4 tag writing, no SQLite column layout.
