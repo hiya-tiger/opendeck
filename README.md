@@ -27,7 +27,7 @@ Windows and Linux (Flatpak manifest included).
 - Fullscreen performance mode: F11 toggles fullscreen, the top bar hides itself and reappears when the pointer touches the top edge, and the mixer/layout expand up to 2200px on wide screens.
 - Library with search, Serato crate / database import, drag and drop, folder scan. Import MP3, WAV, FLAC, OGG/Opus, AIFF, M4A/AAC and WebM (Opus/Vorbis) audio; AAC and WebM are decoded and analysed through Web Audio, and WebM files are included in folder scans.
 - Streaming tab: provider login windows, YouTube Music search inside the signed-in session, play queue. "A"/"B" buttons on each result and queue row load the track into a mini-player layered over that deck using YouTube's own embedded player. Iframe audio cannot be fed into Web Audio, so the stream is mixed with system capture (AUX): the deck faders and EQ act on the captured signal, not on the stream directly. "Open" still opens the full service page. Spotify, Apple Music, TIDAL, Beatport, Beatsource, SoundCloud and Deezer are registered as service windows; their developer-app requirements, OAuth flows, DRM constraints and current status are documented in `docs/streaming-setup.md`.
-- DRM: the Tauri/WebView2 build reports Widevine and PlayReady support, so DRM services can later be embedded. Standard Electron 33 ships neither CDM, so DRM services stay in their own windows there. YouTube Music embeds do not need Widevine.
+- DRM: the Tauri/WebView2 build reports Widevine and PlayReady support, so DRM services can later be embedded. The Electron dev shell ships neither CDM, so DRM services stay in their own windows there. YouTube Music embeds do not need Widevine.
 - Recording to WebM/Opus via a native save dialog.
 - Broadcast: WHIP (WebRTC) out of the box; RTMP through FFmpeg, which must be installed separately and available on `PATH`. The installer does not include FFmpeg, and OpenDeck shows install guidance when it is missing.
 
@@ -121,8 +121,9 @@ Tests generate timecode signals for every supported media, add noise and gain ch
 
 ## Verification status
 
-Verified on Windows with Electron 33:
+Verified on Windows with Electron 44.8.0:
 
+- Electron 44.8.0 dev shell launches with the OpenDeck window and no startup errors.
 - `npm test`: 94/94 pass.
 - `npm run smoke:audio`: in a hidden Electron window, `PcmSource` played a generated stereo tone at RMS 0.355, seeked to 1.117 s and stayed inside a 0.5-0.75 s sample loop. A real `Deck` with key lock off switched to the PCM engine, played at RMS 0.334 and looped inside 0.5-0.75 s.
 - `npx tsc --noEmit`: clean.
