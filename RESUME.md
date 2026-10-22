@@ -29,8 +29,8 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 
 ## 3. Test and verification
 
-- Add a browser/Electron smoke test for `PcmSource`: load a generated WAV,
-  play, seek, loop, and assert non-zero analyser RMS.
+- `npm run smoke:audio` builds and runs `PcmSource` in a hidden Electron
+  window: generated tone, play, seek, sample loop and analyser RMS assertion.
 - Verify an exported crate and a tagged MP3 import into Serato DJ Pro 4 on a
   disposable library.
 - Keep `npm test`, `npx tsc --noEmit` and `cargo test` green.
@@ -39,8 +39,8 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 
 - Key lock is not implemented in the PCM path; disabling key lock switches a
   local track to `PcmSource`, enabling it switches back to the media element.
-- The PCM path has no runtime audio smoke test on real hardware yet; the worklet
-  source is covered by Node tests for playback, seek, pause and sample loops.
+- The PCM path passes the Electron smoke test and Node worklet tests, but has
+  not been checked against a physical audio interface and real DJ hardware.
 - Serato cue import covers MP3, WAV and AIFF. The first saved loop and
   BeatGrid BPM/phase are applied; remaining loops and per-beat detail are not.
 - Folder export backs up existing files but has no undo command and does not

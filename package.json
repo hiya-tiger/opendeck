@@ -8,6 +8,7 @@
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "smoke:audio": "node scripts/audio-smoke.mjs",
     "start": "npm run build && electron .",
     "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts test/formats.test.ts test/pcm-transport.test.ts test/serato.test.ts test/pcm-worklet.test.ts"
   },
