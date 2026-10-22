@@ -124,7 +124,7 @@ Tests generate timecode signals for every supported media, add noise and gain ch
 Verified on Windows with Electron 33:
 
 - `npm test`: 94/94 pass.
-- `npm run smoke:audio`: `PcmSource` in a hidden Electron window played a generated stereo tone at RMS 0.355, seeked to 1.117 s and stayed inside a 0.5-0.75 s sample loop (0.746 s).
+- `npm run smoke:audio`: in a hidden Electron window, `PcmSource` played a generated stereo tone at RMS 0.355, seeked to 1.117 s and stayed inside a 0.5-0.75 s sample loop. A real `Deck` with key lock off switched to the PCM engine, played at RMS 0.334 and looped inside 0.5-0.75 s.
 - `npx tsc --noEmit`: clean.
 - UI smoke test over CDP: two decks, 16 pads, 6 providers, 3 tabs, DVS bar, no console errors.
 - Synthetic 128 BPM WAV loaded through the real pipeline: analysis 127.7 BPM / A# min, audible output at the analyser, loop snapped to beats, hot cue stored, echo FX active, sync between decks.

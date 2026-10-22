@@ -30,7 +30,9 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 ## 3. Test and verification
 
 - `npm run smoke:audio` builds and runs `PcmSource` in a hidden Electron
-  window: generated tone, play, seek, sample loop and analyser RMS assertion.
+  window: generated tone, play, seek, sample loop and analyser RMS assertion;
+  the same run loads a real `Deck`, disables key lock and asserts the PCM engine,
+  audible output and sample-loop bounds.
 - Verify an exported crate and a tagged MP3 import into Serato DJ Pro 4 on a
   disposable library.
 - Keep `npm test`, `npx tsc --noEmit` and `cargo test` green.

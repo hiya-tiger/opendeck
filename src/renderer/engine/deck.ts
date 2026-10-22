@@ -535,6 +535,10 @@ export class Deck {
     return !this.el.paused && !this.el.ended;
   }
 
+  get engine(): "media" | "pcm" {
+    return this.pcmActive ? "pcm" : "media";
+  }
+
   private syncEngine(): void {
     const wanted = Boolean(this.pcmBuffer) && !this.keylock && !this.scratching;
     if (wanted === this.pcmActive) {
