@@ -103,3 +103,25 @@ test("pcm rejects an invalid loop", () => {
   assert.throws(() => new PcmVoice([ramp(8)], { loop: { start: 6, end: 2 } }), /Loop end/);
   assert.throws(() => new PcmVoice([ramp(8)], { loop: { start: 0, end: 9 } }), /outside/);
 });
+
+test("ten minutes of looping stays on the exact sample", () => {
+  const sampleRate = 48000;
+  const frames = sampleRate * 600;
+  const loop = { start: 1000, end: 5000 };
+  const transport = new PcmTransport();
+  const voice = transport.addVoice([ramp(10000)], { position: loop.start, loop });
+  const left = new Float32Array(128);
+  const right = new Float32Array(128);
+  for (let offset = 0; offset < frames; offset += 128) {
+    transport.renderBlock(left, right, Math.min(128, frames - offset));
+  }
+  assert.equal(voice.position, loop.start + (frames % (loop.end - loop.start)));
+
+  const reverse = new PcmTransport();
+  const reverseVoice = reverse.addVoice([ramp(10000)], { position: loop.end - 1, loop, rate: -1 });
+  for (let offset = 0; offset < frames; offset += 128) {
+    reverse.renderBlock(left, right, Math.min(128, frames - offset));
+  }
+  const expected = loop.end - 1 - (frames % (loop.end - loop.start));
+  assert.equal(reverseVoice.position, expected);
+});

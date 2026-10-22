@@ -280,3 +280,36 @@ Suite parity means all of these are true:
 
 Each phase records what was actually verified, with the machine and versions
 used. Claims that were not tested are listed as unverified rather than implied.
+
+### P0 - scope and documentation
+
+Verified 2026-10-22 on Windows 10 19045, Node 24.20.0, npm 11.19.0,
+Electron 44.8.0, rustc 1.99.1.
+
+- The scope, literal strings, matrix and phase exits are in this file.
+- No runtime behaviour was changed by P0.
+
+### P1 - engine cutover (partial)
+
+Verified with the same toolchain:
+
+- `npm test`: 103 tests pass, including `test/platter.test.ts` and the
+  ten-minute forward/reverse loop test.
+- `npx tsc --noEmit`: clean.
+- `cargo test --manifest-path rust/Cargo.toml`: 11 audio tests pass, including
+  ten minutes of forward and reverse looping on the exact sample.
+- `npm run build`: Electron main, preload and renderer bundles build.
+- `npm run smoke:audio`: passes repeatedly. It asserts PCM engine, analysed
+  output above 0.05 RMS, sample loop bounds, reported latency `0.008 s`
+  (`>0` and `<0.01`), pitch hold on, and reverse time decreasing.
+- Local `File` playback no longer touches the media element; the smoke run
+  removes the element source before playing.
+
+Not verified yet:
+
+- DVS timecode through transport atomics and sample-accurate jump handoff.
+- The Rust live render thread and native output. P1 currently uses the JS
+  `PcmSource`; the Rust transport is offline-only.
+- Physical audio interfaces, real DJ hardware and driver latency.
+- Reverse-loop correction after an external jump is coarse (250 ms guard);
+  the offline transport loop is exact.

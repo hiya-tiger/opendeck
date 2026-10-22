@@ -412,4 +412,46 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn ten_minutes_of_looping_stays_on_the_exact_sample() {
+        let frames = 48_000usize * 600;
+        let loop_region = LoopRegion::new(1000.0, 5000.0);
+        let length = loop_region.end - loop_region.start;
+        let options = VoiceOptions {
+            position: loop_region.start,
+            rate: 1.0,
+            gain: 1.0,
+            loop_region: Some(loop_region),
+        };
+        let mut transport = Transport::new(48_000);
+        transport.add_voice(PcmVoice::new(vec![ramp(10_000)], options).unwrap());
+        let mut left = [0.0f32; 128];
+        let mut right = [0.0f32; 128];
+        let mut offset = 0;
+        while offset < frames {
+            let count = 128.min(frames - offset);
+            transport.render_block(&mut left[..count], &mut right[..count]);
+            offset += count;
+        }
+        let position = transport.voice(0).unwrap().position();
+        assert_eq!(position, loop_region.start + (frames as f64 % length));
+
+        let options = VoiceOptions {
+            position: loop_region.end - 1.0,
+            rate: -1.0,
+            gain: 1.0,
+            loop_region: Some(loop_region),
+        };
+        let mut reverse = Transport::new(48_000);
+        reverse.add_voice(PcmVoice::new(vec![ramp(10_000)], options).unwrap());
+        let mut offset = 0;
+        while offset < frames {
+            let count = 128.min(frames - offset);
+            reverse.render_block(&mut left[..count], &mut right[..count]);
+            offset += count;
+        }
+        let expected = loop_region.end - 1.0 - (frames as f64 % length);
+        assert_eq!(reverse.voice(0).unwrap().position(), expected);
+    }
 }
