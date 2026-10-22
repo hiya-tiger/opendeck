@@ -1,4 +1,4 @@
-﻿# OpenDeck (desktop)
+# OpenDeck (desktop)
 
 Open-source DJ application with real DVS timecode control. TypeScript UI with an Electron shell or a Rust/Tauri shell that runs the same UI, MIT licensed. No telemetry, SeratoDJ inspired.
 
@@ -122,7 +122,7 @@ Tests generate timecode signals for every supported media, add noise and gain ch
 
 Verified on Windows with Electron 33:
 
-- `npm test`: 56/56 pass.
+- `npm test`: 68/68 pass.
 - `npx tsc --noEmit`: clean.
 - UI smoke test over CDP: two decks, 16 pads, 6 providers, 3 tabs, DVS bar, no console errors.
 - Synthetic 128 BPM WAV loaded through the real pipeline: analysis 127.7 BPM / A# min, audible output at the analyser, loop snapped to beats, hot cue stored, echo FX active, sync between decks.
