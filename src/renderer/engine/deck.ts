@@ -735,6 +735,17 @@ export class Deck {
     this.emit();
   }
 
+  setLoopRange(start: number, end: number, active = false): void {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+    this.loopStart = Math.max(0, start);
+    this.loopEnd = Math.min(this.duration || Infinity, end);
+    this.loopActive = active;
+    const bpm = this.info.bpm;
+    if (bpm > 0) this.loopBeats = Math.max(1 / 8, (this.loopEnd - this.loopStart) / beatSeconds(bpm));
+    if (active) this.seek(this.loopStart);
+    this.emit();
+  }
+
   toggleLoop(): void {
     if (!this.loopEnd) {
       this.setLoop(this.currentTime, this.loopBeats, true);

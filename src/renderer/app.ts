@@ -10,6 +10,9 @@ import { Library, isAudioFile, type Track } from "./media/library.ts";
 import { parseCrate, isSerato } from "./media/serato.ts";
 import { readMediaInfo, type Artwork } from "./media/artwork.ts";
 import { readSeratoTagsFromFile } from "./media/serato-file.ts";
+import { buildSeratoExport } from "./media/serato-export.ts";
+import { beatgridTempo, firstSavedLoop } from "./media/serato-import.ts";
+import { zipSync } from "fflate";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
 import { PROVIDERS, findProvider } from "./streaming/providers.ts";
@@ -864,13 +867,26 @@ function loadCues(deckId: DeckId, trackId: string): boolean {
 async function applySeratoCues(track: Track, deckId: DeckId): Promise<void> {
   if (!track.file) return;
   const tags = await readSeratoTagsFromFile(track.file);
-  if (!tags?.markers?.cues.length || meta[deckId] !== track) return;
+  if (!tags || meta[deckId] !== track) return;
   const deck = decks[deckId];
-  for (const cue of tags.markers.cues) {
-    if (cue.index >= 8) continue;
-    deck.hotCues[cue.index] = { time: cue.positionMs / 1000, color: cue.color };
+  if (tags.markers?.cues.length) {
+    for (const cue of tags.markers.cues) {
+      if (cue.index >= 8) continue;
+      deck.hotCues[cue.index] = { time: cue.positionMs / 1000, color: cue.color };
+    }
+    updatePads(deckId, true);
+    persistCues(deckId);
   }
-  updatePads(deckId, true);
+  const tempo = beatgridTempo(tags.beatgrid);
+  if (tempo && !track.analyzed && track.bpm <= 0) {
+    track.bpm = tempo.bpm;
+    track.beatPhase = tempo.phase;
+    deck.setBpm(track.bpm, track.beatPhase);
+    ui[deckId]!.bpm.textContent = `${track.bpm.toFixed(1)} BPM`;
+    zooms[deckId]?.setBpm(track.bpm, track.beatPhase);
+  }
+  const loop = firstSavedLoop(tags.markers?.loops);
+  if (loop) deck.setLoopRange(loop.start, loop.end, false);
 }
 
 function updatePads(deckId: DeckId, force = false): void {
@@ -1022,6 +1038,41 @@ linkBtn.addEventListener("click", async () => {
       (library.missingCount ? ` ${library.missingCount} still missing.` : ""),
     linked.length === 0,
   );
+});
+
+$("exportBtn").addEventListener("click", () => {
+  const tracks = library.tracks
+    .filter((track) => track.source === "local" || track.source === "crate")
+    .map((track) => ({
+      path: track.file?.webkitRelativePath || track.path,
+      crate: track.crate,
+      title: track.name,
+      bpm: track.bpm,
+      key: track.key,
+      duration: track.duration,
+    }));
+  if (tracks.length === 0) {
+    setNote("Load or import tracks before exporting.", true);
+    return;
+  }
+  const result = buildSeratoExport(tracks);
+  if (result.trackCount === 0) {
+    setNote("No local paths to export. Load files from disk first.", true);
+    return;
+  }
+  const zip = zipSync(Object.fromEntries(result.files), { level: 0 });
+  const blob = new Blob([zip], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "opendeck-serato.zip";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  setNote(
+    `Exported ${result.trackCount} tracks and ${result.crates.length} crate${result.crates.length === 1 ? "" : "s"}. ` +
+      "Unzip into your music folder beside your audio files.",
+  );
+  toast("Serato export downloaded");
 });
 
 /* --------------------------------------------------------------- mixer */

@@ -18,9 +18,8 @@ following work is not done, in the order it should be picked up.
 
 ## 2. Serato export UI
 
-- Add an export command that writes `Subcrates/*.crate`, `database V2` and
-  `neworder.pref`, refusing while Serato is running, with a backup and an undo
-  log.
+- Replace the zip download with a direct export into a chosen `_Serato_`
+  folder, refusing while Serato is running, with a backup and an undo log.
 - Add per-track "write tags" for MP3 via `writeSeratoGeoB`, using a temporary
   copy and byte verification before replacing the original.
 - Add WAV/AIFF RIFF `id3 ` chunk support, FLAC `VORBIS_COMMENT` and MP4
@@ -40,6 +39,6 @@ following work is not done, in the order it should be picked up.
 - Key lock is not implemented in the PCM path.
 - `PcmSource` is not connected to a deck, so reverse playback and sample loops
   are only proven offline.
-- Serato cue import is MP3-only and does not import saved loops or beat grids
-  into the UI.
+- Serato cue import is MP3-only. The first saved loop and BeatGrid BPM/phase
+  are applied; remaining loops and per-beat detail are not.
 - No export UI, no WAV/FLAC/MP4 tag writing, no SQLite column layout.

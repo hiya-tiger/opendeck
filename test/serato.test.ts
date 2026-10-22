@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readId3, readSeratoGeoB, writeSeratoGeoB } from "../src/renderer/media/serato-id3.ts";
 import { readSeratoTagsFromFile } from "../src/renderer/media/serato-file.ts";
+import { beatgridTempo, firstSavedLoop } from "../src/renderer/media/serato-import.ts";
+import { buildSeratoExport } from "../src/renderer/media/serato-export.ts";
 import {
   decodeCrate,
   decodeDatabase,
@@ -266,4 +268,51 @@ test("reads Serato cues from an MP3 File without reading the audio payload", asy
 test("ignores non-MP3 files for Serato tag lookup", async () => {
   const file = new File([new Uint8Array([1, 2, 3])], "track.wav", { type: "audio/wav" });
   assert.equal(await readSeratoTagsFromFile(file), null);
+});
+
+test("BeatGrid gives BPM and phase, saved loops give a valid range", () => {
+  const grid = decodeBeatGrid(encodeBeatGrid([{ position: 1.5, beatsTillNext: 4 }, { position: 9.5, bpm: 128 }]));
+  assert.deepEqual(beatgridTempo(grid), { bpm: 128, phase: 1.5 });
+  assert.equal(beatgridTempo([]), null);
+  assert.deepEqual(firstSavedLoop([{ index: 0, startMs: 4000, endMs: 8000, color: "#27AAE1", name: "", locked: false }]), {
+    start: 4,
+    end: 8,
+  });
+  assert.equal(firstSavedLoop([{ index: 0, startMs: 8000, endMs: 4000, color: "#27AAE1", name: "", locked: false }]), null);
+});
+
+test("Serato export writes database, neworder and relative crate paths", () => {
+  const result = buildSeratoExport([
+    {
+      path: "C:\\Music\\House\\One.mp3",
+      crate: "Warmup",
+      title: "One",
+      artist: "Tester",
+      bpm: 124,
+      duration: 245.6,
+    },
+    { path: "C:\\Music\\House\\Two.wav", crate: "Warmup" },
+    { path: "C:\\Music\\Techno\\Three.flac", crate: "Peak/Time", key: "8A" },
+    { path: "C:\\Music\\House\\One.mp3", crate: "Warmup" },
+    { path: "https://example.com/stream", crate: "Stream" },
+  ]);
+
+  assert.equal(result.trackCount, 3);
+  assert.equal(result.skipped, 1);
+  assert.deepEqual(result.crates, ["Peak_Time", "Warmup"]);
+
+  const database = decodeDatabase(result.files.get("_Serato_/database V2")!);
+  assert.equal(database.tracks.length, 3);
+  assert.equal(database.tracks[0].tsng, "One");
+  assert.equal(database.tracks[0].tbpm, "124.00");
+  assert.equal(database.tracks[0].tlen, "4:05");
+
+  const warmup = decodeCrate(result.files.get("_Serato_/Subcrates/Warmup.crate")!);
+  assert.deepEqual(warmup.paths, ["House/One.mp3", "House/Two.wav"]);
+  assert.equal(warmup.version, "1.0/Serato ScratchLive Crate");
+
+  const peak = decodeCrate(result.files.get("_Serato_/Subcrates/Peak_Time.crate")!);
+  assert.deepEqual(peak.paths, ["Techno/Three.flac"]);
+
+  assert.deepEqual(decodeNeworder(result.files.get("_Serato_/neworder.pref")!), ["Peak_Time", "Warmup"]);
 });

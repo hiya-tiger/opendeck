@@ -19,6 +19,8 @@
   "allowScripts": {
     "electron@33.4.11": true,
     "esbuild@0.24.2": true
+  },
+  "dependencies": {
+    "fflate": "^0.8.3"
   }
 }
-
