@@ -1,0 +1,8 @@
+[package]
+name = "opendeck-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample-accurate PCM transport for OpenDeck: voices, reverse playback and loops."
+
+[dependencies]

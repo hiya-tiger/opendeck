@@ -74,6 +74,7 @@ Limits:
 
 ```
 rust/crates/opendeck-core   DSP, WAV reader, BPM / band / chroma / key analysis (no UI deps)
+rust/crates/opendeck-audio  sample-accurate PCM transport: voices, reverse, loops, offline render
 rust/crates/opendeck-app    Tauri commands and window management
 renderer/tauri-bridge.js    maps window.opendeckDesktop onto Tauri invoke/event
 ```
@@ -129,7 +130,7 @@ Verified on Windows with Electron 33:
 
 Verified on Windows with the Tauri v2 shell (WebView2 155, Rust 1.99):
 
-- `cargo test -p opendeck-core`: 7/7 pass (BPM accuracy, band split, peaks, chroma, key).
+- `cargo test -p opendeck-core`: 7/7 pass (BPM accuracy, band split, peaks, chroma, key).\n- `cargo test -p opendeck-audio`: 10/10 pass (reverse, loops, block-size invariance, voice mixing).
 - `cargo build -p opendeck-app`: clean.
 - CDP smoke test: `window.__opendeckRuntime === "tauri"`, UI renders two decks and 16 pads.
 - `analyze_file` on the 128 BPM demo: BPM 128.42, duration 20 s, 2000 peaks, 2000 points per band, key/Camelot returned.
@@ -186,6 +187,7 @@ src/dvs/                     deck-level DVS transport and simulator
 src/main/main.ts             Electron window, sessions, media fetch, loopback, RTMP, save dialog
 src/preload/preload.ts       window.opendeckDesktop bridge
 rust/crates/opendeck-core/   Rust DSP, WAV reader and analysis
+rust/crates/opendeck-audio/  Rust PCM transport, voice mixing and offline rendering
 rust/crates/opendeck-app/    Tauri commands, streaming windows, RTMP bridge
 renderer/                    HTML, CSS, built scripts, tauri-bridge.js
 test/                        node:test suites

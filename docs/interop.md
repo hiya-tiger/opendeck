@@ -19,8 +19,14 @@ code or assets are used.
   export; imported entries are matched to files by path.
 - WAV, MP3, AIFF, M4A/AAC, FLAC, Ogg/Opus and WebM are accepted as audio.
 
-Not implemented yet: writing crates, writing Serato tags into audio files, and
-reading cue/loop/beatgrid metadata for display.
+Implemented codecs (not yet wired to the UI): crate and `database V2` writers,
+`neworder.pref`, Serato Markers_ / Markers2 / BeatGrid read/write, the 18-colour
+cue palette, and an ID3v2.3/2.4 GEOB reader and writer that preserves unrelated
+frames and the audio payload. The codecs are tested against tags and a crate
+written by Serato DJ Pro 4, plus OpenDeck-generated round-trip fixtures.
+
+Not implemented yet: UI export/import commands, WAV/AIFF RIFF tag writing, FLAC
+and MP4 atom writing, and the opt-in SQLite column layout edit.
 
 ## On-disk layout
 

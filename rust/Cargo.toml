@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/opendeck-core", "crates/opendeck-app"]
+members = ["crates/opendeck-core", "crates/opendeck-audio", "crates/opendeck-app"]
 resolver = "2"
 
 [workspace.package]

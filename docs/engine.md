@@ -95,6 +95,19 @@ Loop boundaries are expressed in sample frames. `render()` splits a block at
 loop boundaries and copies the wrapped remainder from the loop start, so the
 loop is seamless at any block size and independent of JS timer jitter.
 
+## Implemented so far
+
+- `src/renderer/engine/pcm-transport.ts`: deterministic multi-voice transport
+  with reverse playback, sample-accurate loops, rate changes and linear
+  interpolation. `renderOffline(frames, blockSize)` is covered by tests that
+  compare block sizes from 1 to 128 frames.
+- `src/renderer/engine/pcm-source.ts`: AudioWorklet wrapper that loads planar
+  PCM and accepts play/pause/seek/rate/loop/gain messages. It is not wired into
+  the deck yet; the media element remains the default source.
+- `rust/crates/opendeck-audio`: the same transport in Rust with 10 tests,
+  including block-size invariance and reverse loops. Decode, stretch, platter
+  and the native output are still to come.
+
 ## Latency budget
 
 | Stage | Target |
