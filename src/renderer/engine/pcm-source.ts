@@ -128,6 +128,8 @@ export class PcmSource {
   private loaded = false;
   private playing = false;
   private position = 0;
+  private rate = 1;
+  private loop: { start: number; end: number } | null = null;
   private options: PcmSourceOptions;
 
   constructor(ctx: AudioContext, destination: AudioNode, options: PcmSourceOptions = {}) {
@@ -156,7 +158,6 @@ export class PcmSource {
 
   setGain(gain: number): void {
     this.gainNode.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.01);
-    this.node?.port.postMessage({ type: "gain", gain });
   }
 
   load(buffer: AudioBuffer, position = 0): void {
@@ -214,6 +215,8 @@ export class PcmSource {
         }
       };
       node.connect(this.gainNode);
+      node.port.postMessage({ type: "rate", rate: this.rate });
+      if (this.loop) node.port.postMessage({ type: "loop", start: this.loop.start, end: this.loop.end });
       this.node = node;
       this.sendBuffer(this.position);
     })();
@@ -244,15 +247,14 @@ export class PcmSource {
   }
 
   setRate(rate: number): void {
+    this.rate = rate;
     this.node?.port.postMessage({ type: "rate", rate });
   }
 
   setLoop(start: number | null, end: number | null): void {
-    if (start === null || end === null || end <= start) {
-      this.node?.port.postMessage({ type: "loop", start: -1, end: -1 });
-    } else {
-      this.node?.port.postMessage({ type: "loop", start, end });
-    }
+    this.loop = start === null || end === null || end <= start ? null : { start, end };
+    if (this.loop) this.node?.port.postMessage({ type: "loop", start: this.loop.start, end: this.loop.end });
+    else this.node?.port.postMessage({ type: "loop", start: -1, end: -1 });
   }
 
   dispose(): void {
