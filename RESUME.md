@@ -1,18 +1,18 @@
-# Resume notes
+﻿# Resume notes
 
 The format codecs, offline transport and cue import are committed. The
 following work is not done, in the order it should be picked up.
 
 ## 1. Engine cutover (phase 3 remainder)
 
-- Add signalsmith-stretch (MIT, official `signalsmith-stretch` npm package) to a
-  worklet, with key lock on by default to match the current
-  `HTMLMediaElement.preservesPitch` behaviour.
-- `PcmSource` is wired into `Deck` for local files: one deck input gain feeds
-  the band splitter, and the PCM path drives transport and loops when key lock
-  is off. Remote/stream URLs and decode failures stay on the media element.
-- Still to do: key lock inside the PCM path (signalsmith-stretch), exact DVS
-  jump handoff, and an xrun/latency diagnostic.
+- Signalsmith Stretch 1.3.2 is in `PcmSource` with key lock, signed rate,
+  reverse, loop scheduling and latency/underrun reporting. Local files decode
+  once and use the PCM path; remote streams and decode failures keep the media
+  element. The legacy raw worklet remains only as a load-failure fallback.
+- Diagnostics show engine, latency, xruns and pitch-hold state. Platter torque,
+  friction and inertia drive scratch and DVS.
+- Still to do: Rust transport atomics/command ring and the live render thread,
+  sample-accurate reverse-loop correction, and exact DVS jump handoff.
 
 ## 2. Serato export UI
 
@@ -30,17 +30,18 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 ## 3. Test and verification
 
 - `npm run smoke:audio` builds and runs `PcmSource` in a hidden Electron
-  window: generated tone, play, seek, sample loop and analyser RMS assertion;
-  the same run loads a real `Deck`, disables key lock and asserts the PCM engine,
-  audible output and sample-loop bounds.
+  window: generated tone, play, seek, sample loop and analyser RMS assertion.
+  It then loads a real `Deck` with key lock on and asserts PCM engine, audible
+  output, latency under 10 ms, loop bounds, pitch hold and reverse playback.
 - Verify an exported crate and a tagged MP3 import into Serato DJ Pro 4 on a
   disposable library.
 - Keep `npm test`, `npx tsc --noEmit` and `cargo test` green.
 
 ## Known gaps
 
-- Key lock is not implemented in the PCM path; disabling key lock switches a
-  local track to `PcmSource`, enabling it switches back to the media element.
+- The Rust live render thread is not wired; JS `PcmSource` owns playback. DVS
+  still drives `Deck.setRate` rather than transport atomics.
+- Reverse-loop correction after an external jump is coarse, not sample-accurate.
 - The PCM path passes the Electron smoke test and Node worklet tests, but has
   not been checked against a physical audio interface and real DJ hardware.
 - Serato cue import covers MP3, WAV and AIFF. The first saved loop and

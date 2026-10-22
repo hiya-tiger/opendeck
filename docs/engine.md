@@ -6,20 +6,25 @@ record for the engine phases; `docs/decisions.md` records the reasoning.
 
 ## Today
 
-Each `Deck` (`src/renderer/engine/deck.ts`) wraps an `HTMLAudioElement`:
+Local tracks no longer use an `HTMLAudioElement`. `Deck`
+(`src/renderer/engine/deck.ts`) routes them through `PcmSource`:
 
-- `ctx.createMediaElementSource(el)` feeds the element into the Web Audio graph.
-- `el.playbackRate` sets tempo; `el.currentTime` reads progress and seeks.
-- A separate `ScratchVoice` buffer plays scratch gestures; the element is paused
-  during a scratch.
-- `tick()` polls `currentTime` and emits progress; loops and cue jumps are
-  implemented with `seek()`, so they land on the nearest element seek, not on a
-  sample boundary.
-- EQ, FX, mixer, analyser, recording, broadcast, sampler and sync all live in
-  the Web Audio graph downstream of the deck source. This stays.
+- `File`, `blob:` and `file:` sources are decoded once with
+  `ctx.decodeAudioData`; the same buffer feeds the scratch voice.
+- `PcmSource` wraps `signalsmith-stretch` inside an AudioWorklet. Key lock,
+  reverse (negative rate), loops and pitch hold are handled there.
+- `tick()` reads PCM position and emits progress and end/loop events.
+- `Platter` (`src/renderer/engine/platter.ts`) models torque, friction and
+  inertia; DVS and on-screen scratching both drive it.
+- Remote/stream URLs still use `createMediaElementSource(el)`, and the element
+  remains a fallback if the Signalsmith module cannot load.
+- EQ, FX, mixer, analyser, recording, broadcast, sampler and sync all remain in
+  the Web Audio graph downstream of the deck source.
 
-The media element gives no reverse playback, no sample-accurate loop, no
-deterministic render, and roughly 20-40 ms of latency.
+The PCM path supports reverse and pitch hold at about 8 ms reported engine
+latency. Loops are scheduled through Signalsmith; reverse-loop correction in
+`tick()` is coarse rather than sample-accurate. The media-element path still has
+no reverse or deterministic render.
 
 ## Target architecture
 
@@ -101,12 +106,17 @@ loop is seamless at any block size and independent of JS timer jitter.
   with reverse playback, sample-accurate loops, rate changes and linear
   interpolation. `renderOffline(frames, blockSize)` is covered by tests that
   compare block sizes from 1 to 128 frames.
-- `src/renderer/engine/pcm-source.ts`: AudioWorklet wrapper that loads planar
-  PCM and accepts play/pause/seek/rate/loop/gain messages. It is not wired into
-  the deck yet; the media element remains the default source.
+- `src/renderer/engine/pcm-source.ts`: `PcmSource` wraps Signalsmith Stretch in
+  an AudioWorklet, with key lock, signed rate, loop scheduling, latency and
+  underrun reporting. The legacy raw worklet remains an internal fallback.
+- `src/renderer/engine/deck.ts`: local files use `PcmSource`; remote streams keep
+  the media element. Scratch, key lock, reverse and diagnostics share the PCM
+  path.
+- `src/renderer/engine/platter.ts`: torque/friction/inertia model used by
+  scratch and DVS, covered by `test/platter.test.ts`.
 - `rust/crates/opendeck-audio`: the same transport in Rust with 10 tests,
-  including block-size invariance and reverse loops. Decode, stretch, platter
-  and the native output are still to come.
+  including block-size invariance and reverse loops. The live render thread,
+  decode, stretch, platter and native output are still to come.
 
 ## Latency budget
 
@@ -136,15 +146,14 @@ latency work, not a claimed number.
 
 ## Migration plan
 
-1. Port the current deck behaviour to a JS worklet prototype using
-   signalsmith-stretch (WASM/JS) and `render_offline` tests. This de-risks
-   stretching, reverse and loops before Rust.
+1. **Done:** JS `PcmSource` with Signalsmith Stretch, key lock, reverse, loops
+   and platter; local files now use it.
 2. Add the Rust crate with decode/store and the same offline render tests.
 3. Put the Rust engine behind the worklet, keep the existing deck API, and
    compare output with the prototype.
 4. Switch loops, cue jumps and DVS to sample-accurate transport.
-5. Remove `HTMLAudioElement` from the deck path and keep a compat stub until
-   `app.ts` call sites are migrated.
+5. Remove the media element from the deck path; only remote streams should keep
+   it once streaming is ported.
 
 ## Test strategy
 

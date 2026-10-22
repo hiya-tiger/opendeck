@@ -37,6 +37,11 @@ AudioWorklet fed by a lock-free ring.
 accurate loops and predictable latency. The worklet keeps the existing graph
 and avoids a second audio API in the UI.
 
+**Status:** P1 ships the JS PCM path first. `render_offline` and the Rust
+transport exist and are tested, but the live render thread, transport atomics
+and command ring are not wired to the UI yet. Until then the JS `PcmSource`
+owns live playback and pitch hold.
+
 **Revisit:** If N-API/SharedArrayBuffer plumbing proves unreliable in the Tauri
 WebView2 build, fall back to a native output device (`cpal_out`) behind the same
 `api.rs` surface.
@@ -141,14 +146,13 @@ what the files are compatible with.
 
 ## D13: EQ wording
 
-**Decision:** Describe the four bands as filter bands, not stem separation:
-"Four-band EQ (low / low-mid / high-mid / high) ... these are filter bands, not
-source separation."
+**Decision:** Describe the four bands as a filter bank, not source separation,
+until P5 lands. P5 then renames the control so "stems" means the separated parts.
 
 **Why:** The current implementation is a filter bank; calling it stem-style
-overstates what it does and invites comparison with source-separation products.
+overstates what it does. Source separation is in scope (P5), not a non-goal.
 
-**Revisit:** Only if real source separation is implemented.
+**Revisit:** When P5 ships real separation.
 
 ## D14: Deck public API compatibility
 
@@ -171,6 +175,61 @@ cannot be finished, revert it cleanly and write `RESUME.md`.
 from sitting on `main`.
 
 **Revisit:** No.
+
+## D16: Signalsmith Stretch for pitch hold
+
+**Decision:** Use `signalsmith-stretch@1.3.2` (MIT) behind the `PcmSource`
+interface. Key lock on feeds zero semitones; key lock off feeds
+`12 * log2(abs(rate))` so the pitch follows the tempo. Reverse uses a negative
+playback rate.
+
+**Why:** It is tested, MIT-licensed and runs in the existing Web Audio graph.
+Keeping the old worklet as an internal fallback avoids losing playback if the
+stretch module fails to load, but the fallback does not preserve pitch.
+The node is created with `numberOfInputs: 1` even though no live input is
+connected: with zero inputs, Signalsmith's inactive branch dereferences an
+undefined input list and the worklet processor throws, which silences the deck.
+
+**Revisit:** If the Rust live engine replaces the JS PCM path, or if a
+sample-accurate reverse loop requires a different scheduler.
+
+## D17: Local files decode once to PCM
+
+**Decision:** Local `File`, `blob:` and `file:` sources decode once with
+`decodeAudioData` and play through PCM. The `<audio>` element is kept only for
+remote/stream URLs and as a playback fallback. The decoded buffer is shared with
+the scratch voice so scratch uses the same samples.
+
+**Why:** One decode avoids drift and double I/O, keeps pitch hold available and
+lets the deck work without a media-element source. Remote streams cannot be
+fully buffered, so they stay on the element.
+
+**Revisit:** When the Rust engine owns decoding for every source.
+
+## D18: Report engine latency, not device latency
+
+**Decision:** Configure Signalsmith with `blockMs: 8`. The diagnostics panel
+reports the engine's measured `latency` (about 8 ms). It does not add
+`AudioContext.baseLatency` or output-device latency.
+
+**Why:** The target is a controllable, measurable engine figure. Mixing device
+latency into it would vary by machine and driver and make regressions hard to
+compare.
+
+**Revisit:** If user-facing latency must include output scheduling; label it
+explicitly if so.
+
+## D19: Platter physics live in the renderer
+
+**Decision:** Model scratch torque, friction and inertia in
+`src/renderer/engine/platter.ts`; the deck converts platter velocity to a rate.
+DVS and on-screen scratching both drive the same platter.
+
+**Why:** One scratch model keeps mouse, keyboard and timecode behaviour
+consistent and testable in JS while the Rust seam is unfinished.
+
+**Revisit:** When DVS atomics and the Rust live render thread land; the platter
+can become the control-rate input to that thread.
 
 ## Open assumptions
 

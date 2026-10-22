@@ -1,3 +1,5 @@
+﻿import type { StretchNode } from "signalsmith-stretch";
+
 export const WORKLET_SOURCE = `
 class OpenDeckPcmProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -118,7 +120,7 @@ export interface PcmSourceOptions {
   onPosition?: (samples: number) => void;
 }
 
-export class PcmSource {
+class WorkletPcmSource {
   private readonly ctx: AudioContext;
   private readonly gainNode: GainNode;
   private node: AudioWorkletNode | null = null;
@@ -262,5 +264,328 @@ export class PcmSource {
     this.node?.disconnect();
     this.gainNode.disconnect();
     this.node = null;
+  }
+}
+
+export class PcmSource {
+  private readonly ctx: AudioContext;
+  private readonly gainNode: GainNode;
+  private readonly destination: AudioNode;
+  private stretch: StretchNode | null = null;
+  private fallback: WorkletPcmSource | null = null;
+  private ready: Promise<void> | null = null;
+  private chain: Promise<void> = Promise.resolve();
+  private buffer: AudioBuffer | null = null;
+  private loaded = false;
+  private playing = false;
+  private rate = 1;
+  private keylock = true;
+  private loop: { start: number; end: number } | null = null;
+  private targetPosition: number | null = null;
+  private reportedPosition = 0;
+  private commandAt = 0;
+  private latency = 0;
+  private underrunCount = 0;
+  private lastTickAt = 0;
+  private lastTickPosition = 0;
+  private lastLoopWrapAt = 0;
+  private options: PcmSourceOptions;
+
+  constructor(ctx: AudioContext, destination: AudioNode, options: PcmSourceOptions = {}) {
+    this.ctx = ctx;
+    this.destination = destination;
+    this.options = options;
+    this.gainNode = ctx.createGain();
+    this.gainNode.gain.value = options.gain ?? 1;
+    this.gainNode.connect(destination);
+  }
+
+  get hasBuffer(): boolean {
+    return this.loaded;
+  }
+
+  get output(): GainNode {
+    return this.gainNode;
+  }
+
+  get positionSamples(): number {
+    if (this.fallback) return this.fallback.positionSamples;
+    return Math.round(this.positionSeconds() * (this.buffer?.sampleRate ?? this.ctx.sampleRate));
+  }
+
+  get isPlaying(): boolean {
+    if (this.fallback) return this.fallback.isPlaying;
+    return this.playing;
+  }
+
+  get latencySeconds(): number {
+    if (this.fallback) return this.ctx.baseLatency;
+    return this.latency;
+  }
+
+  get underruns(): number {
+    return this.underrunCount;
+  }
+
+  get pitchPreserved(): boolean {
+    return this.stretch !== null;
+  }
+
+  setGain(gain: number): void {
+    this.gainNode.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.01);
+  }
+
+  private setTarget(seconds: number): void {
+    this.targetPosition = Math.max(0, Math.min(seconds, this.durationSeconds()));
+    this.commandAt = performance.now();
+    this.reportedPosition = this.targetPosition;
+  }
+
+  private durationSeconds(): number {
+    return this.buffer?.duration ?? 0;
+  }
+
+  private positionSeconds(): number {
+    if (this.targetPosition !== null && performance.now() - this.commandAt < 140) {
+      return this.targetPosition;
+    }
+    if (this.stretch) {
+      const reported = this.stretch.inputTime;
+      if (Number.isFinite(reported) && reported >= 0) {
+        this.reportedPosition = reported;
+        return reported;
+      }
+    }
+    return this.reportedPosition;
+  }
+
+  private semitones(): number {
+    if (this.keylock) return 0;
+    return 12 * Math.log2(Math.max(0.01, Math.abs(this.rate)));
+  }
+
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const next = this.chain.then(work, work).catch(() => undefined);
+    this.chain = next;
+    return next;
+  }
+
+  private async ensure(): Promise<void> {
+    if (this.ready) return this.ready;
+    this.ready = (async () => {
+      try {
+        const module = await import("signalsmith-stretch");
+        const node = await module.default(this.ctx, {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+        });
+        await node.configure({ blockMs: 8, intervalMs: 2 });
+        await node.setUpdateInterval(0.02, (time) => {
+          if (!Number.isFinite(time)) return;
+          this.reportedPosition = Math.max(0, time);
+          if (this.targetPosition !== null && Math.abs(this.reportedPosition - this.targetPosition) < 0.08) {
+            this.targetPosition = null;
+          }
+        });
+        node.connect(this.gainNode);
+        this.latency = await node.latency();
+        this.stretch = node;
+      } catch {
+        this.fallback = new WorkletPcmSource(this.ctx, this.gainNode);
+      }
+    })();
+    return this.ready;
+  }
+
+  async load(buffer: AudioBuffer, position = 0): Promise<void> {
+    this.loaded = true;
+    this.buffer = buffer;
+    this.playing = false;
+    this.setTarget(position / buffer.sampleRate);
+    await this.ensure();
+    this.setTarget(position / buffer.sampleRate);
+    if (this.fallback) {
+      this.fallback.load(buffer, position);
+      this.fallback.setRate(this.rate);
+      return;
+    }
+    const left = buffer.getChannelData(0);
+    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+    await this.enqueue(async () => {
+      const node = this.stretch;
+      if (!node) return;
+      await node.schedule({ active: false, input: position / buffer.sampleRate, rate: this.rate, semitones: this.semitones() });
+      await node.dropBuffers();
+      await node.addBuffers([left, right]);
+      await this.applyLoop();
+    });
+  }
+
+  clear(): void {
+    this.loaded = false;
+    this.playing = false;
+    this.buffer = null;
+    this.targetPosition = 0;
+    this.reportedPosition = 0;
+    if (this.fallback) {
+      this.fallback.clear();
+      return;
+    }
+    this.enqueue(async () => {
+      await this.stretch?.schedule({ active: false, input: 0 });
+      await this.stretch?.dropBuffers();
+    });
+  }
+
+  async play(position?: number): Promise<void> {
+    if (!this.loaded) return;
+    await this.ensure();
+    if (position !== undefined) this.setTarget(position / (this.buffer?.sampleRate ?? this.ctx.sampleRate));
+    if (this.fallback) {
+      await this.fallback.play(position ?? this.positionSamples);
+      return;
+    }
+    this.playing = true;
+    this.setTarget(this.positionSeconds());
+    await this.enqueue(async () => {
+      const node = this.stretch;
+      if (!node) return;
+      await node.schedule({
+        active: true,
+        input: this.targetPosition ?? this.reportedPosition,
+        rate: this.rate,
+        semitones: this.semitones(),
+        output: this.ctx.currentTime,
+      });
+      await this.applyLoop();
+    });
+  }
+
+  pause(): void {
+    this.playing = false;
+    this.setTarget(this.positionSeconds());
+    if (this.fallback) {
+      this.fallback.pause();
+      return;
+    }
+    this.enqueue(async () => {
+      await this.stretch?.schedule({
+        active: false,
+        input: this.targetPosition ?? this.reportedPosition,
+        rate: this.rate,
+      });
+    });
+  }
+
+  seek(position: number): void {
+    const seconds = position / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
+    this.setTarget(seconds);
+    if (this.fallback) {
+      this.fallback.seek(position);
+      return;
+    }
+    if (!this.stretch) return;
+    this.enqueue(async () => {
+      await this.stretch?.schedule({
+        active: this.playing,
+        input: seconds,
+        rate: this.rate,
+        semitones: this.semitones(),
+      });
+      this.applyLoop();
+    });
+  }
+
+  setRate(rate: number): void {
+    this.rate = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 1));
+    if (this.fallback) {
+      this.fallback.setRate(this.rate);
+      return;
+    }
+    if (!this.stretch) return;
+    this.setTarget(this.positionSeconds());
+    this.enqueue(async () => {
+      await this.stretch?.schedule({
+        active: this.playing,
+        input: this.targetPosition ?? this.reportedPosition,
+        rate: this.rate,
+        semitones: this.semitones(),
+      });
+      this.applyLoop();
+    });
+  }
+
+  setKeylock(enabled: boolean): void {
+    this.keylock = enabled;
+    this.setRate(this.rate);
+  }
+
+  setLoop(start: number | null, end: number | null): void {
+    this.loop = start === null || end === null || end <= start ? null : { start, end };
+    if (this.fallback) {
+      this.fallback.setLoop(start, end);
+      return;
+    }
+    if (!this.stretch) return;
+    this.enqueue(async () => {
+      this.applyLoop();
+    });
+  }
+
+  private async applyLoop(): Promise<void> {
+    const node = this.stretch;
+    if (!node) return;
+    const sampleRate = this.buffer?.sampleRate ?? this.ctx.sampleRate;
+    const loop = this.loop;
+    await node.schedule({
+      loopStart: loop ? loop.start / sampleRate : 0,
+      loopEnd: loop ? loop.end / sampleRate : 0,
+    });
+  }
+
+  tick(): void {
+    if (this.fallback) return;
+    if (!this.playing || !this.stretch) return;
+    const now = performance.now();
+    const position = this.positionSeconds();
+    const duration = this.durationSeconds();
+    if (this.rate >= 0 && duration > 0 && position >= duration - 0.002) {
+      this.pause();
+      this.options.onEnded?.();
+      return;
+    }
+    if (this.rate < 0 && position <= 0.002) {
+      this.pause();
+      return;
+    }
+    if (this.loop && this.rate < 0) {
+      const start = this.loop.start / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
+      const end = this.loop.end / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
+      if (position <= start + 0.003 && now - this.lastLoopWrapAt > 250) {
+        this.lastLoopWrapAt = now;
+        this.seek(end);
+        return;
+      }
+    }
+    if (this.lastTickAt && Math.abs(position - this.lastTickPosition) < 0.0005) {
+      if (now - this.lastTickAt > 90) {
+        this.underrunCount += 1;
+        this.lastTickAt = now;
+      }
+    } else {
+      this.lastTickAt = now;
+      this.lastTickPosition = position;
+    }
+  }
+
+  dispose(): void {
+    this.pause();
+    this.stretch?.disconnect();
+    this.fallback?.dispose();
+    this.gainNode.disconnect();
+    this.stretch = null;
+    this.fallback = null;
+    void this.destination;
   }
 }

@@ -1,8 +1,9 @@
-import { beatSeconds, nearestBeat, snapToBeat, loopSeconds } from "./beatgrid.ts";
+﻿import { beatSeconds, nearestBeat, snapToBeat, loopSeconds } from "./beatgrid.ts";
 import { defaultStemGains, STEM_CROSSOVERS, type StemId } from "./stems.ts";
 import { fxDefault, filterFrequency, filterType, crushCurve, delaySeconds, wetGain, type Division, type FxType } from "./fx.ts";
 import { ScratchVoice } from "./scratch-voice.ts";
 import { PcmSource } from "./pcm-source.ts";
+import { Platter } from "./platter.ts";
 
 export type DeckId = "A" | "B";
 
@@ -87,8 +88,8 @@ export class Deck {
   private fxChain: FxChain;
   private analyser: AnalyserNode;
   private scratch: ScratchVoice;
-  private scratchToken = 0;
   private scratching = false;
+  private readonly platter = new Platter();
 
   cuePoint = 0;
   loopStart = 0;
@@ -421,29 +422,6 @@ export class Deck {
     return buffer;
   }
 
-  private async decodeScratch(url: string, token: number): Promise<void> {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) return;
-      const data = await response.arrayBuffer();
-      const buffer = await this.ctx.decodeAudioData(data);
-      if (token !== this.scratchToken) return;
-      this.scratch.setBuffer(buffer);
-      this.pcmBuffer = buffer;
-      this.pcm.load(buffer, 0);
-      this.pcm.setRate(this.rate);
-      this.applyPcmLoop();
-      this.syncEngine();
-      if (this.scratching) void this.scratch.start(this.currentTime);
-    } catch {
-      if (token === this.scratchToken) {
-        this.scratch.clear();
-        this.pcmBuffer = null;
-        this.pcm.clear();
-      }
-    }
-  }
-
   async load(source: File | string, info: Partial<DeckTrackInfo> = {}): Promise<void> {
     this.pause();
     this.pcm.clear();
@@ -452,27 +430,41 @@ export class Deck {
     this.scratch.stop();
     this.scratching = false;
     this.scratch.clear();
-    this.scratchToken += 1;
-    const token = this.scratchToken;
+    const local =
+      typeof source !== "string" || /^(blob:|file:)/i.test(source);
     const url = typeof source === "string" ? source : URL.createObjectURL(source);
-    this.el.src = url;
-    this.el.load();
-    await new Promise<void>((resolve, reject) => {
-      const ok = (): void => {
-        cleanup();
-        resolve();
-      };
-      const bad = (): void => {
-        cleanup();
-        reject(new Error("Could not decode audio"));
-      };
-      const cleanup = (): void => {
-        this.el.removeEventListener("loadedmetadata", ok);
-        this.el.removeEventListener("error", bad);
-      };
-      this.el.addEventListener("loadedmetadata", ok);
-      this.el.addEventListener("error", bad);
-    });
+    if (local) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Could not read audio");
+      const data = await response.arrayBuffer();
+      const buffer = await this.ctx.decodeAudioData(data);
+      this.pcmBuffer = buffer;
+      this.scratch.setBuffer(buffer);
+      await this.pcm.load(buffer, 0);
+      this.pcmActive = true;
+      this.el.removeAttribute("src");
+      this.el.load();
+      if (typeof source !== "string") URL.revokeObjectURL(url);
+    } else {
+      this.el.src = url;
+      this.el.load();
+      await new Promise<void>((resolve, reject) => {
+        const ok = (): void => {
+          cleanup();
+          resolve();
+        };
+        const bad = (): void => {
+          cleanup();
+          reject(new Error("Could not decode audio"));
+        };
+        const cleanup = (): void => {
+          this.el.removeEventListener("loadedmetadata", ok);
+          this.el.removeEventListener("error", bad);
+        };
+        this.el.addEventListener("loadedmetadata", ok);
+        this.el.addEventListener("error", bad);
+      });
+    }
     this.cuePoint = 0;
     this.loopActive = false;
     this.loopStart = 0;
@@ -488,9 +480,7 @@ export class Deck {
       key: info.key ?? "--",
       camelot: info.camelot ?? "--",
     });
-    void this.decodeScratch(url, token);
     this.emit();
-    return Promise.resolve();
   }
 
   get scratchReady(): boolean {
@@ -504,8 +494,21 @@ export class Deck {
   beginScratch(): void {
     if (this.scratching) return;
     this.scratching = true;
+    this.platter.reset();
     this.scratch.stop();
     void this.scratch.start(this.currentTime);
+  }
+
+  scratchDrive(deltaDegrees: number, dt: number): void {
+    if (!this.scratching) return;
+    this.platter.drive((deltaDegrees * Math.PI) / 180, dt);
+    this.scratch.setRate(this.platter.rate);
+  }
+
+  scratchCoast(dt: number): void {
+    if (!this.scratching) return;
+    this.platter.coast(dt);
+    this.scratch.setRate(this.platter.rate);
   }
 
   scratchRate(rate: number): void {
@@ -515,6 +518,7 @@ export class Deck {
 
   endScratch(): void {
     this.scratching = false;
+    this.platter.reset();
     this.scratch.stop();
   }
 
@@ -540,25 +544,24 @@ export class Deck {
   }
 
   private syncEngine(): void {
-    const wanted = Boolean(this.pcmBuffer) && !this.keylock && !this.scratching;
-    if (wanted === this.pcmActive) {
-      if (this.pcmActive) this.applyPcmLoop();
+    if (!this.pcmBuffer) {
+      if (this.pcmActive) {
+        this.pcm.pause();
+        this.pcmActive = false;
+      }
       return;
     }
-    const time = this.currentTime;
-    const wasPlaying = this.playing;
-    if (wanted) {
+    if (!this.pcmActive) {
+      const time = this.currentTime;
+      const wasPlaying = this.playing;
       this.el.pause();
       this.pcmActive = true;
-      this.pcm.seek(Math.round(time * this.pcmBuffer!.sampleRate));
+      this.pcm.seek(Math.round(time * this.pcmBuffer.sampleRate));
       this.pcm.setRate(this.rate);
       this.applyPcmLoop();
       if (wasPlaying) void this.pcm.play();
     } else {
-      this.pcm.pause();
-      this.pcmActive = false;
-      this.el.currentTime = Math.max(0, Math.min(time, this.el.duration || 0));
-      if (wasPlaying) void this.el.play().catch(() => undefined);
+      this.applyPcmLoop();
     }
   }
 
@@ -575,7 +578,7 @@ export class Deck {
   }
 
   get hasTrack(): boolean {
-    return Boolean(this.el.src) && this.duration > 0;
+    return this.duration > 0 && (this.pcmBuffer !== null || Boolean(this.el.src));
   }
 
   get level(): number {
@@ -590,7 +593,7 @@ export class Deck {
   }
 
   async play(): Promise<void> {
-    if (!this.el.src) return;
+    if (!this.el.src && !this.pcmBuffer) return;
     if (this.ctx.state === "suspended") await this.ctx.resume();
     this.syncEngine();
     if (this.pcmActive) {
@@ -624,11 +627,13 @@ export class Deck {
   }
 
   setRate(rate: number): void {
-    const clamped = Math.max(0.02, Math.min(4, rate));
+    const clamped = Math.max(-4, Math.min(4, rate));
     this.rate = clamped;
     this.el.preservesPitch = this.keylock;
-    this.el.playbackRate = clamped;
+    if (clamped > 0) this.el.playbackRate = clamped;
+    else this.el.pause();
     this.pcm.setRate(clamped);
+    this.emit();
   }
 
   setTempoPercent(percent: number): void {
@@ -655,8 +660,29 @@ export class Deck {
   setKeylock(enabled: boolean): void {
     this.keylock = enabled;
     this.el.preservesPitch = enabled;
+    this.pcm.setKeylock(enabled);
     this.syncEngine();
     this.emit();
+  }
+
+  setReverse(enabled: boolean): void {
+    this.setRate(enabled ? -Math.abs(this.rate) : Math.abs(this.rate));
+  }
+
+  get reversed(): boolean {
+    return this.rate < 0;
+  }
+
+  get latencySeconds(): number {
+    return this.pcm.latencySeconds;
+  }
+
+  get underruns(): number {
+    return this.pcm.underruns;
+  }
+
+  get pitchPreserved(): boolean {
+    return this.keylock && this.pcm.pitchPreserved;
   }
 
   get keylockOn(): boolean {
@@ -874,6 +900,7 @@ export class Deck {
 
   tick(): void {
     if (this.destroyed) return;
+    if (this.pcmActive) this.pcm.tick();
     if (!this.pcmActive && this.loopActive && this.loopEnd > this.loopStart && this.playing) {
       if (this.currentTime >= this.loopEnd - 0.005 || this.currentTime < this.loopStart - 0.5) {
         this.seek(this.loopStart);

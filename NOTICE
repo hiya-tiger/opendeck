@@ -13,7 +13,7 @@ other DJ vendor. Product names are used only to describe compatibility.
 
 | Component | Used for | License |
 | --- | --- | --- |
-| Electron 33 | Desktop shell | MIT |
+| Electron 44.8.0 | Desktop shell | MIT |
 | Tauri v2 | Alternative desktop shell | MIT OR Apache-2.0 |
 | esbuild | Bundling the renderer and main process | MIT |
 | TypeScript | Type checking and compiler | Apache-2.0 |
@@ -22,6 +22,7 @@ other DJ vendor. Product names are used only to describe compatibility.
 | rfd | Native file dialogs in the Tauri shell | MIT |
 | sha1 | YouTube Music request signing | MIT OR Apache-2.0 |
 | webview2-com | WebView2 host bindings (Windows) | MIT OR Apache-2.0 |
+| signalsmith-stretch 1.3.2 | Time stretching and pitch hold in the PCM engine | MIT |
 
 ## Optional external tools
 
@@ -41,7 +42,6 @@ reviewed before the engine work lands.
 | --- | --- | --- |
 | cpal | Native audio output in the Rust engine | Apache-2.0 OR MIT |
 | symphonia | Decoding MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV | MPL-2.0 |
-| signalsmith-stretch | Time stretching and pitch shifting | MIT |
 
 MPL-2.0 is file-level copyleft: modifications to Symphonia's own files must be
 published under MPL-2.0, while OpenDeck's files can remain MIT. We do not

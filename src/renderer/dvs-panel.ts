@@ -105,9 +105,9 @@ const handleBlock = (left: Float32Array, right: Float32Array): void => {
     return;
   }
 
-  const wanted = Math.max(0.02, Math.min(1.6, reading.rate));
+  const wanted = Math.max(-1.6, Math.min(1.6, reading.rate));
   deck.setRate(wanted);
-  if (!deck.playing && wanted > 0.02) void deck.play();
+  if (!deck.playing && Math.abs(wanted) > 0.02) void deck.play();
   const desired = reading.positionSeconds + offset;
   if (Math.abs(desired - deck.currentTime) > 0.09) deck.seek(desired);
 };

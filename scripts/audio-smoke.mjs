@@ -30,6 +30,9 @@ app.whenReady().then(async () => {
     show: false,
     webPreferences: { backgroundThrottling: false, offscreen: true },
   });
+  win.webContents.on("console-message", (event) => {
+    console.log("RENDERER " + event.level + " " + event.message + " @" + event.lineNumber + " " + event.sourceId);
+  });
   try {
     await win.loadFile(path.join(__dirname, "smoke.html"));
     const result = await win.webContents.executeJavaScript("window.__smoke", true);

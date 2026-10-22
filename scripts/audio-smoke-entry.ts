@@ -1,4 +1,4 @@
-import { Deck } from "../src/renderer/engine/deck.ts";
+﻿import { Deck } from "../src/renderer/engine/deck.ts";
 import { PcmSource } from "../src/renderer/engine/pcm-source.ts";
 
 interface SmokeResult {
@@ -11,6 +11,10 @@ interface SmokeResult {
   deckRms: number;
   deckPosition: number;
   deckLoopPosition: number;
+  deckLatency: number;
+  deckPitch: boolean;
+  reversed: boolean;
+  deckPlaying: boolean;
   error?: string;
 }
 
@@ -44,6 +48,15 @@ function wavTone(seconds: number, sampleRate: number): Uint8Array {
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitFor(check: () => boolean, timeoutMs: number): Promise<boolean> {
+  const started = performance.now();
+  while (performance.now() - started < timeoutMs) {
+    if (check()) return true;
+    await wait(50);
+  }
+  return check();
+}
+
 async function rms(analyser: AnalyserNode): Promise<number> {
   const data = new Uint8Array(analyser.fftSize);
   analyser.getByteTimeDomainData(data);
@@ -66,6 +79,10 @@ async function run(): Promise<SmokeResult> {
     deckRms: 0,
     deckPosition: 0,
     deckLoopPosition: 0,
+    deckLatency: 1,
+    deckPitch: false,
+    reversed: false,
+    deckPlaying: false,
   };
   const ctx = new AudioContext({ latencyHint: "interactive" });
   try {
@@ -80,7 +97,7 @@ async function run(): Promise<SmokeResult> {
       for (let i = 0; i < data.length; i += 1) data[i] = Math.sin((2 * Math.PI * 440 * i) / ctx.sampleRate) * 0.5;
     }
 
-    pcm.load(buffer);
+    await pcm.load(buffer);
     await pcm.play();
     await wait(350);
     result.rms = await rms(analyser);
@@ -103,16 +120,23 @@ async function run(): Promise<SmokeResult> {
     try {
       const file = new File([wavTone(2, ctx.sampleRate)], "smoke.wav", { type: "audio/wav" });
       await deck.load(file, { bpm: 120 });
-      deck.setKeylock(false);
       for (let i = 0; i < 40 && deck.engine !== "pcm"; i += 1) await wait(50);
       result.deckEngine = deck.engine;
+      result.deckLatency = deck.latencySeconds;
+      result.deckPitch = deck.pitchPreserved;
       await deck.play();
-      await wait(350);
+      await waitFor(() => deck.currentTime > 0.1, 3000);
+      await wait(200);
       result.deckRms = deck.level;
       result.deckPosition = deck.currentTime;
+      result.deckPlaying = deck.playing;
       deck.setLoopRange(0.5, 0.75, true);
-      await wait(300);
+      await waitFor(() => deck.currentTime >= 0.49, 1500);
       result.deckLoopPosition = deck.currentTime;
+      const beforeReverse = deck.currentTime;
+      deck.setLoopRange(0.5, 0.75, false);
+      deck.setReverse(true);
+      result.reversed = await waitFor(() => deck.currentTime < beforeReverse - 0.01, 1500);
       deck.pause();
     } finally {
       deck.destroy();
@@ -126,7 +150,11 @@ async function run(): Promise<SmokeResult> {
       result.deckRms > 0.05 &&
       result.deckPosition > 0.1 &&
       result.deckLoopPosition >= 0.49 &&
-      result.deckLoopPosition <= 0.76;
+      result.deckLoopPosition <= 0.76 &&
+      result.deckLatency > 0 &&
+      result.deckLatency < 0.01 &&
+      result.deckPitch &&
+      result.reversed;
   } catch (error) {
     result.error = (error as Error).message;
   } finally {
@@ -140,5 +168,12 @@ declare global {
     __smoke?: Promise<SmokeResult>;
   }
 }
+
+window.addEventListener("error", (event) => {
+  console.log("SMOKE ERROR", event.message, event.filename, event.lineno, event.error?.stack);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  console.log("SMOKE REJECTION", String(event.reason), event.reason?.stack);
+});
 
 window.__smoke = run();

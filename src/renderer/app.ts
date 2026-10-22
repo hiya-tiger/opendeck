@@ -18,7 +18,7 @@ import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
 import { PROVIDERS, findProvider } from "./streaming/providers.ts";
 import { parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "./streaming/youtube.ts";
 import { WhipBroadcaster, type BroadcastStatus } from "./broadcast/whip.ts";
-import { normaliseDegrees, pointerAngle, scratchPosition, scratchRate } from "./engine/scratch.ts";
+import { normaliseDegrees, pointerAngle, scratchPosition } from "./engine/scratch.ts";
 import { Sampler, SAMPLER_PADS } from "./engine/sampler.ts";
 import {
   bindingFor,
@@ -150,6 +150,19 @@ function setEngineState(text: string, live = false): void {
   $("engineDot").classList.toggle("live", live);
 }
 
+let lastDiagnosticsAt = 0;
+function updateEngineDiagnostics(now: number): void {
+  if (now - lastDiagnosticsAt < 500) return;
+  lastDiagnosticsAt = now;
+  const active = decks.A.hasTrack ? decks.A : decks.B.hasTrack ? decks.B : null;
+  if (!active) {
+    $("engineDiag").textContent = "";
+    return;
+  }
+  const latency = Math.round(active.latencySeconds * 1000);
+  $("engineDiag").textContent = `${active.engine} ${latency} ms | ${active.underruns} xruns | ${active.pitchPreserved ? "pitch hold" : "pitch follows tempo"}`;
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
 }
@@ -212,7 +225,7 @@ function setupScratch(deckId: DeckId): void {
   let centerX = 0;
   let centerY = 0;
   let lastMoveAt = 0;
-  let rate = 0;
+  let lastFrameAt = 0;
   let frame = 0;
 
   const deck = decks[deckId];
@@ -222,8 +235,10 @@ function setupScratch(deckId: DeckId): void {
       frame = 0;
       return;
     }
-    if (performance.now() - lastMoveAt > 65) rate = 0;
-    deck.scratchRate(rate);
+    const now = performance.now();
+    const dt = Math.min(Math.max((now - lastFrameAt) / 1000, 1 / 1000), 0.1);
+    lastFrameAt = now;
+    if (now - lastMoveAt > 35) deck.scratchCoast(dt);
     frame = requestAnimationFrame(driveScratch);
   };
 
@@ -246,8 +261,8 @@ function setupScratch(deckId: DeckId): void {
     wasPlaying = deck.playing;
     deck.pause();
     deck.beginScratch();
-    rate = 0;
     lastMoveAt = performance.now();
+    lastFrameAt = lastMoveAt;
     if (!frame) frame = requestAnimationFrame(driveScratch);
     event.preventDefault();
   });
@@ -261,7 +276,7 @@ function setupScratch(deckId: DeckId): void {
     lastAngle = angle;
     lastMoveAt = now;
     turn += delta;
-    rate = scratchRate(delta, dt);
+    deck.scratchDrive(delta, dt);
     position = scratchPosition(position, delta, deck.duration);
     deck.seek(position);
     disc.style.transform = `rotate(${turn.toFixed(1)}deg)`;
@@ -270,7 +285,6 @@ function setupScratch(deckId: DeckId): void {
   const finish = (event: PointerEvent): void => {
     if (!active || event.pointerId !== pointerId) return;
     active = false;
-    rate = 0;
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
     deck.endScratch();
@@ -1711,6 +1725,7 @@ function frame(): void {
   rafPending = true;
   decks.A.tick();
   decks.B.tick();
+  updateEngineDiagnostics(performance.now());
   renderDeckFrame("A");
   renderDeckFrame("B");
   drawMeter($<HTMLCanvasElement>("meterA"), decks.A.level, "deck");
