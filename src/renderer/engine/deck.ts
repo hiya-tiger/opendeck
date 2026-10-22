@@ -2,6 +2,7 @@ import { beatSeconds, nearestBeat, snapToBeat, loopSeconds } from "./beatgrid.ts
 import { defaultStemGains, STEM_CROSSOVERS, type StemId } from "./stems.ts";
 import { fxDefault, filterFrequency, filterType, crushCurve, delaySeconds, wetGain, type Division, type FxType } from "./fx.ts";
 import { ScratchVoice } from "./scratch-voice.ts";
+import { PcmSource } from "./pcm-source.ts";
 
 export type DeckId = "A" | "B";
 
@@ -72,6 +73,10 @@ export class Deck {
   readonly info: DeckTrackInfo = { id: "", title: "No track", bpm: 0, beatPhase: 0, key: "--", camelot: "--" };
 
   private source: MediaElementAudioSourceNode;
+  private deckInput: GainNode;
+  private pcm: PcmSource;
+  private pcmBuffer: AudioBuffer | null = null;
+  private pcmActive = false;
   private splitter: ChannelSplitterNode;
   private bands: Record<StemId, { nodes: AudioNode[]; gain: GainNode }>;
   private stemBus: GainNode;
@@ -119,6 +124,11 @@ export class Deck {
     this.el.preservesPitch = true;
 
     this.source = ctx.createMediaElementSource(this.el);
+    this.deckInput = ctx.createGain();
+    this.source.connect(this.deckInput);
+    this.pcm = new PcmSource(ctx, this.deckInput, {
+      onEnded: () => this.emit(),
+    });
     this.splitter = ctx.createChannelSplitter(2);
 
     this.stemBus = ctx.createGain();
@@ -126,7 +136,7 @@ export class Deck {
 
     const makeBand = (nodes: AudioNode[]): { nodes: AudioNode[]; gain: GainNode } => {
       const gain = ctx.createGain();
-      let last: AudioNode = this.source;
+      let last: AudioNode = this.deckInput;
       const chain: AudioNode[] = [];
       for (const node of nodes) {
         last.connect(node);
@@ -419,14 +429,26 @@ export class Deck {
       const buffer = await this.ctx.decodeAudioData(data);
       if (token !== this.scratchToken) return;
       this.scratch.setBuffer(buffer);
+      this.pcmBuffer = buffer;
+      this.pcm.load(buffer, 0);
+      this.pcm.setRate(this.rate);
+      this.applyPcmLoop();
+      this.syncEngine();
       if (this.scratching) void this.scratch.start(this.currentTime);
     } catch {
-      if (token === this.scratchToken) this.scratch.clear();
+      if (token === this.scratchToken) {
+        this.scratch.clear();
+        this.pcmBuffer = null;
+        this.pcm.clear();
+      }
     }
   }
 
   async load(source: File | string, info: Partial<DeckTrackInfo> = {}): Promise<void> {
     this.pause();
+    this.pcm.clear();
+    this.pcmBuffer = null;
+    this.pcmActive = false;
     this.scratch.stop();
     this.scratching = false;
     this.scratch.clear();
@@ -497,15 +519,55 @@ export class Deck {
   }
 
   get duration(): number {
+    if (this.pcmBuffer) return this.pcmBuffer.duration;
     return Number.isFinite(this.el.duration) ? this.el.duration : 0;
   }
 
   get currentTime(): number {
+    if (this.pcmActive && this.pcmBuffer) {
+      return this.pcm.positionSamples / this.pcmBuffer.sampleRate;
+    }
     return this.el.currentTime;
   }
 
   get playing(): boolean {
+    if (this.pcmActive) return this.pcm.isPlaying;
     return !this.el.paused && !this.el.ended;
+  }
+
+  private syncEngine(): void {
+    const wanted = Boolean(this.pcmBuffer) && !this.keylock && !this.scratching;
+    if (wanted === this.pcmActive) {
+      if (this.pcmActive) this.applyPcmLoop();
+      return;
+    }
+    const time = this.currentTime;
+    const wasPlaying = this.playing;
+    if (wanted) {
+      this.el.pause();
+      this.pcmActive = true;
+      this.pcm.seek(Math.round(time * this.pcmBuffer!.sampleRate));
+      this.pcm.setRate(this.rate);
+      this.applyPcmLoop();
+      if (wasPlaying) void this.pcm.play();
+    } else {
+      this.pcm.pause();
+      this.pcmActive = false;
+      this.el.currentTime = Math.max(0, Math.min(time, this.el.duration || 0));
+      if (wasPlaying) void this.el.play().catch(() => undefined);
+    }
+  }
+
+  private applyPcmLoop(): void {
+    if (!this.pcmBuffer) return;
+    if (this.loopActive && this.loopEnd > this.loopStart) {
+      this.pcm.setLoop(
+        Math.round(this.loopStart * this.pcmBuffer.sampleRate),
+        Math.round(this.loopEnd * this.pcmBuffer.sampleRate),
+      );
+    } else {
+      this.pcm.setLoop(null, null);
+    }
   }
 
   get hasTrack(): boolean {
@@ -526,6 +588,12 @@ export class Deck {
   async play(): Promise<void> {
     if (!this.el.src) return;
     if (this.ctx.state === "suspended") await this.ctx.resume();
+    this.syncEngine();
+    if (this.pcmActive) {
+      if (this.currentTime >= this.duration - 0.05) this.seek(0);
+      await this.pcm.play();
+      return;
+    }
     try {
       await this.el.play();
     } catch {
@@ -535,6 +603,7 @@ export class Deck {
 
   pause(): void {
     this.el.pause();
+    this.pcm.pause();
   }
 
   toggle(): void {
@@ -544,7 +613,9 @@ export class Deck {
 
   seek(seconds: number): void {
     const limit = this.duration;
-    this.el.currentTime = Math.max(0, Math.min(seconds, limit ? limit - 0.02 : 0));
+    const target = Math.max(0, Math.min(seconds, limit ? limit - 0.02 : 0));
+    this.el.currentTime = target;
+    if (this.pcmBuffer) this.pcm.seek(Math.round(target * this.pcmBuffer.sampleRate));
     this.emit();
   }
 
@@ -553,6 +624,7 @@ export class Deck {
     this.rate = clamped;
     this.el.preservesPitch = this.keylock;
     this.el.playbackRate = clamped;
+    this.pcm.setRate(clamped);
   }
 
   setTempoPercent(percent: number): void {
@@ -579,6 +651,7 @@ export class Deck {
   setKeylock(enabled: boolean): void {
     this.keylock = enabled;
     this.el.preservesPitch = enabled;
+    this.syncEngine();
     this.emit();
   }
 
@@ -731,6 +804,7 @@ export class Deck {
     this.loopStart = Math.max(0, startTime);
     this.loopEnd = Math.min(this.duration || Infinity, this.loopStart + length);
     this.loopActive = active;
+    this.applyPcmLoop();
     if (active) this.seek(this.loopStart);
     this.emit();
   }
@@ -742,6 +816,7 @@ export class Deck {
     this.loopActive = active;
     const bpm = this.info.bpm;
     if (bpm > 0) this.loopBeats = Math.max(1 / 8, (this.loopEnd - this.loopStart) / beatSeconds(bpm));
+    this.applyPcmLoop();
     if (active) this.seek(this.loopStart);
     this.emit();
   }
@@ -752,6 +827,7 @@ export class Deck {
       return;
     }
     this.loopActive = !this.loopActive;
+    this.applyPcmLoop();
     if (this.loopActive) this.seek(this.loopStart);
     this.emit();
   }
@@ -784,6 +860,7 @@ export class Deck {
     if (this.loopActive) {
       this.loopStart += beatSeconds(bpm) * beats;
       this.loopEnd += beatSeconds(bpm) * beats;
+      this.applyPcmLoop();
     }
   }
 
@@ -793,7 +870,7 @@ export class Deck {
 
   tick(): void {
     if (this.destroyed) return;
-    if (this.loopActive && this.loopEnd > this.loopStart && this.playing) {
+    if (!this.pcmActive && this.loopActive && this.loopEnd > this.loopStart && this.playing) {
       if (this.currentTime >= this.loopEnd - 0.005 || this.currentTime < this.loopStart - 0.5) {
         this.seek(this.loopStart);
       }
@@ -850,6 +927,8 @@ export class Deck {
     this.el.pause();
     this.el.src = "";
     this.scratch.dispose();
+    this.pcm.clear();
+    this.pcm.dispose();
     this.teardownFx();
     this.source.disconnect();
     this.analyser.disconnect();

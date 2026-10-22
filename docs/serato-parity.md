@@ -28,12 +28,12 @@ observable behaviour; layout, assets and wording are original.
 | Beat grid | Codec ready, OpenDeck analysis drives playback | Import/export Serato BeatGrid with lock flag | 2 (codec done) |
 | Key / BPM | Analysis, Camelot display | Reads/writes key notation and BPM tags | 2 |
 | Crate columns | None | Opt-in SQLite column layout with backup | 3 |
-| Playback source | `HTMLAudioElement`; PCM transport and worklet built | Rust PCM engine, sample-accurate | 1-3 (foundation done) |
+| Playback source | `HTMLAudioElement`, or `PcmSource` when key lock is off | Rust PCM engine, sample-accurate | 2 (worklet wired, keylock path pending) |
 | Reverse play | Pauses; transport supports reverse offline | True reverse through the engine | 1-3 (offline done) |
-| Loops | Seek-based; sample-accurate offline renderer | Sample-accurate, block-size independent | 1-3 (offline done) |
+| Loops | Seek-based on the media element; sample-accurate in the PCM path | Sample-accurate, block-size independent | 2 (PCM path wired) |
 | Latency | 20-40 ms typical | Under 10 ms where the driver allows, xrun counter | 3 |
 | DVS | Decoder and transport in JS | Same decoder, engine transport, lower latency | 3 |
-| Key lock | `preservesPitch` on the media element | signalsmith-stretch, optional per deck | 3 (not started) |
+| Key lock | `preservesPitch` on the media element | signalsmith-stretch, optional per deck | 2 (media path works, PCM path pending) |
 | Stems | Four EQ bands, not separation | Four EQ bands documented as filters; source separation out of scope | - |
 | Stems-style pads | No | Not planned; sampler and hot cues stay | - |
 | Video | No | Out of scope | - |

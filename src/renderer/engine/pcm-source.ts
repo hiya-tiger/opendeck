@@ -10,6 +10,7 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
     this.playing = false;
     this.loopStart = -1;
     this.loopEnd = -1;
+    this.frames = 0;
     this.port.onmessage = (event) => {
       const data = event.data;
       if (data.type === "buffer") {
@@ -22,8 +23,10 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
         this.playing = true;
       } else if (data.type === "pause") {
         this.playing = false;
+        this.port.postMessage({ type: "position", position: this.position });
       } else if (data.type === "seek") {
         this.position = data.position;
+        this.port.postMessage({ type: "position", position: this.position });
       } else if (data.type === "rate") {
         this.rate = data.rate;
       } else if (data.type === "gain") {
@@ -84,12 +87,19 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
       }
     }
     this.position = position;
-    if (this.loopStart < 0 && (position < 0 || position > last)) this.playing = false;
+    if ((this.frames++ & 15) === 0 || !this.playing) {
+      this.port.postMessage({ type: "position", position });
+    }
+    if (this.loopStart < 0 && (position < 0 || position > last)) {
+      if (this.playing) this.port.postMessage({ type: "ended" });
+      this.playing = false;
+    }
     return true;
   }
 
   wrap() {
     const length = this.loopEnd - this.loopStart;
+    if (length <= 0) { this.playing = false; return; }
     if (this.rate >= 0) {
       if (this.position >= this.loopEnd) {
         this.position = this.loopStart + ((this.position - this.loopStart) % length);
@@ -105,6 +115,7 @@ registerProcessor("opendeck-pcm", OpenDeckPcmProcessor);
 export interface PcmSourceOptions {
   gain?: number;
   onEnded?: () => void;
+  onPosition?: (samples: number) => void;
 }
 
 export class PcmSource {
@@ -116,6 +127,7 @@ export class PcmSource {
   private right: Float32Array | null = null;
   private loaded = false;
   private playing = false;
+  private position = 0;
   private options: PcmSourceOptions;
 
   constructor(ctx: AudioContext, destination: AudioNode, options: PcmSourceOptions = {}) {
@@ -134,6 +146,14 @@ export class PcmSource {
     return this.gainNode;
   }
 
+  get positionSamples(): number {
+    return this.position;
+  }
+
+  get isPlaying(): boolean {
+    return this.playing;
+  }
+
   setGain(gain: number): void {
     this.gainNode.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.01);
     this.node?.port.postMessage({ type: "gain", gain });
@@ -146,6 +166,7 @@ export class PcmSource {
     this.right = right;
     this.loaded = true;
     this.playing = false;
+    this.position = position;
     this.sendBuffer(position);
   }
 
@@ -164,6 +185,7 @@ export class PcmSource {
     this.right = null;
     this.loaded = false;
     this.playing = false;
+    this.position = 0;
     this.node?.port.postMessage({ type: "clear" });
   }
 
@@ -182,9 +204,18 @@ export class PcmSource {
         numberOfOutputs: 1,
         outputChannelCount: [2],
       });
+      node.port.onmessage = (event) => {
+        if (event.data?.type === "position") {
+          this.position = event.data.position;
+          this.options.onPosition?.(this.position);
+        } else if (event.data?.type === "ended") {
+          this.playing = false;
+          this.options.onEnded?.();
+        }
+      };
       node.connect(this.gainNode);
       this.node = node;
-      this.sendBuffer(0);
+      this.sendBuffer(this.position);
     })();
     return this.ready;
   }
@@ -197,8 +228,9 @@ export class PcmSource {
       return;
     }
     if (!this.node) return;
+    if (position !== undefined) this.position = position;
     this.playing = true;
-    this.node.port.postMessage({ type: "play", position });
+    this.node.port.postMessage({ type: "play", position: this.position });
   }
 
   pause(): void {
@@ -207,6 +239,7 @@ export class PcmSource {
   }
 
   seek(position: number): void {
+    this.position = position;
     this.node?.port.postMessage({ type: "seek", position });
   }
 

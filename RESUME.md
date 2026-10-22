@@ -8,13 +8,11 @@ following work is not done, in the order it should be picked up.
 - Add signalsmith-stretch (MIT, official `signalsmith-stretch` npm package) to a
   worklet, with key lock on by default to match the current
   `HTMLMediaElement.preservesPitch` behaviour.
-- Wire `PcmSource` into `Deck` behind the existing public API. Keep the media
-  element for remote/stream URLs and fall back when `decodeAudioData` fails.
-- Route deck input through one gain node so either source can feed the band
-  splitter. Do not change EQ/FX/mixer/analyser code.
-- Move loop boundaries and DVS jumps onto the PCM transport; keep the timecode
-  decoder byte-identical.
-- Expose the xrun counter and measured latency in diagnostics.
+- `PcmSource` is wired into `Deck` for local files: one deck input gain feeds
+  the band splitter, and the PCM path drives transport and loops when key lock
+  is off. Remote/stream URLs and decode failures stay on the media element.
+- Still to do: key lock inside the PCM path (signalsmith-stretch), exact DVS
+  jump handoff, and an xrun/latency diagnostic.
 
 ## 2. Serato export UI
 
@@ -38,9 +36,10 @@ each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
 
 ## Known gaps
 
-- Key lock is not implemented in the PCM path.
-- `PcmSource` is not connected to a deck, so reverse playback and sample loops
-  are only proven offline.
+- Key lock is not implemented in the PCM path; disabling key lock switches a
+  local track to `PcmSource`, enabling it switches back to the media element.
+- The PCM path has no runtime audio smoke test yet, so sample loops are still
+  only proven offline.
 - Serato cue import is MP3-only. The first saved loop and BeatGrid BPM/phase
   are applied; remaining loops and per-beat detail are not.
 - Folder export backs up existing files but has no undo command and does not
