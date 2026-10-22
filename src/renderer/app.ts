@@ -9,6 +9,7 @@ import { Waveform, ZoomWaveform } from "./media/waveform.ts";
 import { Library, isAudioFile, type Track } from "./media/library.ts";
 import { parseCrate, isSerato } from "./media/serato.ts";
 import { readMediaInfo, type Artwork } from "./media/artwork.ts";
+import { readSeratoTagsFromFile } from "./media/serato-file.ts";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
 import { PROVIDERS, findProvider } from "./streaming/providers.ts";
@@ -804,7 +805,8 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   zooms[deckId]?.setBpm(track.bpm, track.beatPhase);
   waves[deckId]?.setCue(deck.cuePoint);
   syncLoopButtons(deckId);
-  loadCues(deckId, track.id);
+  const hadLocalCues = loadCues(deckId, track.id);
+  if (!hadLocalCues) void applySeratoCues(track, deckId);
   if (track.analyzed) applyTrackToDeck(track, deckId);
   else enqueueAnalysis(track);
   await mixer.resume();
@@ -837,7 +839,8 @@ function persistCues(deckId: DeckId): void {
   }
 }
 
-function loadCues(deckId: DeckId, trackId: string): void {
+function loadCues(deckId: DeckId, trackId: string): boolean {
+  let found = false;
   const deck = decks[deckId];
   deck.hotCues = new Array(8).fill(null);
   try {
@@ -847,11 +850,25 @@ function loadCues(deckId: DeckId, trackId: string): void {
       cues.forEach((time, index) => {
         if (typeof time === "number" && Number.isFinite(time) && index < 8) {
           deck.hotCues[index] = { time, color: HOT_CUE_COLORS[index] };
+          found = true;
         }
       });
     }
   } catch {
     // corrupt entry
+  }
+  updatePads(deckId, true);
+  return found;
+}
+
+async function applySeratoCues(track: Track, deckId: DeckId): Promise<void> {
+  if (!track.file) return;
+  const tags = await readSeratoTagsFromFile(track.file);
+  if (!tags?.markers?.cues.length || meta[deckId] !== track) return;
+  const deck = decks[deckId];
+  for (const cue of tags.markers.cues) {
+    if (cue.index >= 8) continue;
+    deck.hotCues[cue.index] = { time: cue.positionMs / 1000, color: cue.color };
   }
   updatePads(deckId, true);
 }

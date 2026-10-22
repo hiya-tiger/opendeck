@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readId3, readSeratoGeoB, writeSeratoGeoB } from "../src/renderer/media/serato-id3.ts";
+import { readSeratoTagsFromFile } from "../src/renderer/media/serato-file.ts";
 import {
   decodeCrate,
   decodeDatabase,
@@ -248,4 +249,21 @@ test("ID3 reader refuses unsynchronised tags", () => {
   const input = new Uint8Array(20);
   input.set([0x49, 0x44, 0x33, 3, 0, 0x80, 0, 0, 0, 10]);
   assert.throws(() => readId3(input), /Unsynchronised/);
+});
+test("reads Serato cues from an MP3 File without reading the audio payload", async () => {
+  const audio = new Uint8Array(2048);
+  audio.fill(0x55);
+  const markers = decodeMarkers2(fixture(MARKERS2));
+  const input = writeSeratoGeoB(id3v23([], audio), [
+    { description: "Serato Markers2", data: encodeMarkers2(markers) },
+  ]);
+  const file = new File([input], "track.mp3", { type: "audio/mpeg" });
+  const tags = await readSeratoTagsFromFile(file);
+  assert.equal(tags?.markers?.cues[0]?.positionMs, 1066);
+  assert.equal(tags?.markers?.cues[0]?.color, "#CC0000");
+});
+
+test("ignores non-MP3 files for Serato tag lookup", async () => {
+  const file = new File([new Uint8Array([1, 2, 3])], "track.wav", { type: "audio/wav" });
+  assert.equal(await readSeratoTagsFromFile(file), null);
 });

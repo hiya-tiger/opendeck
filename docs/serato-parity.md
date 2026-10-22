@@ -21,19 +21,19 @@ observable behaviour; layout, assets and wording are original.
 
 | Area | Today | Target | Phase |
 | --- | --- | --- | --- |
-| Crate import | Reads `.crate` and `database V2` paths | Also reads tags and shows crate metadata | 2 |
-| Crate export | None | Writes `Subcrates/*.crate`, `database V2`, `neworder.pref` | 2 |
-| Cue import/export | In-app 8 hot cues only | Reads/writes `Serato Markers_` and `Serato Markers2`, 8 slots, 18-colour palette | 2 |
-| Saved loops | In-app loops | Reads/writes Serato loops as cue-name entries | 2 |
-| Beat grid | OpenDeck analysis and editing | Import/export Serato BeatGrid with lock flag | 2 |
+| Crate import | Reads `.crate` and `database V2` paths | Also reads tags and shows crate metadata | 2 (paths done, tags read in code) |
+| Crate export | Codecs tested, no UI | Writes `Subcrates/*.crate`, `database V2`, `neworder.pref` | 2 (codecs done) |
+| Cue import/export | MP3 cues import into the deck; codecs for both marker frames | Reads/writes `Serato Markers_` and `Serato Markers2`, 8 slots, 18-colour palette | 2 (read done, write codec done) |
+| Saved loops | Codec ready, not applied to UI | Reads/writes Serato loops as cue-name entries | 2 (codec done) |
+| Beat grid | Codec ready, OpenDeck analysis drives playback | Import/export Serato BeatGrid with lock flag | 2 (codec done) |
 | Key / BPM | Analysis, Camelot display | Reads/writes key notation and BPM tags | 2 |
 | Crate columns | None | Opt-in SQLite column layout with backup | 3 |
-| Playback source | `HTMLAudioElement` | Rust PCM engine, sample-accurate | 1-3 |
-| Reverse play | Pauses | True reverse through the engine | 1-3 |
-| Loops | Seek-based | Sample-accurate, block-size independent | 1-3 |
+| Playback source | `HTMLAudioElement`; PCM transport and worklet built | Rust PCM engine, sample-accurate | 1-3 (foundation done) |
+| Reverse play | Pauses; transport supports reverse offline | True reverse through the engine | 1-3 (offline done) |
+| Loops | Seek-based; sample-accurate offline renderer | Sample-accurate, block-size independent | 1-3 (offline done) |
 | Latency | 20-40 ms typical | Under 10 ms where the driver allows, xrun counter | 3 |
 | DVS | Decoder and transport in JS | Same decoder, engine transport, lower latency | 3 |
-| Key lock | None | signalsmith-stretch, optional per deck | 3 |
+| Key lock | `preservesPitch` on the media element | signalsmith-stretch, optional per deck | 3 (not started) |
 | Stems | Four EQ bands, not separation | Four EQ bands documented as filters; source separation out of scope | - |
 | Stems-style pads | No | Not planned; sampler and hot cues stay | - |
 | Video | No | Out of scope | - |
