@@ -1,0 +1,63 @@
+# Third-party notices
+
+OpenDeck is licensed under the MIT License (see `LICENSE`). It includes or
+depends on the components below. Each component remains under its own license;
+the license text of a dependency is available in its published package or
+repository.
+
+OpenDeck ships no code, assets, fonts, audio, documentation text or other
+material from Serato, AlphaTheta/Rekordbox, Traktor/Native Instruments or any
+other DJ vendor. Product names are used only to describe compatibility.
+
+## Runtime and build dependencies
+
+| Component | Used for | License |
+| --- | --- | --- |
+| Electron 33 | Desktop shell | MIT |
+| Tauri v2 | Alternative desktop shell | MIT OR Apache-2.0 |
+| esbuild | Bundling the renderer and main process | MIT |
+| TypeScript | Type checking and compiler | Apache-2.0 |
+| serde, serde_json | Rust serialization | MIT OR Apache-2.0 |
+| ureq | HTTP client in the Tauri shell | MIT OR Apache-2.0 |
+| rfd | Native file dialogs in the Tauri shell | MIT |
+| sha1 | YouTube Music request signing | MIT OR Apache-2.0 |
+| webview2-com | WebView2 host bindings (Windows) | MIT OR Apache-2.0 |
+
+## Optional external tools
+
+| Component | Used for | License |
+| --- | --- | --- |
+| FFmpeg | RTMP broadcast, installed by the user, never bundled | LGPL-2.1-or-later / GPL-2.0-or-later depending on the build |
+
+OpenDeck invokes a user-installed FFmpeg executable and does not link against
+it. Users are responsible for choosing a build whose license fits their use.
+
+## Planned audio-engine dependencies
+
+These are not shipped yet. They are listed here so the license position is
+reviewed before the engine work lands.
+
+| Component | Used for | License |
+| --- | --- | --- |
+| cpal | Native audio output in the Rust engine | Apache-2.0 OR MIT |
+| symphonia | Decoding MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV | MPL-2.0 |
+| signalsmith-stretch | Time stretching and pitch shifting | MIT |
+
+MPL-2.0 is file-level copyleft: modifications to Symphonia's own files must be
+published under MPL-2.0, while OpenDeck's files can remain MIT. We do not
+modify Symphonia; if that changes, the modified files will be called out here.
+
+## Development and verification tools
+
+`node:test`, the TypeScript compiler, Cargo and the browser/CDP tooling used in
+the verification notes are development-only and are not redistributed with the
+application.
+
+## Reference material
+
+The Serato file-format behaviour implemented by the import/export code was
+documented from publicly available community reverse-engineering notes
+([serato-tags](https://github.com/Holzhaus/serato-tags), the Mixxx wiki and
+[rb2serato](https://github.com/SM4RTENHEIMER/rb2serato), all MIT-licensed
+documentation/projects). No source code from those projects is vendored into
+OpenDeck; see `docs/interop.md` for the specific claims and links.

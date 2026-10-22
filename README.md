@@ -19,7 +19,7 @@ Windows and Linux (Flatpak manifest included).
 - Offline analysis: BPM with comb refinement, beat phase, Krumhansl key with Camelot codes, waveform peaks. WAV files are analysed by the Rust core in the Tauri build; other formats fall back to the TypeScript analyser.
 - Beat sync (tempo match plus phase alignment), quantized cue/loop/jump, 8 hot cues per deck.
 - Loops from 1/8 to 16 beats, halve/double, manual in/out.
-- Four-band stem-style EQ (low / low-mid / high-mid / high) with mute and solo, independent from the 3-band channel EQ.
+- Four-band EQ (low / low-mid / high-mid / high) with mute and solo, independent from the 3-band channel EQ. These are filter bands, not source separation.
 - FX chain: echo, delay, reverb, filter, flanger, phaser, bitcrush, with beat divisions and wet control.
 - Crossfader with smooth, fast and cut curves; channel faders, trim, master limiter.
 - Eight-pad sampler with synthesized one-shots (kick, snare, clap, hats, toms, stab), per-pad velocity, volume and Numpad 1-8 triggers.
@@ -30,6 +30,15 @@ Windows and Linux (Flatpak manifest included).
 - DRM: the Tauri/WebView2 build reports Widevine and PlayReady support, so DRM services can later be embedded. Standard Electron 33 ships neither CDM, so DRM services stay in their own windows there. YouTube Music embeds do not need Widevine.
 - Recording to WebM/Opus via a native save dialog.
 - Broadcast: WHIP (WebRTC) out of the box; RTMP through FFmpeg, which must be installed separately and available on `PATH`. The installer does not include FFmpeg, and OpenDeck shows install guidance when it is missing.
+
+## Documentation
+
+- [Serato parity plan](docs/serato-parity.md): feature matrix, phases and non-goals for library and engine compatibility.
+- [Library interoperability](docs/interop.md): Serato crate, database and tag formats, the rules for writing them safely, and what is implemented today.
+- [Audio engine](docs/engine.md): current media-element path, the Rust PCM engine design, latency budget and test strategy.
+- [Decisions](docs/decisions.md): why the engine and format work is structured this way, plus assumptions still to verify.
+- [Third-party notices](NOTICE): dependency licenses and the policy on GPL and vendor assets.
+- [Hardware controllers](docs/hardware.md) and [streaming setup](docs/streaming-setup.md).
 
 ## DVS
 
@@ -113,7 +122,7 @@ Tests generate timecode signals for every supported media, add noise and gain ch
 
 Verified on Windows with Electron 33:
 
-- `npm test`: 53/53 pass.
+- `npm test`: 56/56 pass.
 - `npx tsc --noEmit`: clean.
 - UI smoke test over CDP: two decks, 16 pads, 6 providers, 3 tabs, DVS bar, no console errors.
 - Synthetic 128 BPM WAV loaded through the real pipeline: analysis 127.7 BPM / A# min, audible output at the analyser, loop snapped to beats, hot cue stored, echo FX active, sync between decks.
@@ -183,9 +192,18 @@ test/                        node:test suites
 packaging/                   Flatpak manifest and desktop files
 ```
 
-## License
+## Legal
 
-MIT. FFmpeg is not bundled or redistributed; install it separately under its own license.
+OpenDeck is licensed under the MIT License. It is an independent project and is
+not affiliated with, sponsored by or endorsed by Serato, AlphaTheta (Rekordbox),
+Native Instruments (Traktor) or any other DJ vendor. Product names are used only
+to describe file-format and hardware compatibility. No vendor source code,
+assets, fonts, audio, manual text or visual design is included. Serato and
+Rekordbox are trademarks of their respective owners.
+
+FFmpeg is not bundled or redistributed; install it separately under its own
+license. Third-party dependencies and their licenses are listed in
+[NOTICE](NOTICE).
 
 
 
