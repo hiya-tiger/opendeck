@@ -18,12 +18,14 @@ following work is not done, in the order it should be picked up.
 
 ## 2. Serato export UI
 
+The library panel now downloads a zip with `database V2`, `neworder.pref` and
+each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
+
 - Replace the zip download with a direct export into a chosen `_Serato_`
   folder, refusing while Serato is running, with a backup and an undo log.
-- Add per-track "write tags" for MP3 via `writeSeratoGeoB`, using a temporary
-  copy and byte verification before replacing the original.
-- Add WAV/AIFF RIFF `id3 ` chunk support, FLAC `VORBIS_COMMENT` and MP4
-  `----:com.serato.dj:*` atoms.
+- Add per-track "write tags" for MP3/WAV/AIFF, using a temporary copy and byte
+  verification before replacing the original.
+- Add FLAC `VORBIS_COMMENT` and MP4 `----:com.serato.dj:*` atoms.
 - Do not add the SQLite column-layout edit without a backup and a version check.
 
 ## 3. Test and verification
@@ -41,4 +43,5 @@ following work is not done, in the order it should be picked up.
   are only proven offline.
 - Serato cue import is MP3-only. The first saved loop and BeatGrid BPM/phase
   are applied; remaining loops and per-beat detail are not.
-- No export UI, no WAV/FLAC/MP4 tag writing, no SQLite column layout.
+- The export is a zip download, not a direct folder write with backup/undo.
+- No in-app tag writing, no FLAC/MP4 tag writing, no SQLite column layout.
