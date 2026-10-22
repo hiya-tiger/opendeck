@@ -32,6 +32,7 @@ import {
   type MidiBindings,
   type MidiEvent,
 } from "./midi/midi.ts";
+import { applyProfile, profileForDevice } from "./midi/profiles.ts";
 
 interface NativeAnalysis {
   bpm: number;
@@ -1884,7 +1885,10 @@ function renderMidiDevices(inputs: { name?: string | null; manufacturer?: string
     const name = document.createElement("strong");
     name.textContent = input.name || "MIDI input";
     const maker = document.createElement("span");
-    maker.textContent = input.manufacturer || "";
+    const profile = profileForDevice(`${input.manufacturer ?? ""} ${input.name ?? ""}`);
+    maker.textContent = [input.manufacturer, profile ? `preset: ${profile.label}` : ""]
+      .filter(Boolean)
+      .join(" · ");
     row.append(name, maker);
     list.append(row);
   }
@@ -1901,8 +1905,21 @@ function refreshMidiInputs(): void {
   }
   renderMidiDevices(inputs);
   $("midiState").textContent = inputs.length ? `${inputs.length} in` : "no device";
+  const detected: string[] = [];
+  for (const input of inputs) {
+    const profile = profileForDevice(`${input.manufacturer ?? ""} ${input.name ?? ""}`);
+    if (!profile) continue;
+    if (applyProfile(midiBindings, profile).length) {
+      detected.push(profile.label);
+    }
+  }
+  if (detected.length) {
+    saveBindings(window.localStorage, midiBindings);
+  }
   if (!inputs.length) {
     setMidiHint("No MIDI input found. Plug in a controller and it will appear here.");
+  } else if (detected.length) {
+    setMidiHint(`Loaded preset for ${detected.join(", ")}. ${Object.keys(midiBindings).length} mapping(s).`);
   } else {
     setMidiHint(`${inputs.length} input(s). Notes 36-43 play sampler pads 1-8; use Learn for other controls.`);
   }

@@ -9,7 +9,9 @@ import {
   matchesBinding,
   parseMidiMessage,
   saveBindings,
+  type MidiBindings,
 } from "../src/renderer/midi/midi.ts";
+import { applyProfile, DEVICE_PROFILES, profileForDevice } from "../src/renderer/midi/profiles.ts";
 import { SAMPLER_PADS } from "../src/renderer/engine/sampler.ts";
 
 test("midi messages parse status, channel and normalised values", () => {
@@ -119,6 +121,57 @@ test("generic drum notes map to sampler pads and events describe themselves", ()
     describeMidiEvent({ type: "cc", channel: 1, controller: 74, value: 64, normalized: 0.5 }),
     "ch1 CC74 64",
   );
+});
+
+test("controller presets match device names", () => {
+  assert.equal(profileForDevice("Hercules DJControl T10")?.id, "hercules-djcontrol-t10");
+  assert.equal(profileForDevice("DJControl T10 MIDI")?.id, "hercules-djcontrol-t10");
+  assert.equal(profileForDevice("Numark Party Mix III")?.id, "numark-party-mix-iii");
+  assert.equal(profileForDevice("Numark Party Mix 3")?.id, "numark-party-mix-iii");
+  assert.equal(profileForDevice("Numark Party Mix")?.id, "numark-party-mix-iii");
+  assert.equal(profileForDevice("Akai MPK Mini"), null);
+  assert.equal(profileForDevice(null), null);
+});
+
+test("DJControl T10 preset uses the documented channels and notes", () => {
+  const profile = DEVICE_PROFILES.find((item) => item.id === "hercules-djcontrol-t10");
+  assert.ok(profile);
+  assert.deepEqual(profile.bindings["A.play"], { message: "note", number: 7, channel: 2 });
+  assert.deepEqual(profile.bindings["A.cue"], { message: "note", number: 6, channel: 2 });
+  assert.deepEqual(profile.bindings["B.play"], { message: "note", number: 7, channel: 3 });
+  assert.deepEqual(profile.bindings["A.pad1"], { message: "note", number: 0, channel: 7 });
+  assert.deepEqual(profile.bindings["B.pad8"], { message: "note", number: 7, channel: 8 });
+  assert.deepEqual(profile.bindings["A.loop"], { message: "note", number: 11, channel: 2 });
+  assert.deepEqual(profile.bindings["mix.crossfader"], { message: "cc", number: 0, channel: 1 });
+  assert.deepEqual(profile.bindings["mix.chA"], { message: "cc", number: 0, channel: 2 });
+  assert.deepEqual(profile.bindings["smp.1"], { message: "note", number: 48, channel: 7 });
+  assert.deepEqual(profile.bindings["A.eqMid"], { message: "cc", number: 3, channel: 2 });
+});
+
+test("Party Mix III preset uses channel 16 for the mixer and separate pad channels", () => {
+  const profile = DEVICE_PROFILES.find((item) => item.id === "numark-party-mix-iii");
+  assert.ok(profile);
+  assert.deepEqual(profile.bindings["A.play"], { message: "note", number: 0, channel: 1 });
+  assert.deepEqual(profile.bindings["B.cue"], { message: "note", number: 1, channel: 2 });
+  assert.deepEqual(profile.bindings["A.pad1"], { message: "note", number: 20, channel: 5 });
+  assert.deepEqual(profile.bindings["B.pad4"], { message: "note", number: 23, channel: 6 });
+  assert.deepEqual(profile.bindings["mix.crossfader"], { message: "cc", number: 8, channel: 16 });
+  assert.deepEqual(profile.bindings["mix.master"], { message: "cc", number: 10, channel: 16 });
+  assert.deepEqual(profile.bindings["mix.chA"], { message: "cc", number: 22, channel: 1 });
+  assert.equal(profile.bindings["A.loop"], undefined);
+});
+
+test("preset merge keeps learned bindings and only fills empty targets", () => {
+  const profile = DEVICE_PROFILES.find((item) => item.id === "hercules-djcontrol-t10");
+  assert.ok(profile);
+  const learned = { message: "note" as const, number: 99, channel: 4 };
+  const bindings: MidiBindings = { "A.play": learned };
+  const applied = applyProfile(bindings, profile);
+  assert.deepEqual(bindings["A.play"], learned);
+  assert.ok(applied.includes("A.cue"));
+  assert.ok(!applied.includes("A.play"));
+  assert.equal(applied.length, Object.keys(profile.bindings).length - 1);
+  assert.deepEqual(applyProfile(bindings, profile), []);
 });
 
 test("sampler bank has eight labelled pads", () => {

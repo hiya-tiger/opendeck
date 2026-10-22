@@ -6,6 +6,7 @@ OpenDeck uses Web MIDI, so any class-compliant USB-MIDI device works without a d
 
 | Device type | Examples | Behaviour |
 | --- | --- | --- |
+| Built-in presets | Hercules DJControl T10, Numark Party Mix III | Transport, pads, tempo and mixer controls are mapped automatically when the device name matches |
 | Drum / sampler pads | Roland SP-404MKII, Akai MPC pads, Novation Launchpad | Notes 36-43 play sampler pads 1-8 with velocity; other notes and CCs can be learned |
 | Keyboard controllers | Akai MPK Mini, Arturia MiniLab, Novation Launchkey | Pads and keys send notes; knobs send CCs; use Learn to bind transport, EQ, faders or pads |
 | MIDI interfaces / routers | CME U6MIDI Pro, iConnectivity mio | Routes any connected keyboard or pad bank into OpenDeck; OpenDeck sees the interface's input port |
@@ -17,9 +18,10 @@ OpenDeck does not require or use SysEx. It lists all connected inputs and re-sca
 
 1. Connect the device by USB. If the maker supplies a driver or control app (Roland, Akai, Arturia), install it only when the device is not recognised as a class-compliant MIDI port.
 2. Open the mixer's **MIDI** card and press **Enable MIDI**.
-3. The card lists each input with its manufacturer. If the list stays empty, unplug and replug the device, or check the device's USB-MIDI mode.
-4. Play a pad or move a knob: the live monitor shows `ch1 note 36 vel 100` or `ch1 CC74 64`.
-5. Pads on notes 36-43 (C1-G1) play sampler pads 1-8 immediately. For anything else, choose a target in the dropdown, press **Learn**, then move that control.
+3. The card lists each input with its manufacturer. If the list stays empty, unplug and replug the device, or check the device's USB-MIDI mode. A recognised controller shows its preset name next to the input.
+4. Built-in presets fill any targets that are not already mapped. A binding you learned yourself always wins, and **Clear** still removes individual mappings.
+5. Play a pad or move a knob: the live monitor shows `ch1 note 36 vel 100` or `ch1 CC74 64`.
+6. Pads on notes 36-43 (C1-G1) play sampler pads 1-8 immediately. For anything else, choose a target in the dropdown, press **Learn**, then move that control.
 
 ## Recommended mappings
 
@@ -34,6 +36,19 @@ OpenDeck does not require or use SysEx. It lists all connected inputs and re-sca
 Mappings are stored per browser profile in `localStorage` under `opendeck.midi.map.v1`. **Clear** removes the mapping for the selected target only.
 
 ## Device notes
+
+### Hercules DJControl T10
+
+- The preset follows Hercules' DJUCED MIDI map: deck buttons on channels 2 and 3, hot-cue pads on channels 7 and 8, channel faders on CC0, crossfader on channel 1 CC0, tempo on CC8, EQ on CC2-4 and trim on CC5.
+- Hot cues 1-8 are the first pad page (notes 0-7). Deck A's sampler page (notes 48-55) is mapped to OpenDeck's sampler; switch the pad page on the controller to use it.
+- The T10 has no software master fader or headphone-mix CC in DJUCED's map, so those targets stay unbound. Use Learn if your firmware sends different controls.
+- Motorised platters and LED feedback are not driven by OpenDeck; the platters still send MIDI and can be learned.
+
+### Numark Party Mix III
+
+- The preset follows the community Mixxx mapping: play/cue/sync on notes 0-2, tempo on CC0, pads 1-4 on notes 20-23, and channel faders on CC22.
+- Crossfader and master are on MIDI channel 16 (CC8 and CC10). The cue-mix knob and filter knobs are not mapped because OpenDeck has no matching targets.
+- Only four hot cues per deck are exposed by the controller. Pads 5-8 remain available through Learn with another controller.
 
 ### Roland SP-404MKII
 
@@ -68,4 +83,4 @@ Mappings are stored per browser profile in `localStorage` under `opendeck.midi.m
 - **Double triggers:** some controllers send both Note On and a CC for the same pad. Clear one of the two learned mappings.
 - **No sound from pads:** the sampler feeds the master bus, so check the mixer's master level, the sampler volume slider and the browser's audio output.
 
-Physical-device testing is still pending for the SP-404MKII, MPK Mini and U6MIDI Pro; the MIDI parser, default pad map, learn flow and persistence have unit tests.
+Physical-device testing is still pending for the DJControl T10, Party Mix III, SP-404MKII, MPK Mini and U6MIDI Pro. The T10 values come from DJUCED's bundled `DJControl_T10.djm`, the Party Mix III values from the community Mixxx mapping, and the MIDI parser, presets, learn flow and persistence have unit tests.
