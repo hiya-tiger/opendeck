@@ -22,7 +22,7 @@ observable behaviour; layout, assets and wording are original.
 | Area | Today | Target | Phase |
 | --- | --- | --- | --- |
 | Crate import | Reads `.crate` and `database V2` paths | Also reads tags and shows crate metadata | 2 (paths done, tags read in code) |
-| Crate export | Downloads a zip with `Subcrates/*.crate`, `database V2`, `neworder.pref` | Writes the same files into a chosen `_Serato_` folder | 2 (zip export done) |
+| Crate export | Writes a chosen `_Serato_` folder with a backup, or a zip fallback | Writes the same files into a chosen `_Serato_` folder | 2 (done) |
 | Cue import/export | MP3, WAV and AIFF cues, first saved loop and BeatGrid BPM import; codecs for both marker frames | Reads/writes `Serato Markers_` and `Serato Markers2`, 8 slots, 18-colour palette | 2 (import done, write codec done) |
 | Saved loops | Codec ready, not applied to UI | Reads/writes Serato loops as cue-name entries | 2 (codec done) |
 | Beat grid | Codec ready, OpenDeck analysis drives playback | Import/export Serato BeatGrid with lock flag | 2 (codec done) |

@@ -1040,7 +1040,104 @@ linkBtn.addEventListener("click", async () => {
   );
 });
 
-$("exportBtn").addEventListener("click", () => {
+async function writeDirectoryFile(
+  root: FileSystemDirectoryHandle,
+  path: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  const parts = path.split("/").filter(Boolean);
+  let dir = root;
+  for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part, { create: true });
+  const file = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+  const writable = await file.createWritable();
+  await writable.write(bytes as unknown as FileSystemWriteChunkType);
+  await writable.close();
+}
+
+async function copyDirectory(
+  source: FileSystemDirectoryHandle,
+  target: FileSystemDirectoryHandle,
+): Promise<number> {
+  const entries = (source as unknown as { values(): AsyncIterable<FileSystemHandle> }).values();
+  let copied = 0;
+  for await (const entry of entries) {
+    if (entry.kind === "file") {
+      const file = await (entry as FileSystemFileHandle).getFile();
+      const writable = await (await target.getFileHandle(entry.name, { create: true })).createWritable();
+      await writable.write(await file.arrayBuffer());
+      await writable.close();
+      copied += 1;
+    } else {
+      const child = await target.getDirectoryHandle(entry.name, { create: true });
+      copied += await copyDirectory(entry as FileSystemDirectoryHandle, child);
+    }
+  }
+  return copied;
+}
+
+async function backupSeratoFolder(serato: FileSystemDirectoryHandle): Promise<string | null> {
+  let existing = false;
+  try {
+    await serato.getFileHandle("database V2");
+    existing = true;
+  } catch {
+    // no existing database
+  }
+  if (!existing) return null;
+  const name = `OpenDeck Backup ${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const backup = await serato.getDirectoryHandle(name, { create: true });
+  let copied = 0;
+  for (const file of ["database V2", "neworder.pref"]) {
+    try {
+      const source = await (await serato.getFileHandle(file)).getFile();
+      const writable = await (await backup.getFileHandle(file, { create: true })).createWritable();
+      await writable.write(await source.arrayBuffer());
+      await writable.close();
+      copied += 1;
+    } catch {
+      // missing file
+    }
+  }
+  try {
+    const subcrates = await serato.getDirectoryHandle("Subcrates");
+    const target = await backup.getDirectoryHandle("Subcrates", { create: true });
+    copied += await copyDirectory(subcrates, target);
+  } catch {
+    // no subcrates
+  }
+  return copied > 0 ? name : null;
+}
+
+async function saveSeratoFiles(files: Map<string, Uint8Array>): Promise<"folder" | "zip" | "cancelled"> {
+  if ("showDirectoryPicker" in window) {
+    let root: FileSystemDirectoryHandle;
+    try {
+      root = await (window as unknown as {
+        showDirectoryPicker(options: object): Promise<FileSystemDirectoryHandle>;
+      }).showDirectoryPicker({ id: "opendeck-serato-export", mode: "readwrite" });
+    } catch (error) {
+      if ((error as { name?: string }).name === "AbortError") return "cancelled";
+      throw error;
+    }
+    const serato = await root.getDirectoryHandle("_Serato_", { create: true });
+    await backupSeratoFolder(serato);
+    for (const [path, bytes] of files) {
+      await writeDirectoryFile(root, path, bytes);
+    }
+    return "folder";
+  }
+
+  const zip = zipSync(Object.fromEntries(files), { level: 0 });
+  const url = URL.createObjectURL(new Blob([zip], { type: "application/zip" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "opendeck-serato.zip";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  return "zip";
+}
+
+$("exportBtn").addEventListener("click", async () => {
   const tracks = library.tracks
     .filter((track) => track.source === "local" || track.source === "crate")
     .map((track) => ({
@@ -1060,19 +1157,19 @@ $("exportBtn").addEventListener("click", () => {
     setNote("No local paths to export. Load files from disk first.", true);
     return;
   }
-  const zip = zipSync(Object.fromEntries(result.files), { level: 0 });
-  const blob = new Blob([zip], { type: "application/zip" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "opendeck-serato.zip";
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  setNote(
-    `Exported ${result.trackCount} tracks and ${result.crates.length} crate${result.crates.length === 1 ? "" : "s"}. ` +
-      "Unzip into your music folder beside your audio files.",
-  );
-  toast("Serato export downloaded");
+  try {
+    const mode = await saveSeratoFiles(result.files);
+    if (mode === "cancelled") return;
+    setNote(
+      `Exported ${result.trackCount} tracks and ${result.crates.length} crate${result.crates.length === 1 ? "" : "s"} ` +
+        (mode === "folder"
+          ? "into _Serato_. Any existing library files were backed up inside that folder."
+          : "as a zip. Unzip it beside your audio files."),
+    );
+    toast(mode === "folder" ? "Serato export written" : "Serato export downloaded");
+  } catch (error) {
+    setNote(`Export failed: ${(error as Error).message}`, true);
+  }
 });
 
 /* --------------------------------------------------------------- mixer */

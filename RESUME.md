@@ -21,8 +21,8 @@ following work is not done, in the order it should be picked up.
 The library panel now downloads a zip with `database V2`, `neworder.pref` and
 each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
 
-- Replace the zip download with a direct export into a chosen `_Serato_`
-  folder, refusing while Serato is running, with a backup and an undo log.
+- Refuse the folder export while Serato is running. A timestamped backup is
+  written, but there is no undo command yet.
 - Add per-track "write tags" for MP3/WAV/AIFF, using a temporary copy and byte
   verification before replacing the original.
 - Add FLAC `VORBIS_COMMENT` and MP4 `----:com.serato.dj:*` atoms.
@@ -43,5 +43,6 @@ each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
   are only proven offline.
 - Serato cue import is MP3-only. The first saved loop and BeatGrid BPM/phase
   are applied; remaining loops and per-beat detail are not.
-- The export is a zip download, not a direct folder write with backup/undo.
+- Folder export backs up existing files but has no undo command and does not
+  detect a running Serato instance.
 - No in-app tag writing, no FLAC/MP4 tag writing, no SQLite column layout.
