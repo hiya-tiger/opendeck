@@ -38,8 +38,8 @@ each crate. WAV/AIFF tag reading and RIFF `id3 ` writing are implemented.
 
 - Key lock is not implemented in the PCM path; disabling key lock switches a
   local track to `PcmSource`, enabling it switches back to the media element.
-- The PCM path has no runtime audio smoke test yet, so sample loops are still
-  only proven offline.
+- The PCM path has no runtime audio smoke test on real hardware yet; the worklet
+  source is covered by Node tests for playback, seek, pause and sample loops.
 - Serato cue import is MP3-only. The first saved loop and BeatGrid BPM/phase
   are applied; remaining loops and per-beat detail are not.
 - Folder export backs up existing files but has no undo command and does not

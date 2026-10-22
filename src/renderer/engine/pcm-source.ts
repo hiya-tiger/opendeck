@@ -1,4 +1,4 @@
-const WORKLET_SOURCE = `
+export const WORKLET_SOURCE = `
 class OpenDeckPcmProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
