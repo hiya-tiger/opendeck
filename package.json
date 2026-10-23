@@ -13,7 +13,7 @@
     "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts test/formats.test.ts test/pcm-transport.test.ts test/serato.test.ts test/serato-write.test.ts test/serato-extra.test.ts test/cue-store.test.ts test/library-ux.test.ts test/pad-modes.test.ts test/pcm-worklet.test.ts test/platter.test.ts test/parts.test.ts"
   },
   "devDependencies": {
-    "electron": "44.8.0",
+    "electron": "44.9.1",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
   },
