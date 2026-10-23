@@ -14,7 +14,7 @@
   },
   "devDependencies": {
     "electron": "44.8.0",
-    "esbuild": "^0.24.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.7.0"
   },
   "allowScripts": {
