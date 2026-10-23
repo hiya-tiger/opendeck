@@ -71,14 +71,14 @@ These are byte-for-byte contracts, not suggestions:
 | Library | Playlist files (`.crate`) | Export works | Full read/write, including tags | P2 |
 | Library | Library index (`database V2`) | Export works | Full read/write, `wave` type preserved | P2 |
 | Library | Crate column layout | Not started | Opt-in `container_asset_list_columns` edit with backup | P3 |
-| Metadata | Embedded cue frames | Read for MP3/WAV/AIFF; write codecs exist, not wired | Read/write both marker frames for MP3/WAV/AIFF/FLAC/MP4 | P2 |
-| Metadata | Cue slots, names, colours | First five slots, fixed palette | Eight slots, names, 18-colour quantised palette | P2/P3 |
-| Metadata | Saved loops | Codec only | Eight per deck, persisted, reloaded and editable | P2/P3 |
+| Metadata | Embedded cue frames | Read/write for MP3, WAV, AIFF, FLAC and MP4, with undo | Read/write both marker frames for MP3/WAV/AIFF/FLAC/MP4 | P2 |
+| Metadata | Cue slots, names, colours | Eight slots with names and 18-colour palette in the UI | Eight slots, names, 18-colour quantised palette | P2/P3 |
+| Metadata | Saved loops | Eight per track, persisted, reloaded, editable and written to tags | Eight per deck, persisted, reloaded and editable | P2/P3 |
 | Metadata | Beat grid and lock flag | BPM/phase import, codec | Full grid import/export with lock flag and downbeat marker | P2/P3 |
 | Metadata | Key and BPM tags | Analysis and UI display | Read/write tag round trip | P2 |
-| Library UX | Set-scratchpad | None | Holding area of tracks picked for the set | P3 |
-| Library UX | Played-log | None | Exportable log of tracks already played | P3 |
-| Library UX | Search and sort | Basic filtering | Playlist search, global search, playlist sort | P3 |
+| Library UX | Set-scratchpad | Persisted scratchpad view with per-track toggles | Holding area of tracks picked for the set | P3 |
+| Library UX | Played-log | Persisted log with CSV export and clear | Exportable log of tracks already played | P3 |
+| Library UX | Search and sort | Title, path, crate and key search; title/BPM/key/length/crate sort | Playlist search, global search, playlist sort | P3 |
 | Library UX | Playlists | Import/export files | Create, edit and reorder playlists in app | P3 |
 | Library UX | Live playlists | None | Rule-driven playlist that updates itself | P3 |
 | Library UX | Track colour and play count | None | Stored, displayed and exported | P3 |
@@ -95,9 +95,9 @@ These are byte-for-byte contracts, not suggestions:
 | Deck | Turntable start/stop | Instant | Start/stop ramp | P3 |
 | Deck | Playback mode | Internal only | Internal, relative and absolute timecode modes | P3 |
 | Cues and loops | Cue-and-loop trigger | None | One button fires a cue point and a loop together | P3/P4 |
-| Cues and loops | Loop tab | Basic loop controls | Loops tab for saved loops and editing | P3 |
+| Cues and loops | Loop tab | Saved-loops panel with apply, rename, lock, delete and tag export | Loops tab for saved loops and editing | P3 |
 | Cues and loops | Beat grid editor | None | Editor with working lock flag | P3 |
-| Cues and loops | Beat jump | API only | Forward/back beat jump with pad UI | P3/P4 |
+| Cues and loops | Beat jump | Forward/back buttons for 1, 4 and 16 beats | Forward/back beat jump with pad UI | P3/P4 |
 | Performance | Return-mode | None | Manipulate audio and return to the would-be position | P3 |
 | Performance | Reverse-on-hold | None | Play backwards while held, resume on release | P3 |
 | Performance | Rolling loop | None | Quantised loop that releases to the original position | P3/P4 |
@@ -116,7 +116,7 @@ These are byte-for-byte contracts, not suggestions:
 | Effects | Full built-in set | Filter, echo, delay, reverb, flanger, phaser, crush | Wider built-in set matching the target's categories | P3/P6 |
 | Effects | Custom effects | None | User-built, savable, reloadable effect chains | P6 |
 | Separation | Real source separation | Four filter bands only | ONNX model, four parts, cached at import | P5 |
-| Separation | Vocals-only toggle | None | Isolate vocals or everything-but-vocals | P5 |
+| Separation | Vocals-only and instrumental toggle | None | Isolate vocals or everything-but-vocals | P5 |
 | Separation | Parts tab and part effects | None | Part controls, part effects, part roll, part return-mode, part pad mode | P5 |
 | Pitch | Tempo-independent pitch shift | None | Pitch shift with tempo unchanged, same primitive as pitch hold | P6 |
 | Timecode | Calibration | Decoder only | Calibration flow | P3 |
@@ -231,6 +231,19 @@ banks.
 - Check model-weight licences and record them in `NOTICE`.
 - Rename the four-band EQ in the UI so "stems" is not overloaded.
 
+### P5 - source separation (implemented)
+
+- Main process: on-demand 166 MB htDemucs ONNX model, SHA-256 checked, CPU
+  inference in overlapping chunks, four Int16 stem files plus manifest.
+- Cache: `.opendeck-stems/<content-hash>-<model-version>/` beside the track,
+  falling back to app user data.
+- Deck: four `PcmSource` voices, per-part gain/mute/solo/filter, vocals-only and instrumental,
+  part roll, part scratch return-mode and true Part FX pads.
+- UI: Parts row and part pad mode; the old four-band row is labelled Bands.
+- Verified: 163 tests, typecheck, build and audio smoke, including synthetic
+  stem playback and part scratch. Not yet verified with a real track or a
+  packaged installer.
+
 ## Phase 6: expansion features
 
 - Pitch shift independent of tempo, using the same primitive as pitch hold with
@@ -269,7 +282,7 @@ Suite parity means all of these are true:
 - [ ] 32 sampler slots across four banks
 - [ ] Full effect set plus user-created savable chains
 - [ ] Tempo-independent pitch shift
-- [ ] Real four-part source separation, cached, with part controls
+- [x] Real four-part source separation, cached, with part controls
 - [ ] Round trip: write a library, import into the target, edit, re-import, zero
       loss both directions
 - [ ] Undo for every file and library write
@@ -298,8 +311,8 @@ Electron 44.8.0, rustc 1.99.1.
 
 Verified with the same toolchain:
 
-- `npm test`: 103 tests pass, including `test/platter.test.ts` and the
-  ten-minute forward/reverse loop test.
+- `npm test`: 120 tests pass, including `test/platter.test.ts`, the
+  ten-minute forward/reverse loop test and the new tag-write suites.
 - `npx tsc --noEmit`: clean.
 - `cargo test --manifest-path rust/Cargo.toml`: 30 audio tests, 7 core tests
   and 2 Tauri analysis tests pass, including ten minutes of forward and reverse
@@ -333,3 +346,59 @@ Not verified yet:
 - Physical audio interfaces, real DJ hardware and driver latency.
 - Reverse-loop correction after an external jump is coarse (250 ms guard);
   the Rust and JS offline transports and the Rust live state path are exact.
+
+### P2 - embedded tag round trip (partial)
+
+Implemented and verified with synthetic containers and the existing codecs:
+
+- MP3, WAV and AIFF: both marker frames plus BeatGrid are written through the
+  existing ID3 GEOB and RIFF `id3 ` writers. Unrelated ID3 frames and RIFF
+  chunks are preserved.
+- FLAC: `VORBIS_COMMENT` fields `SERATO_MARKERS_V2`, `SERATO_MARKERS_` and
+  `SERATO_BEATGRID`, with base64 values wrapped every 72 characters. Unknown
+  comments and metadata blocks are preserved; audio frames are untouched.
+- MP4/M4A: `----:com.serato.dj:markersv2`, `markers` and `beatgrid` freeform
+  atoms, preserving unknown `ilst` entries and 32/64-bit `mdat` atoms. Serato
+  writes the MP4 `Markers_` payload with 19-byte cue/loop slots (unlike the
+  22-byte MP3 layout); both readers and the MP4 writer now use that layout.
+- File writes go through a same-directory temporary file, verify the non-tag
+  payload is byte-identical, back up every replaced file under the Electron
+  user-data directory, and expose an undo command. Writes are refused while a
+  Serato DJ process is running.
+- The library panel has `Write tags` and `Undo tags` actions. Local files use a
+  chosen music folder; imported crates use their stored paths.
+
+Verified on the P1 toolchain: `npm test` (143), `npx tsc --noEmit`,
+`npm run build` and `npm run smoke:audio`. Real Serato DJ Pro 2.3.7 metadata
+reads were also checked against `Clairmont The Second - Grip.mp3` and
+`02 Clique.m4a`, including the MP4 19-byte `Markers_` variant.
+
+Not verified yet:
+
+- Real Serato DJ Pro import/edit/re-import on a disposable library, and the
+  second-run zero-byte-change exit criterion.
+- Full per-beat grids with a working lock flag and embedded key/BPM tags.
+- Full playlist and `database V2` read/write.
+
+### P3 - feature wall (started)
+
+Implemented and verified locally:
+
+- Hot-cue names and colours: right-click renames, Alt+click cycles the
+  18-colour palette, Shift+right-click clears. Cue records persist per track and
+  flow into the Serato marker payload.
+- Saved loops: eight per track, persisted, renamable, lockable as metadata and
+  deletable, with one-click apply. Serato loops appear in the panel on import.
+- Library UX: title/path/crate/key search, title/BPM/key/length/crate sorting,
+  a persisted scratchpad view and a persisted played log with CSV export.
+- Pure logic is tested in `test/cue-store.test.ts` and
+  `test/library-ux.test.ts`; the Electron page was rendered and inspected for
+  the new cue, saved-loop and library controls.
+
+Verified: `npm test` (141), `npx tsc --noEmit`, `npm run build` and an Electron
+capture of the library and deck UI.
+
+Still open in P3: beat-grid editor with lock, playlist creation/reordering,
+track colour/play count, preview, display modes, four decks, deck clone,
+repeat/autoplay, eject/load lock, nudge/tempo-range cycling and the remaining
+mixer, performance and UI items.

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 const on = (channel: string, handler: (payload: unknown) => void): (() => void) => {
   const listener = (_event: unknown, payload: unknown): void => handler(payload);
@@ -19,6 +19,20 @@ contextBridge.exposeInMainWorld("opendeckDesktop", {
   },
   media: {
     fetch: (url: string) => ipcRenderer.invoke("media:fetch", url),
+    pathForFile: (file: File) => webUtils.getPathForFile(file),
+  },
+  separation: {
+    status: () => ipcRenderer.invoke("separation:status"),
+    install: () => ipcRenderer.invoke("separation:install"),
+    cache: (request: { hash: string; trackPath?: string | null }) => ipcRenderer.invoke("separation:cache", request),
+    run: (request: unknown) => ipcRenderer.invoke("separation:run", request),
+    read: (dir: string) => ipcRenderer.invoke("separation:read", dir),
+    onProgress: (handler: (payload: unknown) => void) => on("separation:progress", handler),
+  },
+  serato: {
+    running: () => ipcRenderer.invoke("serato:running"),
+    writeTags: (request: unknown) => ipcRenderer.invoke("serato:write-tags", request),
+    undo: () => ipcRenderer.invoke("serato:undo"),
   },
   recording: {
     save: (name: string, bytes: Uint8Array) => ipcRenderer.invoke("recording:save", name, bytes),

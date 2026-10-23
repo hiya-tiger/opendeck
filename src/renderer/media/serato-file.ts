@@ -1,9 +1,11 @@
 import { readSeratoGeoB } from "./serato-id3.ts";
 import { detectRiffKind, type RiffKind } from "./serato-riff.ts";
+import { readSeratoExtraTags, type SeratoExtraKind } from "./serato-extra.ts";
 import {
   decodeBeatGrid,
   decodeMarkers2,
   decodeMarkers_,
+  decodeMarkers_Mp4,
   nearestCueColor,
   type BeatGridMarker,
   type SeratoMarkers,
@@ -28,19 +30,20 @@ function tagSize(bytes: Uint8Array): number {
   );
 }
 
-function parseTags(bytes: Uint8Array): SeratoFileTags {
-  const tags = readSeratoGeoB(bytes);
+function parseTagMap(tags: Map<string, Uint8Array>, mp4Legacy = false): SeratoFileTags {
   let markers: SeratoMarkers | null = null;
   const legacy = tags.get("Serato Markers_");
   const current = tags.get("Serato Markers2");
-  if (legacy) markers = decodeMarkers_(legacy.data);
+  if (legacy) markers = mp4Legacy ? decodeMarkers_Mp4(legacy) : decodeMarkers_(legacy);
   if (current) {
-    const decoded = decodeMarkers2(current.data);
+    const decoded = decodeMarkers2(current);
     if (!markers) {
       markers = decoded;
     } else {
       for (const cue of decoded.cues) {
-        if (!markers.cues.some((existing) => existing.index === cue.index)) markers.cues.push(cue);
+        const existing = markers.cues.find((marker) => marker.index === cue.index);
+        if (existing) existing.name = cue.name;
+        else markers.cues.push(cue);
       }
       markers.loops = decoded.loops;
       markers.bpmLocked = decoded.bpmLocked;
@@ -50,7 +53,12 @@ function parseTags(bytes: Uint8Array): SeratoFileTags {
     markers.cues = markers.cues.map((cue) => ({ ...cue, color: nearestCueColor(cue.color) }));
   }
   const grid = tags.get("Serato BeatGrid");
-  return { markers, beatgrid: grid ? decodeBeatGrid(grid.data) : null };
+  return { markers, beatgrid: grid ? decodeBeatGrid(grid) : null };
+}
+
+function parseTags(bytes: Uint8Array): SeratoFileTags {
+  const frames = readSeratoGeoB(bytes);
+  return parseTagMap(new Map([...frames].map(([name, frame]) => [name, frame.data])));
 }
 
 async function readRiffTagChunk(file: File, kind: RiffKind): Promise<Uint8Array | null> {
@@ -72,8 +80,15 @@ async function readRiffTagChunk(file: File, kind: RiffKind): Promise<Uint8Array 
 export async function readSeratoTagsFromFile(file: File): Promise<SeratoFileTags | null> {
   const wav = /\.wav$/i.test(file.name);
   const aiff = /\.aiff?$/i.test(file.name);
-  if (!/\.mp3$/i.test(file.name) && !wav && !aiff) return null;
+  const flac = /\.flac$/i.test(file.name);
+  const mp4 = /\.(m4a|mp4|aac)$/i.test(file.name);
+  if (!/\.mp3$/i.test(file.name) && !wav && !aiff && !flac && !mp4) return null;
   try {
+    if (flac || mp4) {
+      const kind: SeratoExtraKind = flac ? "flac" : "mp4";
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      return parseTagMap(readSeratoExtraTags(bytes, kind), kind === "mp4");
+    }
     const head = new Uint8Array(await file.slice(0, Math.min(file.size, 12)).arrayBuffer());
     if (hasId3(head)) {
       const size = Math.min(file.size, tagSize(head));

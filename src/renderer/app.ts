@@ -1,10 +1,11 @@
 import { Mixer, type CrossfaderCurve } from "./engine/mixer.ts";
 import { Deck, HOT_CUE_COLORS, type DeckState, type DeckId } from "./engine/deck.ts";
 import { analyzeBuffer, formatTime, formatClock, type AnalysisResult } from "./engine/analyze.ts";
-import { formatBeatPosition, LOOP_BEATS } from "./engine/beatgrid.ts";
+import { beatSeconds, formatBeatPosition, LOOP_BEATS } from "./engine/beatgrid.ts";
 import { syncDeck } from "./engine/sync.ts";
 import { FX_DEFS, DIVISIONS, fxDefault, type Division, type FxType } from "./engine/fx.ts";
 import { STEMS, type StemId } from "./engine/stems.ts";
+import { PARTS, STEM_MODEL, type PartId } from "./engine/parts.ts";
 import { Waveform, ZoomWaveform } from "./media/waveform.ts";
 import { Library, isAudioFile, type Track } from "./media/library.ts";
 import { parseCrate, isSerato } from "./media/serato.ts";
@@ -12,6 +13,17 @@ import { readMediaInfo, type Artwork } from "./media/artwork.ts";
 import { readSeratoTagsFromFile } from "./media/serato-file.ts";
 import { buildSeratoExport } from "./media/serato-export.ts";
 import { beatgridTempo, firstSavedLoop } from "./media/serato-import.ts";
+import { DEFAULT_SLOT_COLORS, NO_TRACK_COLOR, type BeatGridMarker, type SeratoMarkers } from "./media/serato-tags.ts";
+import {
+  addSavedLoop,
+  cycleCueColor,
+  normaliseCues,
+  normaliseLoops,
+  removeSavedLoop,
+  type CueRecord,
+  type SavedLoop,
+} from "./media/cue-store.ts";
+import type { PlayedEntry } from "./media/library-ux.ts";
 import { zipSync } from "fflate";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
@@ -19,7 +31,22 @@ import { PROVIDERS, findProvider } from "./streaming/providers.ts";
 import { parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "./streaming/youtube.ts";
 import { WhipBroadcaster, type BroadcastStatus } from "./broadcast/whip.ts";
 import { normaliseDegrees, pointerAngle, scratchPosition } from "./engine/scratch.ts";
-import { Sampler, SAMPLER_PADS } from "./engine/sampler.ts";
+import { Sampler, SAMPLER_BANKS, SAMPLER_SLOTS, type SamplerBank } from "./engine/sampler.ts";
+import { ScratchBank } from "./engine/scratch-bank.ts";
+import {
+  PART_FX_PADS,
+  PAD_MODE_DEFS,
+  SequenceRecorder,
+  beatJumpStep,
+  cueLoopRange,
+  isPadMode,
+  loopRollBeats,
+  pitchPlayRate,
+  pitchPlaySemitones,
+  rollingReleasePosition,
+  sliceRange,
+  type PadMode,
+} from "./engine/pad-modes.ts";
 import {
   bindingFor,
   defaultPadIndex,
@@ -46,6 +73,39 @@ interface NativeAnalysis {
   keyConfidence: number;
 }
 
+interface StemManifest {
+  version: number;
+  model: string;
+  modelVersion: string;
+  hash: string;
+  sampleRate: number;
+  frames: number;
+  dir?: string;
+  parts: Record<PartId, { file: string; bytes: number }>;
+}
+
+interface SeparationProgress {
+  stage: string;
+  percent: number;
+  detail: string;
+  hash?: string;
+}
+
+interface SeratoWritePayload {
+  path: string;
+  name: string;
+  markers: SeratoMarkers;
+  beatgrid: BeatGridMarker[] | null;
+}
+
+interface SeratoWriteResult {
+  ok: boolean;
+  written: number;
+  skipped: number;
+  undoId: string | null;
+  detail: string;
+}
+
 interface DesktopApi {
   platform: string;
   analysis?: {
@@ -69,7 +129,29 @@ interface DesktopApi {
     onLog: (handler: (payload: unknown) => void) => () => void;
     onExit: (handler: (payload: unknown) => void) => () => void;
   };
-  media: { fetch: (url: string) => Promise<{ ok: boolean; bytes?: Uint8Array; type?: string; error?: string }> };
+  media: {
+    fetch: (url: string) => Promise<{ ok: boolean; bytes?: Uint8Array; type?: string; error?: string }>;
+    pathForFile?: (file: File) => string;
+  };
+  separation?: {
+    status: () => Promise<{ ready: boolean; path: string; bytes: number; env: boolean; model: typeof STEM_MODEL }>;
+    install: () => Promise<{ ready: boolean; path: string; bytes: number }>;
+    cache: (request: { hash: string; trackPath?: string | null }) => Promise<{ found: boolean; manifest?: StemManifest }>;
+    run: (request: {
+      hash: string;
+      sampleRate: number;
+      left: Float32Array;
+      right: Float32Array;
+      trackPath?: string | null;
+    }) => Promise<StemManifest>;
+    read: (dir: string) => Promise<{ manifest: StemManifest; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }>;
+    onProgress: (handler: (payload: unknown) => void) => () => void;
+  };
+  serato?: {
+    running: () => Promise<boolean>;
+    writeTags: (request: { root: string | null; tracks: SeratoWritePayload[] }) => Promise<SeratoWriteResult>;
+    undo: () => Promise<SeratoWriteResult>;
+  };
 }
 
 declare global {
@@ -83,6 +165,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getEl
 
 const mixer = new Mixer();
 const sampler = new Sampler(mixer.ctx, mixer.master);
+const scratchBank = new ScratchBank(mixer.ctx, mixer.master);
 const decks: Record<DeckId, Deck> = { A: mixer.deck("A"), B: mixer.deck("B") };
 const waves: Partial<Record<DeckId, Waveform>> = {};
 const zooms: Partial<Record<DeckId, ZoomWaveform>> = {};
@@ -90,8 +173,43 @@ const meta: Partial<Record<DeckId, Track>> = {};
 const ui: Partial<Record<DeckId, Record<string, HTMLElement>>> = {};
 const synced: Record<DeckId, boolean> = { A: false, B: false };
 const states: Partial<Record<DeckId, DeckState>> = {};
-let lastPadVersion: Partial<Record<DeckId, number>> = {};
+const savedLoops: Record<DeckId, SavedLoop[]> = { A: [], B: [] };
+const loopsOpen: Record<DeckId, boolean> = { A: false, B: false };
+const wasPlaying: Record<DeckId, boolean> = { A: false, B: false };
+let lastPadVersion: Partial<Record<DeckId, string>> = {};
 let rafPending = false;
+
+const padModes: Record<DeckId, PadMode> = { A: "hot-cue", B: "hot-cue" };
+const padSequences: Record<DeckId, SequenceRecorder> = {
+  A: new SequenceRecorder(),
+  B: new SequenceRecorder(),
+};
+const padSequenceEvents: Record<DeckId, ReturnType<SequenceRecorder["list"]>> = { A: [], B: [] };
+const sequencePlayback: Partial<
+  Record<DeckId, { timer: number; startedAt: number; next: number; cycle: number; loopMs: number }>
+> = {};
+interface PadHold {
+  index: number;
+  kind: PadMode;
+  startedAt: number;
+  position: number;
+  rate: number;
+  previousRate: number;
+  previousKeylock: boolean;
+  fromSequence: boolean;
+  scratchBank?: boolean;
+}
+
+const padHolds: Partial<Record<DeckId, PadHold>> = {};
+const partFxMuted: Record<DeckId, Record<PartId, boolean>> = {
+  A: { drums: false, bass: false, other: false, vocals: false },
+  B: { drums: false, bass: false, other: false, vocals: false },
+};
+const partFxFiltered: Record<DeckId, Record<PartId, boolean>> = {
+  A: { drums: false, bass: false, other: false, vocals: false },
+  B: { drums: false, bass: false, other: false, vocals: false },
+};
+let samplerBank: SamplerBank = "A";
 
 const analysisQueue: Track[] = [];
 let analysing = false;
@@ -327,6 +445,9 @@ function buildDeck(deckId: DeckId): void {
     tempo: node.querySelector(".deck-tempo"),
     syncChip: node.querySelector(".deck-sync"),
     pads: node.querySelector(".pads"),
+    padMode: node.querySelector(".pad-mode") as HTMLSelectElement,
+    padModeState: node.querySelector(".pad-mode-state"),
+    padSeqState: node.querySelector(".pad-seq-state"),
     play: node.querySelector(".play"),
     cue: node.querySelector(".cue"),
     sync: node.querySelector(".sync"),
@@ -335,6 +456,9 @@ function buildDeck(deckId: DeckId): void {
     loopHalf: node.querySelector(".loop-half"),
     loopDouble: node.querySelector(".loop-double"),
     quantize: node.querySelector(".quantize"),
+    saveLoop: node.querySelector(".save-loop"),
+    savedLoopToggle: node.querySelector(".saved-loop-toggle"),
+    savedLoopsPanel: node.querySelector(".saved-loops"),
     jumpBtns: node.querySelector(".jump-btns"),
     pitch: node.querySelector(".pitch") as HTMLInputElement,
     pitchVal: node.querySelector(".pitch-val"),
@@ -345,6 +469,12 @@ function buildDeck(deckId: DeckId): void {
     eqLow: node.querySelector(".eq-low") as HTMLInputElement,
     trim: node.querySelector(".trim") as HTMLInputElement,
     stems: node.querySelector(".stems"),
+    parts: node.querySelector(".parts"),
+    partsState: node.querySelector(".parts-state"),
+    vocalsOnly: node.querySelector(".vocals-only") as HTMLButtonElement,
+    instrumental: node.querySelector(".instrumental") as HTMLButtonElement,
+    separateBtn: node.querySelector(".separate-btn") as HTMLButtonElement,
+    installModel: node.querySelector(".install-model") as HTMLButtonElement,
     fxType: node.querySelector(".fx-type") as HTMLSelectElement,
     fxWet: node.querySelector(".fx-wet") as HTMLInputElement,
     fxDiv: node.querySelector(".fx-div") as HTMLSelectElement,
@@ -381,21 +511,73 @@ function buildDeck(deckId: DeckId): void {
 
   setupScratch(deckId);
 
+  for (const mode of PAD_MODE_DEFS) {
+    const option = document.createElement("option");
+    option.value = mode.id;
+    option.textContent = mode.label;
+    option.title = mode.hint;
+    refs.padMode.append(option);
+  }
+  refs.padMode.value = padModes[deckId];
+  refs.padMode.addEventListener("change", () => {
+    const next = refs.padMode.value;
+    if (!isPadMode(next)) return;
+    padModes[deckId] = next;
+    releasePadHold(deckId);
+    updatePads(deckId, true);
+  });
+
   for (let i = 0; i < 8; i += 1) {
     const pad = document.createElement("button");
     pad.type = "button";
     pad.className = "pad";
     pad.dataset.index = String(i);
-    pad.innerHTML = `${i + 1}<small>—</small>`;
-    pad.addEventListener("click", () => {
-      deck.jumpHotCue(i);
-      persistCues(deckId);
-      if (!deck.playing) void deck.play();
+    pad.title = "Click: perform the current pad mode action. Right-click: edit cue.";
+    pad.append(String(i + 1));
+    const sub = document.createElement("small");
+    sub.textContent = "-";
+    pad.append(sub);
+    pad.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      if (event.shiftKey && padModes[deckId] === "scratch") return;
+      startPadHold(deckId, i, event);
+    });
+    pad.addEventListener("pointerup", (event) => {
+      if (event.button !== 0) return;
+      releasePadHold(deckId);
+    });
+    pad.addEventListener("pointercancel", () => releasePadHold(deckId));
+    pad.addEventListener("pointerleave", () => releasePadHold(deckId));
+    pad.addEventListener("click", (event) => {
+      if (event.altKey) {
+        const cue = deck.hotCues[i];
+        if (cue) {
+          deck.setHotCueStyle(i, { color: cycleCueColor(cue.color) });
+          persistCues(deckId);
+          updatePads(deckId, true);
+        }
+        return;
+      }
+      if (event.shiftKey && padModes[deckId] === "scratch") {
+        loadScratchPad(deckId, i);
+        return;
+      }
+      if (["loop-roll", "slicer", "pitch-play", "scratch"].includes(padModes[deckId])) return;
+      handlePadAction(deckId, i);
     });
     pad.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      deck.clearHotCue(i);
+      const cue = deck.hotCues[i];
+      if (!cue) return;
+      if (event.shiftKey) {
+        deck.clearHotCue(i);
+      } else {
+        const next = window.prompt("Cue name", cue.name ?? "");
+        if (next === null) return;
+        deck.setHotCueStyle(i, { name: next });
+      }
       persistCues(deckId);
+      updatePads(deckId, true);
     });
     refs.pads.append(pad);
   }
@@ -456,6 +638,33 @@ function buildDeck(deckId: DeckId): void {
     refs.quantize.setAttribute("aria-pressed", String(next));
     deck.setQuantize(next);
   });
+  refs.savedLoopToggle.addEventListener("click", () => {
+    loopsOpen[deckId] = !loopsOpen[deckId];
+    renderSavedLoops(deckId);
+  });
+  refs.saveLoop.addEventListener("click", () => {
+    if (!(deck.loopEnd > deck.loopStart)) {
+      toast("Set a loop before saving it.");
+      return;
+    }
+    const loop: SavedLoop = {
+      id: `${deckId}-${Date.now()}-${savedLoops[deckId].length}`,
+      start: deck.loopStart,
+      end: deck.loopEnd,
+      name: `Loop ${savedLoops[deckId].length + 1}`,
+      color: "#27AAE1",
+      locked: false,
+    };
+    const next = addSavedLoop(savedLoops[deckId], loop);
+    if (next.length === savedLoops[deckId].length) {
+      toast("That loop range is already saved.");
+      return;
+    }
+    savedLoops[deckId] = next;
+    loopsOpen[deckId] = true;
+    persistLoops(deckId);
+    renderSavedLoops(deckId);
+  });
   refs.jumpBtns.addEventListener("click", (event: MouseEvent) => {
     const target = (event.target as HTMLElement).closest<HTMLElement>("button[data-beats]");
     if (!target) return;
@@ -496,6 +705,126 @@ function buildDeck(deckId: DeckId): void {
     });
     refs.stems.append(wrap);
   }
+
+  for (const part of PARTS) {
+    const wrap = document.createElement("div");
+    wrap.className = "part stem";
+    wrap.dataset.part = part.id;
+    wrap.innerHTML =
+      '<div class="stem-label"><span>' + part.short + '</span>' +
+      '<span class="part-buttons">' +
+      '<button type="button" class="part-mute" title="Mute ' + part.label + '">M</button>' +
+      '<button type="button" class="part-solo" title="Solo ' + part.label + '">S</button>' +
+      '<button type="button" class="part-filter" title="Filter ' + part.label + '">F</button>' +
+      '<button type="button" class="part-roll" title="Loop ' + part.label + '">R</button>' +
+      '<button type="button" class="part-scratch" title="Scratch ' + part.label + '">X</button>' +
+      '</span></div>';
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "1.5";
+    slider.step = "0.01";
+    slider.value = "1";
+    slider.setAttribute("aria-label", part.label + " level");
+    slider.addEventListener("input", () => deck.setPartGain(part.id as PartId, Number(slider.value)));
+    wrap.append(slider);
+    const mute = wrap.querySelector(".part-mute") as HTMLButtonElement;
+    mute.addEventListener("click", () => {
+      const muted = !wrap.classList.contains("muted");
+      wrap.classList.toggle("muted", muted);
+      mute.setAttribute("aria-pressed", String(muted));
+      deck.setPartMuted(part.id as PartId, muted);
+      refs.instrumental.setAttribute("aria-pressed", String(deck.instrumental));
+    });
+    const solo = wrap.querySelector(".part-solo") as HTMLButtonElement;
+    solo.addEventListener("click", () => {
+      const on = deck.soloPart !== part.id;
+      deck.setPartSolo(on ? (part.id as PartId) : null);
+      for (const other of refs.parts.querySelectorAll(".part")) {
+        (other as HTMLElement).classList.toggle("solo", on && other === wrap);
+      }
+      solo.setAttribute("aria-pressed", String(on));
+      refs.vocalsOnly.setAttribute("aria-pressed", String(on && part.id === "vocals"));
+      refs.instrumental.setAttribute("aria-pressed", String(deck.instrumental));
+    });
+    const filter = wrap.querySelector(".part-filter") as HTMLButtonElement;
+    filter.addEventListener("click", () => {
+      const on = !wrap.classList.contains("filtered");
+      wrap.classList.toggle("filtered", on);
+      filter.setAttribute("aria-pressed", String(on));
+      deck.setPartFilter(part.id as PartId, on);
+    });
+    const roll = wrap.querySelector(".part-roll") as HTMLButtonElement;
+    roll.addEventListener("click", () => {
+      const on = deck.partLoop !== part.id;
+      if (on) {
+        const start = deck.currentTime;
+        deck.setPartLoop(part.id as PartId, start, start + beatSeconds(deck.info.bpm || 120));
+      } else {
+        deck.setPartLoop(null);
+      }
+      for (const other of refs.parts.querySelectorAll(".part")) (other as HTMLElement).classList.toggle("rolled", on && other === wrap);
+      roll.setAttribute("aria-pressed", String(on));
+    });
+    const scratch = wrap.querySelector(".part-scratch") as HTMLButtonElement;
+    let scratchX = 0;
+    let scratchAt = 0;
+    let scratchHeld = false;
+    scratch.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      scratch.setPointerCapture(event.pointerId);
+      scratchHeld = deck.beginPartScratch(part.id as PartId);
+      if (!scratchHeld) return;
+      scratchX = event.clientX;
+      scratchAt = performance.now();
+      deck.partScratchRate(0);
+      scratch.setAttribute("aria-pressed", "true");
+    });
+    scratch.addEventListener("pointermove", (event) => {
+      if (!scratchHeld) return;
+      const now = performance.now();
+      const dt = Math.max(1, now - scratchAt);
+      deck.partScratchRate(Math.max(-3, Math.min(3, ((event.clientX - scratchX) / dt) * 4)));
+      scratchX = event.clientX;
+      scratchAt = now;
+    });
+    const stopScratch = (): void => {
+      scratchHeld = false;
+      deck.endPartScratch();
+      scratch.setAttribute("aria-pressed", "false");
+    };
+    scratch.addEventListener("pointerup", stopScratch);
+    scratch.addEventListener("pointercancel", stopScratch);
+    refs.parts.append(wrap);
+  }
+
+  refs.vocalsOnly.addEventListener("click", () => {
+    const on = !deck.vocalsOnly;
+    deck.setVocalsOnly(on);
+    refs.vocalsOnly.setAttribute("aria-pressed", String(on));
+    refs.instrumental.setAttribute("aria-pressed", "false");
+    for (const card of refs.parts.querySelectorAll(".part")) {
+      const node = card as HTMLElement;
+      node.classList.toggle("solo", on && node.dataset.part === "vocals");
+      if (on && node.dataset.part === "vocals") node.classList.remove("muted");
+    }
+  });
+  refs.instrumental.addEventListener("click", () => {
+    const on = !deck.instrumental;
+    deck.setInstrumental(on);
+    refs.instrumental.setAttribute("aria-pressed", String(on));
+    refs.vocalsOnly.setAttribute("aria-pressed", "false");
+    for (const card of refs.parts.querySelectorAll(".part")) {
+      const node = card as HTMLElement;
+      node.classList.remove("solo");
+      if (node.dataset.part === "vocals") {
+        node.classList.toggle("muted", on);
+        (node.querySelector(".part-mute") as HTMLButtonElement | null)?.setAttribute("aria-pressed", String(on));
+      }
+    }
+  });
+  refs.separateBtn.addEventListener("click", () => void separateDeck(deckId));
+  refs.installModel.addEventListener("click", () => void installStemModel());
 
   for (const def of FX_DEFS) {
     const option = document.createElement("option");
@@ -771,6 +1100,173 @@ async function pumpAnalysis(): Promise<void> {
   }
 }
 
+/* -------------------------------------------------------------- stems */
+
+const separating: Partial<Record<DeckId, boolean>> = {};
+
+const trackPathFor = (track: Track | null): string | null => {
+  if (!track) return null;
+  if (track.file && desktop?.media.pathForFile) {
+    try {
+      const filePath = desktop.media.pathForFile(track.file);
+      if (filePath) return filePath;
+    } catch {
+      // fall through to the stored path
+    }
+  }
+  if (track.path && /^[a-zA-Z]:[\\/]|^\//.test(track.path)) return track.path;
+  return null;
+};
+
+const setPartsState = (deckId: DeckId, text: string): void => {
+  const refs = ui[deckId] as any;
+  if (!refs) return;
+  refs.partsState.textContent = text;
+  refs.separateBtn.disabled = Boolean(separating[deckId]);
+  refs.installModel.textContent = separating[deckId] ? "INSTALLING..." : "INSTALL MODEL";
+};
+
+const resetPartCards = (deckId: DeckId): void => {
+  const refs = ui[deckId] as any;
+  if (!refs) return;
+  refs.vocalsOnly.setAttribute("aria-pressed", "false");
+  refs.instrumental.setAttribute("aria-pressed", "false");
+  for (const card of refs.parts.querySelectorAll(".part")) {
+    const node = card as HTMLElement;
+    node.classList.remove("muted", "solo", "filtered", "rolled");
+    for (const button of node.querySelectorAll("button")) button.setAttribute("aria-pressed", "false");
+  }
+};
+
+const loadStemManifest = async (deckId: DeckId, manifest: StemManifest): Promise<boolean> => {
+  const api = desktop?.separation;
+  if (!api || !manifest.dir) return false;
+  const deck = decks[deckId];
+  const result = await api.read(manifest.dir);
+  const buffers: Partial<Record<PartId, AudioBuffer>> = {};
+  for (const part of PARTS) {
+    const data = result.parts[part.id];
+    if (!data) continue;
+    const buffer = deck.ctx.createBuffer(2, result.manifest.frames, result.manifest.sampleRate);
+    buffer.copyToChannel(new Float32Array(data.left), 0);
+    buffer.copyToChannel(new Float32Array(data.right), 1);
+    buffers[part.id] = buffer;
+  }
+  await deck.loadStems(buffers);
+  setPartsState(deckId, "4 parts ready");
+  return deck.hasStems;
+};
+
+const refreshParts = async (deckId: DeckId): Promise<void> => {
+  const refs = ui[deckId] as any;
+  const deck = decks[deckId];
+  if (!refs) return;
+  resetPartCards(deckId);
+  const api = desktop?.separation;
+  if (!api) {
+    setPartsState(deckId, "parts need the desktop app");
+    refs.separateBtn.disabled = true;
+    return;
+  }
+  try {
+    const status = await api.status();
+    refs.installModel.classList.toggle("hidden", status.ready);
+    if (!deck.audioHash) {
+      setPartsState(deckId, "parts need a local file");
+      return;
+    }
+    const track = meta[deckId];
+    const cache = await api.cache({ hash: deck.audioHash, trackPath: trackPathFor(track ?? null) });
+    if (cache.found && cache.manifest) {
+      setPartsState(deckId, "loading cached parts...");
+      if (await loadStemManifest(deckId, cache.manifest)) return;
+    }
+    setPartsState(deckId, status.ready ? "not separated" : "model not installed");
+    if (status.ready) void separateDeck(deckId);
+  } catch (error) {
+    setPartsState(deckId, `parts unavailable: ${(error as Error).message}`);
+  }
+};
+
+const separateDeck = async (deckId: DeckId): Promise<void> => {
+  const api = desktop?.separation;
+  const deck = decks[deckId];
+  const refs = ui[deckId] as any;
+  if (!api || !refs || separating[deckId]) return;
+  const track = meta[deckId];
+  if (!track || !deck.audioBuffer || !deck.audioHash) {
+    toast("Load a local track before separating parts.");
+    return;
+  }
+  const startHash = deck.audioHash;
+  separating[deckId] = true;
+  refs.separateBtn.disabled = true;
+  try {
+    let status = await api.status();
+    if (!status.ready) {
+      setPartsState(deckId, "installing stem model (166 MB)...");
+      refs.installModel.classList.remove("hidden");
+      await api.install();
+      status = await api.status();
+      if (!status.ready) throw new Error("Model install did not complete");
+      refs.installModel.classList.add("hidden");
+      toast("Stem model installed.");
+    }
+    const left = deck.audioBuffer.getChannelData(0).slice();
+    const right = deck.audioBuffer.numberOfChannels > 1 ? deck.audioBuffer.getChannelData(1).slice() : left.slice();
+    setPartsState(deckId, "separating parts...");
+    const manifest = await api.run({
+      hash: deck.audioHash,
+      sampleRate: deck.audioBuffer.sampleRate,
+      left,
+      right,
+      trackPath: trackPathFor(track),
+    });
+    if (deck.audioHash !== manifest.hash) return;
+    await loadStemManifest(deckId, manifest);
+    toast("Parts separated.");
+  } catch (error) {
+    toast(`Could not separate parts: ${(error as Error).message}`);
+    setPartsState(deckId, "separation failed");
+  } finally {
+    separating[deckId] = false;
+    refs.separateBtn.disabled = false;
+  }
+  if (deck.audioHash !== startHash) void refreshParts(deckId);
+};
+
+const installStemModel = async (): Promise<void> => {
+  const api = desktop?.separation;
+  if (!api) return;
+  try {
+    const status = await api.status();
+    if (status.ready) return;
+    await api.install();
+    for (const deckId of ["A", "B"] as DeckId[]) {
+      const refs = ui[deckId];
+      if (!refs) continue;
+      refs.installModel.classList.add("hidden");
+      if (!decks[deckId].hasStems) {
+        setPartsState(deckId, "model ready, not separated");
+        if (decks[deckId].hasTrack) void separateDeck(deckId);
+      }
+    }
+    toast("Stem model installed.");
+  } catch (error) {
+    toast(`Model install failed: ${(error as Error).message}`);
+  }
+};
+
+desktop?.separation?.onProgress((payload) => {
+  const progress = payload as SeparationProgress;
+  for (const deckId of ["A", "B"] as DeckId[]) {
+    if (!separating[deckId]) continue;
+    const hashMatches = !progress.hash || decks[deckId].audioHash === progress.hash;
+    if (!hashMatches) continue;
+    setPartsState(deckId, `${progress.stage} ${progress.percent}% - ${progress.detail}`);
+  }
+});
+
 /* -------------------------------------------------------------- loading */
 
 async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
@@ -813,11 +1309,13 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   waves[deckId]?.setCue(deck.cuePoint);
   syncLoopButtons(deckId);
   const hadLocalCues = loadCues(deckId, track.id);
+  loadLoops(deckId, track.id);
   if (!hadLocalCues) void applySeratoCues(track, deckId);
   if (track.analyzed) applyTrackToDeck(track, deckId);
   else enqueueAnalysis(track);
   await mixer.resume();
   setEngineState("audio engine running", true);
+  void refreshParts(deckId);
 }
 
 function applyTrackToDeck(track: Track, deckId: DeckId): void {
@@ -838,7 +1336,9 @@ function applyTrackToDeck(track: Track, deckId: DeckId): void {
 function persistCues(deckId: DeckId): void {
   const track = meta[deckId];
   if (!track) return;
-  const cues = decks[deckId].hotCues.map((cue) => (cue ? cue.time : null));
+  const cues = decks[deckId].hotCues.map((cue) =>
+    cue ? { time: cue.time, color: cue.color, name: cue.name ?? "" } : null,
+  );
   try {
     localStorage.setItem(`opendeck.cues.${track.id}`, JSON.stringify(cues));
   } catch {
@@ -847,25 +1347,109 @@ function persistCues(deckId: DeckId): void {
 }
 
 function loadCues(deckId: DeckId, trackId: string): boolean {
-  let found = false;
   const deck = decks[deckId];
   deck.hotCues = new Array(8).fill(null);
+  let cues: (CueRecord | null)[] = new Array(8).fill(null);
   try {
     const raw = localStorage.getItem(`opendeck.cues.${trackId}`);
-    if (raw) {
-      const cues = JSON.parse(raw) as (number | null)[];
-      cues.forEach((time, index) => {
-        if (typeof time === "number" && Number.isFinite(time) && index < 8) {
-          deck.hotCues[index] = { time, color: HOT_CUE_COLORS[index] };
-          found = true;
-        }
-      });
-    }
+    if (raw) cues = normaliseCues(JSON.parse(raw) as unknown, HOT_CUE_COLORS);
   } catch {
     // corrupt entry
   }
+  deck.hotCues = cues;
   updatePads(deckId, true);
-  return found;
+  return cues.some(Boolean);
+}
+
+function persistLoops(deckId: DeckId): void {
+  const track = meta[deckId];
+  if (!track) return;
+  try {
+    localStorage.setItem(`opendeck.loops.${track.id}`, JSON.stringify(savedLoops[deckId]));
+  } catch {
+    // storage full or unavailable
+  }
+}
+
+function loadLoops(deckId: DeckId, trackId: string): void {
+  let loops: SavedLoop[] = [];
+  try {
+    const raw = localStorage.getItem(`opendeck.loops.${trackId}`);
+    if (raw) loops = normaliseLoops(JSON.parse(raw) as unknown);
+  } catch {
+    // corrupt entry
+  }
+  savedLoops[deckId] = loops;
+  loopsOpen[deckId] = false;
+  renderSavedLoops(deckId);
+}
+
+function renderSavedLoops(deckId: DeckId): void {
+  const refs = ui[deckId];
+  if (!refs) return;
+  const loops = savedLoops[deckId];
+  const toggle = refs.savedLoopToggle as HTMLButtonElement;
+  const panel = refs.savedLoopsPanel as HTMLElement;
+  toggle.textContent = `LOOPS ${loops.length}`;
+  toggle.setAttribute("aria-expanded", String(loopsOpen[deckId]));
+  panel.hidden = !loopsOpen[deckId];
+  panel.replaceChildren();
+  if (loops.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "saved-loop-empty";
+    empty.textContent = "No saved loops. Set a loop and press SAVE.";
+    panel.append(empty);
+    return;
+  }
+  loops.forEach((loop) => {
+    const row = document.createElement("div");
+    row.className = "saved-loop";
+    row.dataset.id = loop.id;
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "saved-loop-apply";
+    apply.title = "Apply this loop";
+    const name = document.createElement("span");
+    name.className = "saved-loop-name";
+    name.textContent = loop.name || `${formatTime(loop.start)} - ${formatTime(loop.end)}`;
+    const time = document.createElement("small");
+    time.textContent = `${formatTime(loop.start)} - ${formatTime(loop.end)}`;
+    apply.append(name, time);
+    apply.addEventListener("click", () => {
+      decks[deckId].setLoopRange(loop.start, loop.end, true);
+      syncLoopButtons(deckId);
+    });
+    const lock = document.createElement("button");
+    lock.type = "button";
+    lock.className = "mini saved-loop-lock";
+    lock.textContent = loop.locked ? "LOCK" : "FREE";
+    lock.title = loop.locked ? "Unlock loop" : "Lock loop";
+    lock.setAttribute("aria-pressed", String(loop.locked));
+    lock.addEventListener("click", () => {
+      loop.locked = !loop.locked;
+      persistLoops(deckId);
+      renderSavedLoops(deckId);
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "mini saved-loop-remove";
+    remove.textContent = "x";
+    remove.title = "Delete saved loop";
+    remove.addEventListener("click", () => {
+      savedLoops[deckId] = removeSavedLoop(savedLoops[deckId], loop.id);
+      persistLoops(deckId);
+      renderSavedLoops(deckId);
+    });
+    row.addEventListener("dblclick", () => {
+      const next = window.prompt("Loop name", loop.name);
+      if (next === null) return;
+      loop.name = next.trim().slice(0, 32);
+      persistLoops(deckId);
+      renderSavedLoops(deckId);
+    });
+    row.append(apply, lock, remove);
+    panel.append(row);
+  });
 }
 
 async function applySeratoCues(track: Track, deckId: DeckId): Promise<void> {
@@ -876,10 +1460,24 @@ async function applySeratoCues(track: Track, deckId: DeckId): Promise<void> {
   if (tags.markers?.cues.length) {
     for (const cue of tags.markers.cues) {
       if (cue.index >= 8) continue;
-      deck.hotCues[cue.index] = { time: cue.positionMs / 1000, color: cue.color };
+      deck.hotCues[cue.index] = { time: cue.positionMs / 1000, color: cue.color, name: cue.name };
     }
     updatePads(deckId, true);
     persistCues(deckId);
+  }
+  if (tags.markers?.loops.length && savedLoops[deckId].length === 0) {
+    savedLoops[deckId] = normaliseLoops(
+      tags.markers.loops.map((loop) => ({
+        id: `serato-${loop.index}-${loop.startMs}`,
+        start: loop.startMs / 1000,
+        end: loop.endMs / 1000,
+        name: loop.name,
+        color: loop.color,
+        locked: loop.locked,
+      })),
+    );
+    persistLoops(deckId);
+    renderSavedLoops(deckId);
   }
   const tempo = beatgridTempo(tags.beatgrid);
   if (tempo && !track.analyzed && track.bpm <= 0) {
@@ -893,19 +1491,387 @@ async function applySeratoCues(track: Track, deckId: DeckId): Promise<void> {
   if (loop) deck.setLoopRange(loop.start, loop.end, false);
 }
 
+function recordPadAction(
+  deckId: DeckId,
+  mode: PadMode,
+  index: number,
+  phase: "tap" | "press" | "release" = "tap",
+  cue?: number,
+): void {
+  if (padSequences[deckId].recordAction(mode, index, performance.now(), phase, cue)) {
+    updatePads(deckId, true);
+  }
+}
+
+function triggerPadCue(deckId: DeckId, index: number): void {
+  const deck = decks[deckId];
+  deck.jumpHotCue(index);
+  persistCues(deckId);
+  updatePads(deckId, true);
+  if (!deck.playing) void deck.play();
+}
+
+function stopSequencePlayback(deckId: DeckId): void {
+  const active = sequencePlayback[deckId];
+  if (!active) return;
+  window.clearInterval(active.timer);
+  delete sequencePlayback[deckId];
+  if (padHolds[deckId]?.fromSequence) releasePadHold(deckId);
+  updatePads(deckId, true);
+}
+
+function dispatchSequenceEvent(deckId: DeckId, event: ReturnType<SequenceRecorder["list"]>[number]): void {
+  if (event.mode === undefined) {
+    if (event.cue !== undefined) triggerPadCue(deckId, event.cue);
+    return;
+  }
+  if (event.index === undefined) return;
+  if (["loop-roll", "slicer", "pitch-play", "scratch"].includes(event.mode)) {
+    if (event.phase === "release") {
+      if (padHolds[deckId]?.fromSequence) releasePadHold(deckId);
+    } else {
+      startPadHold(deckId, event.index, undefined, event.mode, true);
+    }
+    return;
+  }
+  handlePadAction(deckId, event.index, event.mode, true);
+}
+
+function playSequence(deckId: DeckId): void {
+  stopSequencePlayback(deckId);
+  const events = padSequences[deckId].list();
+  padSequenceEvents[deckId] = events;
+  if (!events.length) {
+    toast("Record a sequence first.");
+    return;
+  }
+  const loopMs = Math.max(500, padSequences[deckId].durationMs() + 140);
+  const startedAt = performance.now();
+  const active = { timer: 0, startedAt, next: 0, cycle: -1, loopMs };
+  const tick = (): void => {
+    const elapsed = performance.now() - startedAt;
+    const cycle = Math.floor(elapsed / loopMs);
+    if (cycle !== active.cycle) {
+      if (active.cycle >= 0 && padHolds[deckId]?.fromSequence) releasePadHold(deckId);
+      active.cycle = cycle;
+      active.next = 0;
+    }
+    const inCycle = elapsed - cycle * loopMs;
+    while (active.next < events.length && events[active.next]!.atMs <= inCycle) {
+      dispatchSequenceEvent(deckId, events[active.next]!);
+      active.next += 1;
+    }
+  };
+  active.timer = window.setInterval(tick, 20);
+  sequencePlayback[deckId] = active;
+  tick();
+  void decks[deckId].play();
+  updatePads(deckId, true);
+}
+
+function toggleSequenceRecording(deckId: DeckId): void {
+  const recorder = padSequences[deckId];
+  if (recorder.recording) {
+    padSequenceEvents[deckId] = recorder.stop();
+    toast(`${padSequenceEvents[deckId].length} sequence step(s) recorded.`);
+  } else {
+    stopSequencePlayback(deckId);
+    padSequenceEvents[deckId] = [];
+    recorder.start(performance.now());
+    toast("Recording pad actions.");
+  }
+  updatePads(deckId, true);
+}
+
+function togglePartFx(deckId: DeckId, index: number): void {
+  const action = PART_FX_PADS[index]!;
+  const [kind, ...rest] = action.split("-");
+  const part = rest.join("-") as PartId;
+  const deck = decks[deckId];
+  if (kind === "filter") {
+    partFxFiltered[deckId][part] = !partFxFiltered[deckId][part];
+    deck.setPartFilter(part, partFxFiltered[deckId][part]);
+  } else {
+    partFxMuted[deckId][part] = !partFxMuted[deckId][part];
+    deck.setPartMuted(part, partFxMuted[deckId][part]);
+  }
+  updatePads(deckId, true);
+}
+
+function handlePadAction(
+  deckId: DeckId,
+  index: number,
+  modeOverride?: PadMode,
+  replay = false,
+): void {
+  const deck = decks[deckId];
+  const mode = modeOverride ?? padModes[deckId];
+  if (!replay && mode !== "sequence") {
+    const cue = mode === "hot-cue" || mode === "cue-loop" ? index : undefined;
+    recordPadAction(deckId, mode, index, "tap", cue);
+  }
+  switch (mode) {
+    case "hot-cue":
+      triggerPadCue(deckId, index);
+      return;
+    case "cue-loop": {
+      const cue = deck.hotCues[index];
+      if (cue) deck.seek(cue.time);
+      const range = cueLoopRange(cue?.time ?? deck.currentTime, deck.info.bpm || 120, 4);
+      deck.setLoopRange(range.start, range.end, true);
+      syncLoopButtons(deckId);
+      if (!deck.playing) void deck.play();
+      return;
+    }
+    case "beat-jump":
+      deck.beatJump(beatJumpStep(index));
+      return;
+    case "transport":
+      if (index === 0) toggleDeck(deckId);
+      else if (index === 1) {
+        if (deck.playing) deck.jumpToCue();
+        else deck.setCue(deck.currentTime);
+      } else if (index === 2) applySync(deckId);
+      else if (index === 3) {
+        deck.toggleLoop();
+        syncLoopButtons(deckId);
+      } else if (index === 4) {
+        deck.setKeylock(!deck.keylockOn);
+        ui[deckId]!.keylock.setAttribute("aria-pressed", String(deck.keylockOn));
+      } else if (index === 5) {
+        const next = ui[deckId]!.quantize.getAttribute("aria-pressed") !== "true";
+        ui[deckId]!.quantize.setAttribute("aria-pressed", String(next));
+        deck.setQuantize(next);
+      } else if (index === 6) {
+        deck.setReverse(!deck.reversed);
+        if (!deck.reversed && !deck.playing) void deck.play();
+      } else {
+        deck.pause();
+        deck.seek(0);
+      }
+      return;
+    case "sequence":
+      if (index === 0) toggleSequenceRecording(deckId);
+      else if (index === 1) {
+        if (sequencePlayback[deckId]) stopSequencePlayback(deckId);
+        else playSequence(deckId);
+      } else {
+        if (!replay) recordPadAction(deckId, "hot-cue", index - 2, "tap", index - 2);
+        triggerPadCue(deckId, index - 2);
+      }
+      return;
+    case "part-fx":
+      togglePartFx(deckId, index);
+      return;
+    default:
+      return;
+  }
+}
+
+function loadScratchPad(deckId: DeckId, index: number): void {
+  const buffer = decks[deckId].audioBuffer;
+  if (!buffer) {
+    toast("Load a local track before filling a scratch pad.");
+    return;
+  }
+  scratchBank.load(index, buffer);
+  toast(`Scratch pad S${index + 1} loaded with ${decks[deckId].info.title || "this track"}.`);
+  updatePads(deckId, true);
+}
+
+function startPadHold(
+  deckId: DeckId,
+  index: number,
+  event?: PointerEvent,
+  modeOverride?: PadMode,
+  replay = false,
+): void {
+  releasePadHold(deckId);
+  const mode = modeOverride ?? padModes[deckId];
+  if (!["loop-roll", "slicer", "pitch-play", "scratch"].includes(mode)) return;
+  const deck = decks[deckId];
+  const pad = ui[deckId]!.pads.children[index] as HTMLElement | undefined;
+  event?.preventDefault();
+  pad?.classList.add("pad-held");
+  const now = performance.now();
+  const cue = mode === "pitch-play" || mode === "scratch" ? index : undefined;
+  if (!replay) recordPadAction(deckId, mode, index, "press", cue);
+  if (mode === "loop-roll") {
+    const position = deck.currentTime;
+    deck.setLoop(position, loopRollBeats(index), true);
+    padHolds[deckId] = {
+      index, kind: mode, startedAt: now, position,
+      rate: 1, previousRate: deck.playbackRate, previousKeylock: deck.keylockOn,
+      fromSequence: replay,
+    };
+    if (!deck.playing) void deck.play();
+  } else if (mode === "slicer") {
+    const position = deck.currentTime;
+    const range = sliceRange(index, deck.duration);
+    deck.setLoopRange(range.start, range.end, true);
+    padHolds[deckId] = {
+      index, kind: mode, startedAt: now, position,
+      rate: 1, previousRate: deck.playbackRate, previousKeylock: deck.keylockOn,
+      fromSequence: replay,
+    };
+    if (!deck.playing) void deck.play();
+  } else if (mode === "pitch-play") {
+    const position = deck.hotCues[index]?.time ?? deck.currentTime;
+    const previousRate = deck.playbackRate;
+    const previousKeylock = deck.keylockOn;
+    deck.seek(position);
+    deck.setKeylock(false);
+    deck.setRate(pitchPlayRate(index));
+    padHolds[deckId] = {
+      index, kind: mode, startedAt: now, position,
+      rate: pitchPlayRate(index), previousRate, previousKeylock,
+      fromSequence: replay,
+    };
+    if (!deck.playing) void deck.play();
+  } else if (mode === "scratch") {
+    const fromBank = scratchBank.has(index);
+    if (fromBank) {
+      scratchBank.start(index, deck.hotCues[index]?.time ?? 0, 1);
+    } else if (deck.scratchReady) {
+      if (deck.hotCues[index]) deck.seek(deck.hotCues[index]!.time);
+      deck.beginScratch();
+      deck.scratchRate(1);
+    } else {
+      delete padHolds[deckId];
+      pad?.classList.remove("pad-held");
+      toast("Shift+click a scratch pad to load the current track.");
+      return;
+    }
+    padHolds[deckId] = {
+      index, kind: mode, startedAt: now, position: deck.currentTime,
+      rate: 1, previousRate: deck.playbackRate, previousKeylock: deck.keylockOn,
+      fromSequence: replay, scratchBank: fromBank,
+    };
+  }
+  updatePads(deckId, true);
+}
+
+function releasePadHold(deckId: DeckId): void {
+  const hold = padHolds[deckId];
+  if (!hold) return;
+  delete padHolds[deckId];
+  if (!hold.fromSequence) {
+    const cue = hold.kind === "pitch-play" || hold.kind === "scratch" ? hold.index : undefined;
+    recordPadAction(deckId, hold.kind, hold.index, "release", cue);
+  }
+  const deck = decks[deckId];
+  const pad = ui[deckId]!.pads.children[hold.index] as HTMLElement | undefined;
+  pad?.classList.remove("pad-held");
+  if (hold.kind === "loop-roll" || hold.kind === "slicer") {
+    if (deck.loopActive) deck.toggleLoop();
+    deck.seek(rollingReleasePosition(hold.position, hold.startedAt, performance.now(), hold.rate, deck.duration));
+    syncLoopButtons(deckId);
+  } else if (hold.kind === "pitch-play") {
+    deck.setRate(hold.previousRate);
+    deck.setKeylock(hold.previousKeylock);
+  } else if (hold.kind === "scratch") {
+    scratchBank.stop();
+    if (!hold.scratchBank) {
+      deck.endScratch();
+      if (deck.playbackRate > 0 && !deck.playing) void deck.play();
+    }
+  }
+  updatePads(deckId, true);
+}
+
 function updatePads(deckId: DeckId, force = false): void {
   const deck = decks[deckId];
   const refs = ui[deckId]!;
-  const version = deck.hotCueVersion;
-  if (!force && lastPadVersion[deckId] === version) return;
-  lastPadVersion[deckId] = version;
+  const mode = padModes[deckId];
+  const scratchLoaded = Array.from({ length: 8 }, (_, index) => (scratchBank.has(index) ? "1" : "0")).join("");
+  const signature = `${deck.hotCueVersion}|${mode}|${padSequences[deckId].recording}|${padSequenceEvents[deckId].length}|${Boolean(sequencePlayback[deckId])}|${scratchLoaded}|${JSON.stringify(partFxFiltered[deckId])}|${JSON.stringify(partFxMuted[deckId])}`;
+  if (!force && lastPadVersion[deckId] === signature) return;
+  lastPadVersion[deckId] = signature;
+  const modeDef = PAD_MODE_DEFS.find((item) => item.id === mode)!;
+  (refs["padModeState"] as HTMLElement).textContent = modeDef.label;
+  const sequencer = padSequences[deckId];
+  (refs["padSeqState"] as HTMLElement).textContent = sequencePlayback[deckId]
+    ? "SEQ PLAY"
+    : sequencer.recording
+      ? `REC ${sequencer.length}`
+      : padSequenceEvents[deckId].length
+        ? `SEQ ${padSequenceEvents[deckId].length}`
+        : "";
   const pads = Array.from(refs.pads.querySelectorAll<HTMLButtonElement>(".pad"));
   pads.forEach((pad, index) => {
     const cue = deck.hotCues[index];
-    pad.classList.toggle("set", Boolean(cue));
-    pad.style.background = cue ? cue.color : "";
-    pad.style.color = cue ? "#fff" : "";
-    pad.querySelector("small")!.textContent = cue ? formatTime(cue.time) : "—";
+    let top: string = String(index + 1);
+    let bottom: string = "-";
+    let active = false;
+    let color: string = "";
+    let title: string = modeDef.hint;
+    if (mode === "hot-cue" || mode === "cue-loop") {
+      active = Boolean(cue);
+      color = cue?.color ?? "";
+      bottom = cue ? cue.name || formatTime(cue.time) : "-";
+      if (mode === "cue-loop") bottom = cue ? "4 beat" : "loop";
+      title = cue ? `${cue.name || `Cue ${index + 1}`} at ${formatTime(cue.time)}` : modeDef.hint;
+    } else if (mode === "loop-roll") {
+      const beats = loopRollBeats(index);
+      top = beats < 1 ? `1/${Math.round(1 / beats)}` : String(beats);
+      bottom = "roll";
+    } else if (mode === "slicer") {
+      const range = sliceRange(index, deck.duration);
+      top = String(index + 1);
+      bottom = deck.duration ? `${formatTime(range.start)}` : "slice";
+    } else if (mode === "beat-jump") {
+      const step = beatJumpStep(index);
+      top = step > 0 ? `+${step}` : String(step);
+      bottom = "jump";
+    } else if (mode === "transport") {
+      top = ["PLAY", "CUE", "SYNC", "LOOP", "KEY", "Q", "REV", "STOP"][index]!;
+      bottom = "deck";
+    } else if (mode === "pitch-play") {
+      const semis = pitchPlaySemitones(index);
+      top = semis > 0 ? `+${semis}` : String(semis);
+      bottom = cue ? cue.name || formatTime(cue.time) : "pitch";
+      active = Boolean(cue);
+      color = cue?.color ?? "";
+    } else if (mode === "scratch") {
+      const loaded = scratchBank.has(index);
+      top = `S${index + 1}`;
+      bottom = loaded ? "loaded" : "shift+load";
+      active = Boolean(cue) || loaded;
+      color = cue?.color ?? "";
+      title = loaded
+        ? "Hold to scratch the loaded track. Shift+click to replace it."
+        : "Shift+click to load the current local track, then hold to scratch.";
+    } else if (mode === "sequence") {
+      if (index === 0) {
+        top = sequencer.recording ? "STOP" : "REC";
+        bottom = `${sequencer.length} step`;
+        active = sequencer.recording;
+      } else if (index === 1) {
+        top = sequencePlayback[deckId] ? "STOP" : "PLAY";
+        bottom = `${padSequenceEvents[deckId].length} step`;
+        active = Boolean(sequencePlayback[deckId]);
+      } else {
+        const seqCue = deck.hotCues[index - 2];
+        active = Boolean(seqCue);
+        color = seqCue?.color ?? "";
+        top = String(index - 1);
+        bottom = seqCue ? seqCue.name || formatTime(seqCue.time) : "cue";
+      }
+    } else if (mode === "part-fx") {
+      const action = PART_FX_PADS[index]!;
+      const [kind, ...rest] = action.split("-");
+      const part = rest.join("-") as PartId;
+      top = part === "vocals" ? "VOX" : part.toUpperCase();
+      bottom = kind === "filter" ? "filter" : "mute";
+      active = kind === "filter" ? partFxFiltered[deckId][part] : partFxMuted[deckId][part];
+      title = `${kind === "filter" ? "Filter" : "Mute"} ${part}`;
+    }
+    pad.classList.toggle("set", active);
+    pad.style.background = color;
+    pad.style.color = color ? "#fff" : "";
+    pad.firstChild!.textContent = top;
+    pad.querySelector("small")!.textContent = bottom;
+    pad.title = title;
   });
   const cues = deck.hotCues.filter((cue): cue is { time: number; color: string } => Boolean(cue));
   waves[deckId]?.setHotCues(cues);
@@ -931,6 +1897,28 @@ const library = new Library({
     toast("Added to queue");
   },
 });
+
+try {
+  const played = JSON.parse(localStorage.getItem("opendeck.played") ?? "[]") as unknown;
+  if (Array.isArray(played)) {
+    for (const item of [...played].reverse()) library.playedLog.add(item as PlayedEntry);
+  }
+  const scratch = JSON.parse(localStorage.getItem("opendeck.scratchpad") ?? "[]") as unknown;
+  if (Array.isArray(scratch)) {
+    for (const id of scratch) if (typeof id === "string" && id) library.scratchpad.add(id);
+  }
+} catch {
+  // storage unavailable or corrupt
+}
+
+function persistLibraryUx(): void {
+  try {
+    localStorage.setItem("opendeck.played", JSON.stringify(library.playedLog.list()));
+    localStorage.setItem("opendeck.scratchpad", JSON.stringify(library.scratchpad.list()));
+  } catch {
+    // storage full or unavailable
+  }
+}
 
 function addFiles(files: FileList | File[]): Track[] {
   const added = library.addFiles(files);
@@ -971,6 +1959,73 @@ window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => event.preventDefault());
 
 $("search").addEventListener("input", (event) => library.setFilter((event.target as HTMLInputElement).value));
+
+function renderPlayedLog(): void {
+  const entries = library.playedLog.list();
+  $("playedCount").textContent = String(entries.length);
+  const list = $("playedList");
+  list.replaceChildren();
+  if (entries.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "played-empty";
+    empty.textContent = "Play something to start the log.";
+    list.append(empty);
+    return;
+  }
+  for (const entry of entries.slice(0, 100)) {
+    const row = document.createElement("div");
+    row.className = "played-row";
+    const name = document.createElement("span");
+    name.className = "played-name";
+    name.textContent = entry.name;
+    const detail = document.createElement("small");
+    const when = new Date(entry.startedAt);
+    detail.textContent = `${Number.isNaN(when.getTime()) ? entry.startedAt : when.toLocaleString()} / ${entry.crate || "no crate"}`;
+    row.append(name, detail);
+    list.append(row);
+  }
+}
+
+function refreshLibraryChrome(): void {
+  const scratch = library.scratchpad.list().length;
+  const scratchBtn = $("scratchBtn");
+  scratchBtn.textContent = `Scratchpad ${scratch}`;
+  scratchBtn.setAttribute("aria-pressed", String(library.scratchOnly));
+  $("sortDir").textContent = library.sortDirection === "asc" ? "A-Z" : "Z-A";
+  renderPlayedLog();
+}
+
+$("sortBy").addEventListener("change", (event) =>
+  library.setSort((event.target as HTMLSelectElement).value as "title" | "bpm" | "key" | "duration" | "crate"),
+);
+$("sortDir").addEventListener("click", () =>
+  library.setSort(library.sortKey, library.sortDirection === "asc" ? "desc" : "asc"),
+);
+$("scratchBtn").addEventListener("click", () => {
+  library.setScratchOnly(!library.scratchOnly);
+  refreshLibraryChrome();
+});
+$("trackList").addEventListener("click", (event) => {
+  if ((event.target as HTMLElement).closest(".scratch-toggle")) {
+    persistLibraryUx();
+    refreshLibraryChrome();
+  }
+});
+$("playedExport").addEventListener("click", () => {
+  const blob = new Blob([library.playedLog.exportCsv()], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "opendeck-played.csv";
+  link.click();
+  URL.revokeObjectURL(url);
+});
+$("playedClear").addEventListener("click", () => {
+  library.playedLog.clear();
+  persistLibraryUx();
+  renderPlayedLog();
+});
+refreshLibraryChrome();
 
 const crateNote = $("crateNote");
 const linkBtn = $("linkBtn");
@@ -1173,6 +2228,109 @@ $("exportBtn").addEventListener("click", async () => {
     toast(mode === "folder" ? "Serato export written" : "Serato export downloaded");
   } catch (error) {
     setNote(`Export failed: ${(error as Error).message}`, true);
+  }
+});
+
+function cueRecordsFor(track: Track): (CueRecord | null)[] {
+  for (const deckId of ["A", "B"] as DeckId[]) {
+    if (meta[deckId]?.id === track.id) {
+      return decks[deckId].hotCues.map((cue) =>
+        cue ? { time: cue.time, color: cue.color, name: cue.name ?? "" } : null,
+      );
+    }
+  }
+  try {
+    const raw = localStorage.getItem(`opendeck.cues.${track.id}`);
+    if (raw) return normaliseCues(JSON.parse(raw) as unknown, HOT_CUE_COLORS);
+  } catch {
+    // storage unavailable
+  }
+  return new Array(8).fill(null);
+}
+
+function savedLoopsFor(track: Track): SavedLoop[] {
+  for (const deckId of ["A", "B"] as DeckId[]) {
+    if (meta[deckId]?.id === track.id) return savedLoops[deckId];
+  }
+  try {
+    const raw = localStorage.getItem(`opendeck.loops.${track.id}`);
+    if (raw) return normaliseLoops(JSON.parse(raw) as unknown);
+  } catch {
+    // storage unavailable
+  }
+  return [];
+}
+
+function writePayload(track: Track): SeratoWritePayload {
+  const records = cueRecordsFor(track);
+  const cues = records.flatMap((cue, index) =>
+    cue === null
+      ? []
+      : [
+          {
+            index,
+            positionMs: Math.round(cue.time * 1000),
+            color: cue.color || DEFAULT_SLOT_COLORS[index],
+            name: cue.name,
+          },
+        ],
+  );
+  const loops: SeratoMarkers["loops"] = savedLoopsFor(track)
+    .slice(0, 9)
+    .map((loop, index) => ({
+      index,
+      startMs: Math.round(loop.start * 1000),
+      endMs: Math.round(loop.end * 1000),
+      color: loop.color,
+      name: loop.name,
+      locked: loop.locked,
+    }));
+  return {
+    path: track.file?.webkitRelativePath || track.path,
+    name: track.file?.name || track.path.split(/[\\/]/).pop() || track.name,
+    markers: { cues, loops, trackColor: NO_TRACK_COLOR, bpmLocked: track.bpm > 0 },
+    beatgrid: track.bpm > 0 ? [{ position: track.beatPhase || 0, bpm: track.bpm }] : null,
+  };
+}
+
+$("writeTagsBtn").addEventListener("click", async () => {
+  if (!desktop?.serato) {
+    setNote("Embedded tag writing is available in the Electron desktop app.", true);
+    return;
+  }
+  const tracks = library.tracks
+    .filter((track) => track.source === "local" || track.source === "crate")
+    .map(writePayload)
+    .filter((track) => /\.(mp3|wav|aiff?|flac|m4a|mp4|aac)$/i.test(track.name));
+  if (tracks.length === 0) {
+    setNote("Load MP3, WAV, AIFF, FLAC or M4A files before writing tags.", true);
+    return;
+  }
+  if (await desktop.serato.running()) {
+    setNote("Close Serato DJ before writing tags.", true);
+    return;
+  }
+  try {
+    const result = await desktop.serato.writeTags({ root: null, tracks });
+    setNote(result.detail, !result.ok);
+    if (result.ok) toast("Cues and beatgrid written");
+  } catch (error) {
+    setNote(`Tag write failed: ${(error as Error).message}`, true);
+  }
+});
+
+$("undoTagsBtn").addEventListener("click", async () => {
+  if (!desktop?.serato) {
+    setNote("Undo is available in the Electron desktop app.", true);
+    return;
+  }
+  if (!confirm("Restore the files changed by the last OpenDeck tag write?")) return;
+  try {
+    const result = await desktop.serato.undo();
+    setNote(result.detail, !result.ok);
+    if (result.ok) toast("Tag write undone");
+  } catch (error) {
+    setNote(`Undo failed: ${(error as Error).message}`, true);
   }
 });
 
@@ -1714,6 +2872,18 @@ function frame(): void {
   rafPending = true;
   decks.A.tick();
   decks.B.tick();
+  for (const deckId of ["A", "B"] as DeckId[]) {
+    const playing = decks[deckId].playing;
+    if (playing && !wasPlaying[deckId]) {
+      const track = meta[deckId];
+      if (track) {
+        library.recordPlay(track);
+        persistLibraryUx();
+        renderPlayedLog();
+      }
+    }
+    wasPlaying[deckId] = playing;
+  }
   updateEngineDiagnostics(performance.now());
   renderDeckFrame("A");
   renderDeckFrame("B");
@@ -1773,8 +2943,8 @@ for (const deckId of ["A", "B"] as DeckId[]) {
     MIDI_TARGETS.push({ id: `${deckId}.pad${index}`, label: `${deckId} Hot cue ${index}` });
   }
 }
-for (let index = 1; index <= 8; index += 1) {
-  MIDI_TARGETS.push({ id: `smp.${index}`, label: `Sampler ${index} ${SAMPLER_PADS[index - 1].label}` });
+for (const pad of SAMPLER_SLOTS) {
+  MIDI_TARGETS.push({ id: `smp.${pad.slot + 1}`, label: `Sampler ${pad.slot + 1} ${pad.label}` });
 }
 
 const midiBindings: MidiBindings = loadBindings(window.localStorage);
@@ -1989,26 +3159,55 @@ function initMidiUi(): void {
   }
 }
 
-function triggerSamplerPad(index: number, velocity = 1): void {
+const samplerBankOffset = (): number => SAMPLER_BANKS.indexOf(samplerBank) * 8;
+
+function triggerSamplerPad(slot: number, velocity = 1): void {
   void mixer.resume();
-  sampler.trigger(index, velocity);
-  const button = $("samplerPads").children[index] as HTMLElement | undefined;
+  sampler.trigger(slot, velocity);
+  const offset = samplerBankOffset();
+  if (slot < offset || slot >= offset + 8) return;
+  const button = $("samplerPads").children[slot - offset] as HTMLElement | undefined;
   if (!button) return;
   button.classList.add("hit");
   window.setTimeout(() => button.classList.remove("hit"), 120);
 }
 
-function initSamplerUi(): void {
+function renderSamplerPads(): void {
   const host = $("samplerPads");
-  SAMPLER_PADS.forEach((pad, index) => {
+  host.replaceChildren();
+  const offset = samplerBankOffset();
+  SAMPLER_SLOTS.slice(offset, offset + 8).forEach((pad, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "sampler-pad";
     button.title = `${pad.label} (NumPad ${index + 1})`;
     button.innerHTML = `<span class="smp-index">${index + 1}</span><small>${pad.label}</small>`;
-    button.addEventListener("click", () => triggerSamplerPad(index, 1));
+    button.addEventListener("click", () => triggerSamplerPad(offset + index, 1));
     host.append(button);
   });
+  $("samplerState").textContent = `Bank ${samplerBank} · ${offset + 1}-${offset + 8} of 32`;
+  for (const button of Array.from($("samplerBanks").children)) {
+    button.setAttribute("aria-pressed", String(button.textContent === samplerBank));
+  }
+}
+
+function setSamplerBank(bank: SamplerBank): void {
+  samplerBank = bank;
+  renderSamplerPads();
+}
+
+function initSamplerUi(): void {
+  const banks = $("samplerBanks");
+  for (const bank of SAMPLER_BANKS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sampler-bank";
+    button.textContent = bank;
+    button.title = `Sampler bank ${bank}`;
+    button.addEventListener("click", () => setSamplerBank(bank));
+    banks.append(button);
+  }
+  renderSamplerPads();
   $("samplerVol").addEventListener("input", (event) =>
     sampler.setVolume(Number((event.target as HTMLInputElement).value)),
   );
@@ -2017,7 +3216,7 @@ function initSamplerUi(): void {
     const match = /^Numpad([1-8])$/.exec(event.code);
     if (!match) return;
     event.preventDefault();
-    triggerSamplerPad(Number(match[1]) - 1, 1);
+    triggerSamplerPad(samplerBankOffset() + Number(match[1]) - 1, 1);
   });
 }
 

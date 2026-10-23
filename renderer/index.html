@@ -84,8 +84,9 @@
       <div class="sampler-card">
         <div class="aux-head">
           <span class="eyebrow">Sampler</span>
-          <span class="chip mono" id="samplerState">8 pads</span>
+          <span class="chip mono" id="samplerState">Bank A · 8 of 32</span>
         </div>
+        <div class="sampler-banks" id="samplerBanks"></div>
         <div class="sampler-pads" id="samplerPads"></div>
         <input id="samplerVol" type="range" min="0" max="1" step="0.01" value="0.85" aria-label="Sampler level">
       </div>
@@ -123,11 +124,22 @@
           <span class="micro">or click to browse · MP3, WAV, FLAC, M4A/AAC, OGG/Opus, AIFF, WebM</span>
         </label>
         <div class="lib-tools">
-          <input id="search" type="search" placeholder="Filter by title or key" aria-label="Filter tracks">
+          <input id="search" type="search" placeholder="Filter title, path, crate or key" aria-label="Filter tracks">
+          <select id="sortBy" class="mini-select" aria-label="Sort tracks">
+            <option value="title" selected>Title</option>
+            <option value="bpm">BPM</option>
+            <option value="key">Key</option>
+            <option value="duration">Length</option>
+            <option value="crate">Crate</option>
+          </select>
+          <button id="sortDir" type="button" class="ghost" title="Toggle sort direction">A-Z</button>
+          <button id="scratchBtn" type="button" class="ghost" title="Show only scratchpad tracks">Scratchpad 0</button>
           <input id="crateInput" type="file" accept=".crate" hidden>
           <button id="crateBtn" type="button" class="ghost">Import .crate</button>
           <button id="linkBtn" type="button" class="ghost hidden">Link music folder</button>
           <button id="exportBtn" type="button" class="ghost" title="Download a Serato-compatible _Serato_ folder as a zip">Export Serato zip</button>
+          <button id="writeTagsBtn" type="button" class="ghost" title="Write cues and beatgrid into the audio files with an undo backup">Write tags</button>
+          <button id="undoTagsBtn" type="button" class="ghost" title="Restore the files changed by the last tag write">Undo tags</button>
           <span id="libCount" class="chip mono">0 tracks</span>
         </div>
       </div>
@@ -140,6 +152,14 @@
           <tbody id="trackList"></tbody>
         </table>
       </div>
+      <details class="played-log" id="playedLog">
+        <summary>Played <span id="playedCount" class="chip mono">0</span></summary>
+        <div class="played-tools">
+          <button id="playedExport" type="button" class="ghost small">Export CSV</button>
+          <button id="playedClear" type="button" class="ghost small">Clear</button>
+        </div>
+        <div id="playedList" class="played-list"></div>
+      </details>
     </div>
 
     <div class="panel hidden" data-panel="stream" role="tabpanel">
@@ -268,7 +288,14 @@
       <span class="deck-sync chip hidden">synced</span>
     </div>
 
-    <div class="pads" aria-label="Hot cues"></div>
+    <div class="pad-mode-row">
+      <span class="row-label">Pads</span>
+      <select class="pad-mode mini-select" aria-label="Pad mode"></select>
+      <span class="pad-mode-state mono">Hot Cue</span>
+      <span class="pad-seq-state mono"></span>
+    </div>
+
+    <div class="pads" aria-label="Performance pads"></div>
 
     <div class="transport">
       <button type="button" class="cue" title="Set or jump to cue">CUE</button>
@@ -283,7 +310,11 @@
       <button type="button" class="mini loop-half" title="Halve loop">÷2</button>
       <button type="button" class="mini loop-double" title="Double loop">×2</button>
       <button type="button" class="mini quantize" aria-pressed="true" title="Quantize to beat grid">Q</button>
+      <button type="button" class="mini save-loop" title="Save the current loop">SAVE</button>
+      <button type="button" class="mini saved-loop-toggle" aria-expanded="false" title="Show saved loops">LOOPS 0</button>
     </div>
+
+    <div class="saved-loops" hidden aria-label="Saved loops"></div>
 
     <div class="control-row">
       <span class="row-label">Jump</span>
@@ -316,9 +347,22 @@
       <label class="knob">TRIM<input class="trim" type="range" min="0" max="1.5" step="0.01" value="1"></label>
     </div>
 
-    <div class="stem-row" aria-label="Stems">
-      <span class="row-label">Stems</span>
+    <div class="stem-row" aria-label="Bands">
+      <span class="row-label">Bands</span>
       <div class="stems"></div>
+    </div>
+
+    <div class="stem-row parts-row" aria-label="Parts">
+      <span class="row-label">Parts</span>
+      <div class="parts"></div>
+    </div>
+
+    <div class="parts-bar">
+      <button type="button" class="mini vocals-only" aria-pressed="false" title="Solo the vocal part">VOCALS</button>
+      <button type="button" class="mini instrumental" aria-pressed="false" title="Remove the vocal part">INST</button>
+      <span class="parts-state mono">parts not ready</span>
+      <button type="button" class="mini install-model hidden" title="Download the offline stem model">INSTALL MODEL</button>
+      <button type="button" class="mini separate-btn" title="Separate this track into four parts">SEPARATE</button>
     </div>
 
     <div class="fx-row">

@@ -283,6 +283,69 @@ through a stable shared-memory seam, or when the Web Audio graph is measured as
 the latency bottleneck. Wiring `cpal_out` directly requires a native mixer that
 recreates the downstream graph first.
 
+## D23: Pad modes share the eight pad buttons; sampler has four banks
+
+**Decision:** Each deck owns one `PadMode` and the eight pads change meaning by
+mode. The ten modes are Hot Cue, Cue Loop, Loop Roll, Slicer, Beat Jump,
+Transport, Pitch Play, Scratch, Sequence and Part FX. Hold modes use pointer
+down/up and restore the previous rate/key-lock state. Loop Roll and Slicer
+release to `position + elapsed × rate` rather than chasing a source-level
+rolling buffer. Sequence records mode, pad index and press/release phase with
+millisecond timestamps (cap 128), then loops the events until stopped on a
+20 ms timer with a 140 ms tail. Part FX uses four pads for per-part low-pass filters and four for per-part mutes
+once true parts are loaded; before separation it falls back to the four filter
+bands. Each band and each true part has its own Biquad insert before its gain. Shift+click on a Scratch pad loads the current
+local track into that pad; hold then scratches it through a separate
+`ScratchVoice`. Sampler slots are four banks of eight generated drum voices,
+addressed 0-31.
+
+**Why:** This delivers the pad wall, a usable scratch bank and a 32-slot sampler
+without changing the Serato tag format. Sequence events are semantic pad
+actions rather than raw audio, so they replay through the same mode handlers as
+pointer input. P5 routes each separated part through its own Biquad and gain, so part effects
+no longer depend on the filter bank.
+
+**Revisit:** Record part switches in sequences. Add user samples and per-slot
+gain/pan when sampler import lands. Replace the rolling-loop approximation if a
+dedicated transient/roll buffer is added.
+
+## D24: P5 separates four parts offline and caches them beside the track
+
+**Decision:** Source separation runs in the Electron main process with
+`onnxruntime-node` 1.20.1 and the MIT-licensed
+`htdemucs_fp16weights.onnx` model. The model is downloaded on demand, checked
+against its SHA-256 digest, and stored under the app user-data folder.
+`OPENDECK_STEM_MODEL` can point at a local model during development, which
+bypasses the download but not the size check. The
+renderer decodes the track and sends stereo Float32 PCM plus the content hash to
+main. Main resamples to 44.1 kHz, runs overlapping model chunks, normalises the
+overlap-add result, and writes four interleaved Int16 files plus
+`manifest.json` under `.opendeck-stems/<content-hash>-<model-version>/` beside
+the track. If that folder is not writable it falls back to
+`<userData>/stems/.opendeck-stems/`.
+
+The cache key is the SHA-256 of the source bytes plus the model version, never
+the file name. A cached track loads without running inference. With the model
+installed, a newly imported local track separates automatically; without it the
+Parts bar shows an install button. `PartId` is drums, bass, other or vocals and
+the deck reuses `PcmSource` for all four voices. Part return-mode scratches one
+part through its own `ScratchVoice` while the other voices keep playing.
+
+**Why:** The main process owns filesystem writes, model installation and the
+native runtime, so the renderer keeps only decoded PCM and the audio graph.
+Content hashing makes the cache survive ID3 rewrites and renames. Storing Int16
+halves the cache size while keeping the four-part mix well above audible noise
+for DJ use. Keeping `PcmSource` means key lock, reverse, seeking and exact
+loops behave the same on one voice as on four.
+
+**Revisit:** The current download is 166 MB and CPU inference is roughly eight
+seconds per 7.8 s model chunk on the test machine, so long tracks take minutes
+and block only that separation request. Add cancellation, a progress-aware
+queue and a smaller quantised model when available. Consider a `MessagePort`
+or shared buffer for very long tracks instead of structured-cloning PCM and
+Float32 parts across IPC. Revisit the cache format when stem FX chains become
+user-configurable.
+
 ## Open assumptions
 
 - **[verify]** Serato DJ Pro 4 still imports legacy crates automatically when

@@ -15,7 +15,7 @@ await build({
   platform: "node",
   format: "cjs",
   target: "node20",
-  external: ["electron"],
+  external: ["electron", "onnxruntime-node"],
 });
 
 await build({

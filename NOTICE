@@ -23,6 +23,12 @@ other DJ vendor. Product names are used only to describe compatibility.
 | sha1 | YouTube Music request signing | MIT OR Apache-2.0 |
 | webview2-com | WebView2 host bindings (Windows) | MIT OR Apache-2.0 |
 | signalsmith-stretch 1.3.2 | Time stretching and pitch hold in the PCM engine | MIT |
+| onnxruntime-node 1.20.1 | Offline ONNX inference for source separation | MIT |
+| htdemucs_fp16weights.onnx | htDemucs four-stem source-separation weights, downloaded on demand from [StemSplitio/htdemucs-onnx](https://huggingface.co/StemSplitio/htdemucs-onnx) | MIT |
+
+The htDemucs weights are not bundled. OpenDeck downloads them only when the
+user asks to install the offline separation model, verifies the SHA-256 digest,
+and stores them under the app user-data folder.
 
 ## Optional external tools
 

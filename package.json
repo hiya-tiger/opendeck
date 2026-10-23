@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "opendeck-desktop",
   "version": "0.1.6",
   "private": true,
@@ -10,7 +10,7 @@
     "build": "node scripts/build.mjs",
     "smoke:audio": "node scripts/audio-smoke.mjs",
     "start": "npm run build && electron .",
-    "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts test/formats.test.ts test/pcm-transport.test.ts test/serato.test.ts test/pcm-worklet.test.ts test/platter.test.ts"
+    "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts test/formats.test.ts test/pcm-transport.test.ts test/serato.test.ts test/serato-write.test.ts test/serato-extra.test.ts test/cue-store.test.ts test/library-ux.test.ts test/pad-modes.test.ts test/pcm-worklet.test.ts test/platter.test.ts test/parts.test.ts"
   },
   "devDependencies": {
     "electron": "44.8.0",
@@ -19,10 +19,12 @@
   },
   "allowScripts": {
     "electron@44.8.0": true,
-    "esbuild@0.24.2": true
+    "esbuild@0.24.2": true,
+    "onnxruntime-node@1.20.1": true
   },
   "dependencies": {
     "fflate": "^0.8.3",
+    "onnxruntime-node": "1.20.1",
     "signalsmith-stretch": "1.3.2"
   }
 }

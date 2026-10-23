@@ -19,14 +19,15 @@ code or assets are used.
   export; imported entries are matched to files by path.
 - WAV, MP3, AIFF, M4A/AAC, FLAC, Ogg/Opus and WebM are accepted as audio.
 
-Implemented codecs (not yet wired to the UI): crate and `database V2` writers,
+Implemented and wired in the Electron shell: crate and `database V2` export,
 `neworder.pref`, Serato Markers_ / Markers2 / BeatGrid read/write, the 18-colour
-cue palette, and an ID3v2.3/2.4 GEOB reader and writer that preserves unrelated
-frames and the audio payload. The codecs are tested against tags and a crate
-written by Serato DJ Pro 4, plus OpenDeck-generated round-trip fixtures.
+cue palette, an ID3v2.3/2.4 GEOB reader and writer that preserves unrelated
+frames, RIFF `id3 ` writing for WAV/AIFF, FLAC `VORBIS_COMMENT` fields, and MP4
+freeform atoms. The codecs are tested against tags and a crate written by Serato
+DJ Pro 4, plus OpenDeck-generated round-trip fixtures.
 
-Not implemented yet: UI export/import commands, WAV/AIFF RIFF tag writing, FLAC
-and MP4 atom writing, and the opt-in SQLite column layout edit.
+Not implemented yet: full playlist and `database V2` read/write, and the opt-in
+SQLite column layout edit.
 
 ## On-disk layout
 
@@ -82,9 +83,10 @@ library database:
 | Container | Tracks | Frames/atoms |
 | --- | --- | --- |
 | ID3v2 `GEOB` | MP3, AIFF, WAV | `Serato Markers2`, legacy `Serato Markers_`, `Serato BeatGrid` |
+| FLAC `VORBIS_COMMENT` | FLAC | `SERATO_MARKERS_V2`, `SERATO_MARKERS_`, `SERATO_BEATGRID` |
 | MP4 atoms | M4A/AAC | `----:com.serato.dj:*` |
 
-The planned writer follows these constraints:
+The writer follows these constraints:
 
 - Preserve all existing tags and audio payload bytes. Parse, splice the target
   frames, re-serialise the container; never re-encode audio.

@@ -1,11 +1,17 @@
-﻿import { beatSeconds, nearestBeat, snapToBeat, loopSeconds } from "./beatgrid.ts";
+import { beatSeconds, nearestBeat, snapToBeat, loopSeconds } from "./beatgrid.ts";
 import { defaultStemGains, STEM_CROSSOVERS, type StemId } from "./stems.ts";
+import { PARTS, defaultPartMix, partGains, type PartId, type PartMix } from "./parts.ts";
 import { fxDefault, filterFrequency, filterType, crushCurve, delaySeconds, wetGain, type Division, type FxType } from "./fx.ts";
 import { ScratchVoice } from "./scratch-voice.ts";
 import { PcmSource } from "./pcm-source.ts";
 import { Platter } from "./platter.ts";
 
 export type DeckId = "A" | "B";
+
+const sha256Hex = async (data: ArrayBuffer): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 export interface DeckTrackInfo {
   id: string;
@@ -19,6 +25,7 @@ export interface DeckTrackInfo {
 export interface HotCue {
   time: number;
   color: string;
+  name?: string;
 }
 
 export const HOT_CUE_COLORS = [
@@ -79,7 +86,7 @@ export class Deck {
   private pcmBuffer: AudioBuffer | null = null;
   private pcmActive = false;
   private splitter: ChannelSplitterNode;
-  private bands: Record<StemId, { nodes: AudioNode[]; gain: GainNode }>;
+  private bands: Record<StemId, { nodes: AudioNode[]; gain: GainNode; fx: BiquadFilterNode }>;
   private stemBus: GainNode;
   private trim: GainNode;
   private eq: { low: BiquadFilterNode; mid: BiquadFilterNode; high: BiquadFilterNode };
@@ -89,6 +96,15 @@ export class Deck {
   private analyser: AnalyserNode;
   private scratch: ScratchVoice;
   private scratching = false;
+  private partMix: PartMix = defaultPartMix();
+  private stemVoices: Partial<Record<PartId, PcmSource>> = {};
+  private stemBuffers: Partial<Record<PartId, AudioBuffer>> = {};
+  private partNodes: Partial<Record<PartId, { filter: BiquadFilterNode; gain: GainNode }>> = {};
+  private partScratches: Partial<Record<PartId, ScratchVoice>> = {};
+  private partScratchId: PartId | null = null;
+  private partLoopId: PartId | null = null;
+  private stemActive = false;
+  private pcmHash = "";
   private readonly platter = new Platter();
 
   cuePoint = 0;
@@ -96,6 +112,8 @@ export class Deck {
   loopEnd = 0;
   loopBeats = 4;
   loopActive = false;
+  private partLoopStart = 0;
+  private partLoopEnd = 0;
   private cueList: (HotCue | null)[] = new Array(8).fill(null);
   private cueVersion = 0;
   private readonly levelData = new Uint8Array(256);
@@ -133,10 +151,14 @@ export class Deck {
     this.splitter = ctx.createChannelSplitter(2);
 
     this.stemBus = ctx.createGain();
-    this.bands = {} as Record<StemId, { nodes: AudioNode[]; gain: GainNode }>;
+    this.bands = {} as Record<StemId, { nodes: AudioNode[]; gain: GainNode; fx: BiquadFilterNode }>;
 
-    const makeBand = (nodes: AudioNode[]): { nodes: AudioNode[]; gain: GainNode } => {
+    const makeBand = (nodes: AudioNode[]): { nodes: AudioNode[]; gain: GainNode; fx: BiquadFilterNode } => {
       const gain = ctx.createGain();
+      const fx = ctx.createBiquadFilter();
+      fx.type = "lowpass";
+      fx.frequency.value = 20000;
+      fx.Q.value = 0.7;
       let last: AudioNode = this.deckInput;
       const chain: AudioNode[] = [];
       for (const node of nodes) {
@@ -144,9 +166,10 @@ export class Deck {
         chain.push(node);
         last = node;
       }
-      last.connect(gain);
+      last.connect(fx);
+      fx.connect(gain);
       gain.connect(this.stemBus);
-      return { nodes: chain, gain };
+      return { nodes: chain, gain, fx };
     };
 
     const low = ctx.createBiquadFilter();
@@ -181,6 +204,18 @@ export class Deck {
     this.bands.lowmid = makeBand([lowmidHp, lowmidLp]);
     this.bands.highmid = makeBand([highmidHp, highmidLp]);
     this.bands.high = makeBand([high]);
+
+    for (const part of PARTS) {
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 20000;
+      filter.Q.value = 0.7;
+      const gain = ctx.createGain();
+      filter.connect(gain);
+      gain.connect(this.stemBus);
+      this.partNodes[part.id] = { filter, gain };
+      this.partScratches[part.id] = new ScratchVoice(ctx, filter);
+    }
 
     this.trim = ctx.createGain();
     this.scratch = new ScratchVoice(ctx, this.trim);
@@ -424,8 +459,10 @@ export class Deck {
 
   async load(source: File | string, info: Partial<DeckTrackInfo> = {}): Promise<void> {
     this.pause();
+    this.clearStems();
     this.pcm.clear();
     this.pcmBuffer = null;
+    this.pcmHash = "";
     this.pcmActive = false;
     this.scratch.stop();
     this.scratching = false;
@@ -437,6 +474,7 @@ export class Deck {
       const response = await fetch(url);
       if (!response.ok) throw new Error("Could not read audio");
       const data = await response.arrayBuffer();
+      this.pcmHash = await sha256Hex(data);
       const buffer = await this.ctx.decodeAudioData(data);
       this.pcmBuffer = buffer;
       this.scratch.setBuffer(buffer);
@@ -487,6 +525,184 @@ export class Deck {
     return this.scratch.hasBuffer;
   }
 
+  get audioBuffer(): AudioBuffer | null {
+    return this.pcmBuffer;
+  }
+
+  get audioHash(): string {
+    return this.pcmHash;
+  }
+
+  get hasStems(): boolean {
+    return this.stemActive;
+  }
+
+  get stemsLoaded(): PartId[] {
+    return PARTS.map((part) => part.id).filter((id) => Boolean(this.stemBuffers[id]));
+  }
+
+  private stemReference(): PcmSource | null {
+    const preferred: PartId[] = this.partScratchId === "drums" ? ["bass", "other", "vocals", "drums"] : ["drums", "bass", "other", "vocals"];
+    for (const id of preferred) {
+      const voice = this.stemVoices[id];
+      if (voice?.hasBuffer) return voice;
+    }
+    return null;
+  }
+
+  private clearStems(): void {
+    for (const id of PARTS.map((part) => part.id)) {
+      this.stemVoices[id]?.dispose();
+      this.partScratches[id]?.stop();
+    }
+    this.stemVoices = {};
+    this.stemBuffers = {};
+    this.partScratchId = null;
+    this.partLoopId = null;
+    this.stemActive = false;
+  }
+
+  async loadStems(buffers: Partial<Record<PartId, AudioBuffer>>): Promise<void> {
+    this.pause();
+    this.clearStems();
+    this.pcm.clear();
+    this.pcmBuffer = null;
+    this.pcmActive = false;
+    const loaded = PARTS.map((part) => part.id).filter((id) => Boolean(buffers[id]));
+    if (!loaded.length) {
+      this.emit();
+      return;
+    }
+    for (const id of loaded) {
+      const buffer = buffers[id];
+      const node = this.partNodes[id];
+      if (!buffer || !node) continue;
+      this.stemBuffers[id] = buffer;
+      this.partScratches[id]?.setBuffer(buffer);
+      const voice = new PcmSource(this.ctx, node.filter, { onEnded: () => this.emit() });
+      this.stemVoices[id] = voice;
+      voice.setRate(this.rate);
+      voice.setKeylock(this.keylock);
+      await voice.load(buffer, 0);
+    }
+    this.stemActive = true;
+    this.applyPartGains();
+    this.applyPcmLoop();
+    this.emit();
+  }
+
+  get partMixState(): PartMix {
+    return {
+      gain: { ...this.partMix.gain },
+      muted: { ...this.partMix.muted },
+      solo: this.partMix.solo,
+    };
+  }
+
+  setPartGain(id: PartId, value: number): void {
+    this.partMix.gain[id] = Math.max(0, Math.min(1.5, value));
+    this.applyPartGains();
+  }
+
+  setPartMuted(id: PartId, muted: boolean): void {
+    this.partMix.muted[id] = muted;
+    this.applyPartGains();
+  }
+
+  setPartSolo(id: PartId | null): void {
+    this.partMix.solo = id;
+    this.applyPartGains();
+  }
+
+  get soloPart(): PartId | null {
+    return this.partMix.solo;
+  }
+
+  setPartFilter(id: PartId, enabled: boolean): void {
+    const node = this.partNodes[id];
+    if (!node) return;
+    const cutoff: Record<PartId, number> = { drums: 7000, bass: 350, other: 4000, vocals: 5000 };
+    node.filter.type = "lowpass";
+    node.filter.frequency.setTargetAtTime(enabled ? cutoff[id] : 20000, this.ctx.currentTime, 0.015);
+    node.filter.Q.setTargetAtTime(enabled ? 9 : 0.7, this.ctx.currentTime, 0.015);
+  }
+
+  private applyPartGains(): void {
+    const gains = partGains(this.partMix);
+    for (const part of PARTS) {
+      this.partNodes[part.id]?.gain.gain.setTargetAtTime(gains[part.id], this.ctx.currentTime, 0.01);
+    }
+  }
+
+  get partScratching(): PartId | null {
+    return this.partScratchId;
+  }
+
+  beginPartScratch(id: PartId): boolean {
+    if (!this.stemActive || this.partScratchId) return false;
+    const scratch = this.partScratches[id];
+    const voice = this.stemVoices[id];
+    if (!scratch?.hasBuffer || !voice?.hasBuffer) return false;
+    this.partScratchId = id;
+    voice.pause();
+    scratch.stop();
+    void scratch.start(this.currentTime);
+    return true;
+  }
+
+  partScratchRate(rate: number): void {
+    if (!this.partScratchId) return;
+    this.partScratches[this.partScratchId]?.setRate(rate);
+  }
+
+  endPartScratch(): void {
+    const id = this.partScratchId;
+    if (!id) return;
+    const scratch = this.partScratches[id];
+    const voice = this.stemVoices[id];
+    const wasPlaying = this.playing;
+    scratch?.stop();
+    this.partScratchId = null;
+    const at = this.currentTime;
+    const rate = voice?.hasBuffer ? this.stemBuffers[id]?.sampleRate ?? this.ctx.sampleRate : this.ctx.sampleRate;
+    voice?.seek(Math.round(at * rate));
+    if (wasPlaying) void voice?.play(Math.round(at * rate));
+    this.emit();
+  }
+
+  get partLoop(): PartId | null {
+    return this.partLoopId;
+  }
+
+  setPartLoop(id: PartId | null, start = 0, end = 0): void {
+    this.partLoopId = id;
+    if (id && end > start) {
+      this.partLoopStart = Math.max(0, start);
+      this.partLoopEnd = Math.min(this.duration || Infinity, end);
+    }
+    this.applyPcmLoop();
+    this.emit();
+  }
+
+  setVocalsOnly(on: boolean): void {
+    this.setPartSolo(on ? "vocals" : null);
+  }
+
+  get vocalsOnly(): boolean {
+    return this.partMix.solo === "vocals";
+  }
+
+  setInstrumental(on: boolean): void {
+    this.partMix.solo = null;
+    this.partMix.muted.vocals = on;
+    this.applyPartGains();
+    this.emit();
+  }
+
+  get instrumental(): boolean {
+    return this.partMix.muted.vocals && this.partMix.solo === null;
+  }
+
   get scratchingActive(): boolean {
     return this.scratching;
   }
@@ -523,11 +739,21 @@ export class Deck {
   }
 
   get duration(): number {
+    if (this.stemActive) {
+      const buffer = Object.values(this.stemBuffers).find(Boolean);
+      if (buffer) return buffer.duration;
+    }
     if (this.pcmBuffer) return this.pcmBuffer.duration;
     return Number.isFinite(this.el.duration) ? this.el.duration : 0;
   }
 
   get currentTime(): number {
+    if (this.stemActive) {
+      const voice = this.stemReference();
+      const buffer = voice ? Object.values(this.stemBuffers).find(Boolean) : null;
+      if (voice && buffer) return voice.positionSamples / buffer.sampleRate;
+      return 0;
+    }
     if (this.pcmActive && this.pcmBuffer) {
       return this.pcm.positionSamples / this.pcmBuffer.sampleRate;
     }
@@ -535,12 +761,13 @@ export class Deck {
   }
 
   get playing(): boolean {
+    if (this.stemActive) return Boolean(this.stemReference()?.isPlaying);
     if (this.pcmActive) return this.pcm.isPlaying;
     return !this.el.paused && !this.el.ended;
   }
 
   get engine(): "media" | "pcm" {
-    return this.pcmActive ? "pcm" : "media";
+    return this.stemActive || this.pcmActive ? "pcm" : "media";
   }
 
   private syncEngine(): void {
@@ -566,6 +793,19 @@ export class Deck {
   }
 
   private applyPcmLoop(): void {
+    if (this.stemActive) {
+      for (const part of PARTS) {
+        const voice = this.stemVoices[part.id];
+        const buffer = this.stemBuffers[part.id];
+        if (!voice || !buffer) continue;
+        const start = this.partLoopId ? this.partLoopStart : this.loopStart;
+        const end = this.partLoopId ? this.partLoopEnd : this.loopEnd;
+        const active = this.partLoopId ? this.partLoopId === part.id : this.loopActive;
+        if (active && end > start) voice.setLoop(Math.round(start * buffer.sampleRate), Math.round(end * buffer.sampleRate));
+        else voice.setLoop(null, null);
+      }
+      return;
+    }
     if (!this.pcmBuffer) return;
     if (this.loopActive && this.loopEnd > this.loopStart) {
       this.pcm.setLoop(
@@ -593,6 +833,17 @@ export class Deck {
   }
 
   async play(): Promise<void> {
+    if (this.stemActive) {
+      if (this.ctx.state === "suspended") await this.ctx.resume();
+      if (this.currentTime >= this.duration - 0.05) this.seek(0);
+      await Promise.all(PARTS.map((part) => {
+        const voice = this.stemVoices[part.id];
+        if (!voice?.hasBuffer || this.partScratchId === part.id) return Promise.resolve();
+        return voice.play();
+      }));
+      this.emit();
+      return;
+    }
     if (!this.el.src && !this.pcmBuffer) return;
     if (this.ctx.state === "suspended") await this.ctx.resume();
     this.syncEngine();
@@ -611,6 +862,11 @@ export class Deck {
   pause(): void {
     this.el.pause();
     this.pcm.pause();
+    for (const part of PARTS) this.stemVoices[part.id]?.pause();
+    if (this.partScratchId) {
+      this.partScratches[this.partScratchId]?.stop();
+      this.partScratchId = null;
+    }
   }
 
   toggle(): void {
@@ -622,6 +878,15 @@ export class Deck {
     const limit = this.duration;
     const target = Math.max(0, Math.min(seconds, limit ? limit - 0.02 : 0));
     this.el.currentTime = target;
+    if (this.stemActive) {
+      for (const part of PARTS) {
+        const voice = this.stemVoices[part.id];
+        const buffer = this.stemBuffers[part.id];
+        if (voice && buffer) voice.seek(Math.round(target * buffer.sampleRate));
+      }
+      this.emit();
+      return;
+    }
     if (this.pcmBuffer) this.pcm.seek(Math.round(target * this.pcmBuffer.sampleRate));
     this.emit();
   }
@@ -633,6 +898,7 @@ export class Deck {
     if (clamped > 0) this.el.playbackRate = clamped;
     else this.el.pause();
     this.pcm.setRate(clamped);
+    for (const part of PARTS) this.stemVoices[part.id]?.setRate(clamped);
     this.emit();
   }
 
@@ -661,6 +927,7 @@ export class Deck {
     this.keylock = enabled;
     this.el.preservesPitch = enabled;
     this.pcm.setKeylock(enabled);
+    for (const part of PARTS) this.stemVoices[part.id]?.setKeylock(enabled);
     this.syncEngine();
     this.emit();
   }
@@ -738,6 +1005,14 @@ export class Deck {
   setStemSolo(id: StemId | null): void {
     this.stemSolo = id;
     this.applyStemGains();
+  }
+
+  setBandFilter(id: StemId, enabled: boolean): void {
+    const cutoff: Record<StemId, number> = { low: 90, lowmid: 350, highmid: 2000, high: 7000 };
+    const fx = this.bands[id].fx;
+    fx.type = "lowpass";
+    fx.frequency.setTargetAtTime(enabled ? cutoff[id] : 20000, this.ctx.currentTime, 0.015);
+    fx.Q.setTargetAtTime(enabled ? 7 : 0.7, this.ctx.currentTime, 0.015);
   }
 
   private applyStemGains(): void {
@@ -837,6 +1112,15 @@ export class Deck {
     this.emit();
   }
 
+  setHotCueStyle(index: number, style: { color?: string; name?: string }): void {
+    const cue = this.cueList[index];
+    if (!cue) return;
+    if (style.color) cue.color = style.color;
+    if (style.name !== undefined) cue.name = style.name.trim().slice(0, 32);
+    this.cueVersion += 1;
+    this.emit();
+  }
+
   jumpHotCue(index: number): void {
     const cue = this.hotCues[index];
     if (!cue) {
@@ -920,6 +1204,11 @@ export class Deck {
 
   tick(): void {
     if (this.destroyed) return;
+    if (this.stemActive) {
+      for (const part of PARTS) this.stemVoices[part.id]?.tick();
+      this.emit();
+      return;
+    }
     if (this.pcmActive) this.pcm.tick();
     if (!this.pcmActive && this.loopActive && this.loopEnd > this.loopStart && this.playing) {
       if (this.currentTime >= this.loopEnd - 0.005 || this.currentTime < this.loopStart - 0.5) {
@@ -978,6 +1267,10 @@ export class Deck {
     this.el.pause();
     this.el.src = "";
     this.scratch.dispose();
+    for (const part of PARTS) {
+      this.partScratches[part.id]?.dispose();
+      this.stemVoices[part.id]?.dispose();
+    }
     this.pcm.clear();
     this.pcm.dispose();
     this.teardownFx();

@@ -376,6 +376,70 @@ export function decodeMarkers_(raw: Uint8Array): SeratoMarkers {
   return markers;
 }
 
+const MP4_NUM_LOOPS = 8;
+const MP4_LEGACY_EMPTY_CUE = bytes(
+  [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+);
+const MP4_LEGACY_EMPTY_LOOP = bytes(
+  [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00],
+);
+
+export function decodeMarkers_Mp4(raw: Uint8Array): SeratoMarkers {
+  if (raw.length < 6) throw new Error("Serato Markers_ (MP4) is too short");
+  const version = (raw[0] << 8) | raw[1];
+  if (version !== 0x0205) throw new Error("Bad Serato Markers_ (MP4) version");
+  const count = readU32(raw, 2);
+  if (count > 32 || raw.length < 6 + count * 19) throw new Error("Serato Markers_ (MP4) is too short");
+  const markers: SeratoMarkers = { cues: [], loops: [], trackColor: NO_TRACK_COLOR, bpmLocked: false };
+  for (let i = 0; i < count; i += 1) {
+    const offset = 6 + i * 19;
+    const start = readU32(raw, offset);
+    if (start === 0xffffffff) continue;
+    const end = readU32(raw, offset + 4);
+    const color = rgbToHex(raw[offset + 14], raw[offset + 15], raw[offset + 16]);
+    const type = raw[offset + 17];
+    const locked = raw[offset + 18] !== 0;
+    if (i < NUM_CUES && type === 1) {
+      markers.cues.push({ index: i, positionMs: start, color, name: "" });
+    } else if (i >= NUM_CUES && type === 3) {
+      markers.loops.push({ index: i - NUM_CUES, startMs: start, endMs: end, color, name: "", locked });
+    }
+  }
+  const footer = 6 + count * 19;
+  if (footer + 4 <= raw.length) {
+    markers.trackColor = rgbToHex(raw[footer + 1], raw[footer + 2], raw[footer + 3]);
+  }
+  return markers;
+}
+
+function mp4LegacyCue(cue: SeratoCue): Uint8Array {
+  return bytes(u32(cue.positionMs >>> 0), [0xff, 0xff, 0xff, 0xff, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00], hexToRgb(cue.color), [0x01, 0x00]);
+}
+
+function mp4LegacyLoop(loop: SeratoLoop): Uint8Array {
+  return bytes(
+    u32(loop.startMs >>> 0),
+    u32(loop.endMs >>> 0),
+    [0x00, 0xff, 0xff, 0xff, 0xff, 0x00],
+    hexToRgb(loop.color),
+    [0x03, loop.locked ? 1 : 0],
+  );
+}
+
+export function encodeMarkers_Mp4(markers: SeratoMarkers): Uint8Array {
+  const parts: Uint8Array[] = [bytes([0x02, 0x05], u32(NUM_CUES + NUM_LOOPS))];
+  for (let i = 0; i < NUM_CUES; i += 1) {
+    const cue = legacyCue(markers, i);
+    parts.push(cue ? mp4LegacyCue(cue) : MP4_LEGACY_EMPTY_CUE);
+  }
+  for (let i = 0; i < MP4_NUM_LOOPS; i += 1) {
+    const loop = legacyLoop(markers, i);
+    parts.push(loop ? mp4LegacyLoop(loop) : MP4_LEGACY_EMPTY_LOOP);
+  }
+  parts.push(MP4_LEGACY_EMPTY_LOOP, bytes([0x00], hexToRgb(markers.trackColor)));
+  return bytes(...parts);
+}
+
 export function encodeBeatGrid(markers: BeatGridMarker[]): Uint8Array {
   if (!markers.length) return new Uint8Array(0);
   const parts: Uint8Array[] = [bytes([0x01, 0x00], u32(markers.length))];

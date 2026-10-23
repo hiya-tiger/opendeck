@@ -81,6 +81,7 @@ export class ScratchVoice {
   private loaded = false;
   private active = false;
   private pendingRate = 0;
+  private startToken = 0;
 
   constructor(ctx: AudioContext, destination: AudioNode) {
     this.ctx = ctx;
@@ -144,12 +145,13 @@ export class ScratchVoice {
 
   async start(position: number): Promise<void> {
     if (!this.loaded) return;
+    const token = ++this.startToken;
     try {
       await this.prepare();
     } catch {
       return;
     }
-    if (!this.node) return;
+    if (!this.node || token !== this.startToken || !this.loaded) return;
     this.active = true;
     this.node.port.postMessage({ type: "start", position });
     this.node.port.postMessage({ type: "rate", rate: this.pendingRate });
@@ -167,6 +169,7 @@ export class ScratchVoice {
   }
 
   stop(): void {
+    this.startToken += 1;
     this.pendingRate = 0;
     if (!this.active) return;
     this.active = false;

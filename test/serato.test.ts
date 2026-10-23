@@ -25,9 +25,11 @@ import {
   decodeBeatGrid,
   decodeMarkers2,
   decodeMarkers_,
+  decodeMarkers_Mp4,
   encodeBeatGrid,
   encodeMarkers2,
   encodeMarkers_,
+  encodeMarkers_Mp4,
   nearestCueColor,
   serato32Decode,
   serato32Encode,
@@ -127,6 +129,33 @@ test("Markers_ writes the documented 14 legacy slots", () => {
   assert.equal(encoded.length, 6 + 14 * 22 + 4);
   const decoded = decodeMarkers_(encoded);
   assert.equal(decoded.cues[0].positionMs, 1066);
+});
+
+test("MP4 Markers_ uses 19-byte slots and round-trips cues and loops", () => {
+  const source = {
+    cues: [
+      { index: 0, positionMs: 1234, color: "#CC0000", name: "" },
+      { index: 2, positionMs: 5000, color: "#27AAE1", name: "" },
+    ],
+    loops: [
+      { index: 0, startMs: 1000, endMs: 2500, color: "#27AAE1", name: "", locked: true },
+      { index: 7, startMs: 9000, endMs: 12000, color: "#CC8800", name: "", locked: false },
+    ],
+    trackColor: "#FFFFFF",
+    bpmLocked: false,
+  };
+  const encoded = encodeMarkers_Mp4(source);
+  assert.equal(encoded.length, 6 + 14 * 19 + 4);
+  assert.deepEqual(decodeMarkers_Mp4(encoded), source);
+});
+
+test("MP4 Markers_ decodes Serato's 19-byte empty slots", () => {
+  const encoded = encodeMarkers_Mp4({ cues: [], loops: [], trackColor: "#FFFFFF", bpmLocked: false });
+  assert.equal(encoded.length, 276);
+  const decoded = decodeMarkers_Mp4(encoded);
+  assert.deepEqual(decoded.cues, []);
+  assert.deepEqual(decoded.loops, []);
+  assert.equal(decoded.trackColor, "#FFFFFF");
 });
 
 test("Markers_ round-trips loops without relying on Markers2 labels", () => {

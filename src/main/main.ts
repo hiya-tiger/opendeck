@@ -2,6 +2,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { isSeratoRunning, undoLastSeratoWrite, writeSeratoTags, type SeratoWriteRequest } from "./serato-files.ts";
+import { MODEL, findCache, installModel, loadManifestAt, modelInfo, readCache, separateToCache, type SeparateRequest } from "./separation.ts";
 
 const root = (): string => app.getAppPath();
 
@@ -246,6 +248,62 @@ ipcMain.handle("rtmp:stop", async () => {
   rtmp = null;
   return { ok: true };
 });
+
+const stemModelPath = (): string => process.env.OPENDECK_STEM_MODEL || path.join(app.getPath("userData"), "models", MODEL.filename);
+
+ipcMain.handle("separation:status", async () => {
+  const info = await modelInfo(stemModelPath());
+  return { ...info, model: MODEL, env: Boolean(process.env.OPENDECK_STEM_MODEL) };
+});
+
+ipcMain.handle("separation:install", async (event) => {
+  const target = stemModelPath();
+  if (process.env.OPENDECK_STEM_MODEL) return modelInfo(target);
+  await installModel(target, (progress) => event.sender.send("separation:progress", progress));
+  return modelInfo(target);
+});
+
+ipcMain.handle("separation:cache", async (_event, request: { hash: string; trackPath?: string | null }) => {
+  const manifest = await findCache(request.trackPath, request.hash, app.getPath("userData"));
+  return manifest ? { found: true, manifest } : { found: false };
+});
+
+ipcMain.handle("separation:run", async (event, request: SeparateRequest) => {
+  const target = stemModelPath();
+  const info = await modelInfo(target);
+  if (!info.ready) throw new Error("Stem model is not installed");
+  return separateToCache(request, target, app.getPath("userData"), (progress) => {
+    event.sender.send("separation:progress", { ...progress, hash: request.hash });
+  });
+});
+
+ipcMain.handle("separation:read", async (_event, dir: string) => {
+  const manifest = await loadManifestAt(dir);
+  if (!manifest) throw new Error("Stem cache is missing or incomplete");
+  return { manifest, parts: await readCache(manifest) };
+});
+
+ipcMain.handle("serato:running", () => isSeratoRunning());
+
+ipcMain.handle("serato:write-tags", async (_event, request: SeratoWriteRequest) => {
+  if (!request || !Array.isArray(request.tracks)) {
+    return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Invalid tag write request." };
+  }
+  let root = typeof request.root === "string" ? request.root : null;
+  if (!root && request.tracks.some((track) => !path.isAbsolute(track.path))) {
+    const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+      title: "Choose the music folder that contains these tracks",
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || !result.filePaths[0]) {
+      return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Tag write cancelled." };
+    }
+    root = result.filePaths[0];
+  }
+  return writeSeratoTags({ root, tracks: request.tracks.slice(0, 5000) });
+});
+
+ipcMain.handle("serato:undo", () => undoLastSeratoWrite());
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 

@@ -6,3 +6,5 @@ renderer/dvs.js
 renderer/analysis-worker.js
 *.log
 .DS_Store
+models/
+.opendeck-stems/

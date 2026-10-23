@@ -15,6 +15,12 @@ interface SmokeResult {
   deckPitch: boolean;
   reversed: boolean;
   deckPlaying: boolean;
+  stemParts: number;
+  stemRms: number;
+  stemPosition: number;
+  stemScratch: boolean;
+  stemPlaying: boolean;
+  stemEngine: string;
   error?: string;
 }
 
@@ -83,6 +89,12 @@ async function run(): Promise<SmokeResult> {
     deckPitch: false,
     reversed: false,
     deckPlaying: false,
+    stemParts: 0,
+    stemRms: 0,
+    stemPosition: 0,
+    stemScratch: false,
+    stemPlaying: false,
+    stemEngine: "media",
   };
   const ctx = new AudioContext({ latencyHint: "interactive" });
   try {
@@ -138,6 +150,33 @@ async function run(): Promise<SmokeResult> {
       deck.driveTimecode(-1, beforeReverse);
       result.reversed = await waitFor(() => deck.currentTime < beforeReverse - 0.01, 1500);
       deck.pause();
+
+      const stems: Partial<Record<"drums" | "bass" | "other" | "vocals", AudioBuffer>> = {};
+      const tones: Record<"drums" | "bass" | "other" | "vocals", number> = { drums: 220, bass: 110, other: 330, vocals: 440 };
+      for (const [part, hz] of Object.entries(tones)) {
+        const stem = ctx.createBuffer(2, ctx.sampleRate * 2, ctx.sampleRate);
+        for (let channel = 0; channel < 2; channel += 1) {
+          const data = stem.getChannelData(channel);
+          for (let i = 0; i < data.length; i += 1) data[i] = Math.sin((2 * Math.PI * hz * i) / ctx.sampleRate) * 0.22;
+        }
+        stems[part as "drums" | "bass" | "other" | "vocals"] = stem;
+      }
+      deck.setRate(1);
+      await deck.loadStems(stems);
+      result.stemParts = deck.stemsLoaded.length;
+      deck.setVocalsOnly(true);
+      await deck.play();
+      await waitFor(() => deck.currentTime > 0.1, 3000);
+      await wait(200);
+      result.stemRms = deck.level;
+      result.stemPosition = deck.currentTime;
+      result.stemPlaying = deck.playing;
+      result.stemEngine = deck.engine;
+      result.stemScratch = deck.beginPartScratch("drums");
+      await wait(120);
+      deck.endPartScratch();
+      result.stemScratch = result.stemScratch && deck.partScratching === null;
+      deck.pause();
     } finally {
       deck.destroy();
     }
@@ -154,7 +193,11 @@ async function run(): Promise<SmokeResult> {
       result.deckLatency > 0 &&
       result.deckLatency < 0.01 &&
       result.deckPitch &&
-      result.reversed;
+      result.reversed &&
+      result.stemParts === 4 &&
+      result.stemRms > 0.05 &&
+      result.stemPosition > 0.1 &&
+      result.stemScratch;
   } catch (error) {
     result.error = (error as Error).message;
   } finally {

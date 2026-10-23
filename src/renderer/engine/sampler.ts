@@ -24,6 +24,18 @@ export const SAMPLER_PADS: SamplerPad[] = [
   { label: "Crash", kind: "crash" },
 ];
 
+export const SAMPLER_BANKS = ["A", "B", "C", "D"] as const;
+export type SamplerBank = (typeof SAMPLER_BANKS)[number];
+
+export const SAMPLER_SLOTS = SAMPLER_BANKS.flatMap((bank, bankIndex) =>
+  SAMPLER_PADS.map((pad, padIndex) => ({
+    ...pad,
+    bank,
+    slot: bankIndex * 8 + padIndex,
+    label: `${bank}${padIndex + 1} ${pad.label}`,
+  })),
+);
+
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
 const makeNoise = (length: number): Float32Array => {
@@ -46,8 +58,8 @@ export class Sampler {
     this.gain = ctx.createGain();
     this.gain.gain.value = 0.85;
     this.gain.connect(destination);
-    SAMPLER_PADS.forEach((pad, index) => {
-      this.buffers.set(index, this.render(pad.kind));
+    SAMPLER_SLOTS.forEach((pad) => {
+      this.buffers.set(pad.slot, this.render(pad.kind));
     });
   }
 
