@@ -135,7 +135,7 @@ async function run(): Promise<SmokeResult> {
       result.deckLoopPosition = deck.currentTime;
       const beforeReverse = deck.currentTime;
       deck.setLoopRange(0.5, 0.75, false);
-      deck.setReverse(true);
+      deck.driveTimecode(-1, beforeReverse);
       result.reversed = await waitFor(() => deck.currentTime < beforeReverse - 0.01, 1500);
       deck.pause();
     } finally {

@@ -296,20 +296,24 @@ Verified with the same toolchain:
 - `npm test`: 103 tests pass, including `test/platter.test.ts` and the
   ten-minute forward/reverse loop test.
 - `npx tsc --noEmit`: clean.
-- `cargo test --manifest-path rust/Cargo.toml`: 11 audio tests pass, including
-  ten minutes of forward and reverse looping on the exact sample.
+- `cargo test --manifest-path rust/Cargo.toml`: 19 audio tests pass, including
+  ten minutes of forward and reverse looping on the exact sample, transport
+  atomics, the SPSC ring and the live render thread.
 - `npm run build`: Electron main, preload and renderer bundles build.
 - `npm run smoke:audio`: passes repeatedly. It asserts PCM engine, analysed
   output above 0.05 RMS, sample loop bounds, reported latency `0.008 s`
-  (`>0` and `<0.01`), pitch hold on, and reverse time decreasing.
+  (`>0` and `<0.01`), pitch hold on, and reverse through the DVS transport
+  driver (`driveTimecode`) with time decreasing.
 - Local `File` playback no longer touches the media element; the smoke run
   removes the element source before playing.
 
 Not verified yet:
 
-- DVS timecode through transport atomics and sample-accurate jump handoff.
-- The Rust live render thread and native output. P1 currently uses the JS
-  `PcmSource`; the Rust transport is offline-only.
+- DVS with a physical control record and audio interface. The jump/drift target
+  is rounded to a sample frame and scheduled with the rate, but the JS path is
+  not backed by shared-memory atomics.
+- Native decode and device output. The Rust render thread is tested but not
+  selected by either shell; the JS `PcmSource` remains the live path.
 - Physical audio interfaces, real DJ hardware and driver latency.
 - Reverse-loop correction after an external jump is coarse (250 ms guard);
-  the offline transport loop is exact.
+  the Rust and JS offline transports and the Rust live state path are exact.

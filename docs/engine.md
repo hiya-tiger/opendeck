@@ -114,9 +114,11 @@ loop is seamless at any block size and independent of JS timer jitter.
   path.
 - `src/renderer/engine/platter.ts`: torque/friction/inertia model used by
   scratch and DVS, covered by `test/platter.test.ts`.
-- `rust/crates/opendeck-audio`: the same transport in Rust with 10 tests,
-  including block-size invariance and reverse loops. The live render thread,
-  decode, stretch, platter and native output are still to come.
+- `rust/crates/opendeck-audio`: the same transport in Rust with block-size
+  invariance and reverse loops, plus `TransportState` atomics, a lock-free
+  stereo SPSC ring (`ring.rs`) and a real-time render thread (`live.rs`). The
+  live thread follows rate, seek and loop atomics and publishes position.
+  Native decode, stretch, platter and device output are still to come.
 
 ## Latency budget
 

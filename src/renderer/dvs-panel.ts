@@ -10,6 +10,7 @@ interface DeckLike {
   pause(): void;
   seek(seconds: number): void;
   setRate(rate: number): void;
+  driveTimecode(rate: number, positionSeconds: number | null): void;
 }
 
 interface OpenDeckGlobal {
@@ -91,7 +92,7 @@ const handleBlock = (left: Float32Array, right: Float32Array): void => {
   if (!deck || !deck.hasTrack) return;
 
   if (reading.status !== "locked") {
-    if (deck.playing && Math.abs(reading.rate) < 0.02) deck.pause();
+    if (deck.playing) deck.pause();
     return;
   }
 
@@ -100,16 +101,15 @@ const handleBlock = (left: Float32Array, right: Float32Array): void => {
     offsetReady = true;
   }
 
+  const wanted = Math.max(-1.6, Math.min(1.6, reading.rate));
   if (reading.jump !== null) {
-    deck.seek(reading.jump + offset);
+    deck.driveTimecode(wanted, reading.jump + offset);
     return;
   }
 
-  const wanted = Math.max(-1.6, Math.min(1.6, reading.rate));
-  deck.setRate(wanted);
-  if (!deck.playing && Math.abs(wanted) > 0.02) void deck.play();
   const desired = reading.positionSeconds + offset;
-  if (Math.abs(desired - deck.currentTime) > 0.09) deck.seek(desired);
+  const align = Math.abs(desired - deck.currentTime) > 0.09 ? desired : null;
+  deck.driveTimecode(wanted, align);
 };
 
 const listDevices = async (): Promise<void> => {

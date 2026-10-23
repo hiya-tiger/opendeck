@@ -37,10 +37,10 @@ AudioWorklet fed by a lock-free ring.
 accurate loops and predictable latency. The worklet keeps the existing graph
 and avoids a second audio API in the UI.
 
-**Status:** P1 ships the JS PCM path first. `render_offline` and the Rust
-transport exist and are tested, but the live render thread, transport atomics
-and command ring are not wired to the UI yet. Until then the JS `PcmSource`
-owns live playback and pitch hold.
+**Status:** P1 ships the JS PCM path first. The Rust crate now has transport
+atomics, a lock-free stereo ring and a render thread, all covered by tests, but
+native decode and device output are not wired to either shell yet. Until then
+the JS `PcmSource` owns live playback and pitch hold.
 
 **Revisit:** If N-API/SharedArrayBuffer plumbing proves unreliable in the Tauri
 WebView2 build, fall back to a native output device (`cpal_out`) behind the same
@@ -228,8 +228,22 @@ DVS and on-screen scratching both drive the same platter.
 **Why:** One scratch model keeps mouse, keyboard and timecode behaviour
 consistent and testable in JS while the Rust seam is unfinished.
 
-**Revisit:** When DVS atomics and the Rust live render thread land; the platter
-can become the control-rate input to that thread.
+**Revisit:** When the Rust live render thread is wired; the platter can become
+the control-rate input to that thread.
+
+## D20: DVS drives one scheduled transport segment
+
+**Decision:** DVS calls `Deck.driveTimecode(rate, position)`. For PCM tracks the
+deck rounds the position to a sample frame and hands rate plus position to
+`PcmSource.drive`, which schedules them together 20 ms ahead. Jumps and drift
+over 90 ms carry an exact target; normal blocks carry only the rate.
+
+**Why:** Rate and position reach the worklet in one ordered schedule instead of
+separate seek/rate messages. The target frame is exact and the jump does not
+tear across a rate update. A true lock-free shared-state handoff waits for the
+Rust live path.
+
+**Revisit:** When the Rust transport atomics back the live deck.
 
 ## Open assumptions
 

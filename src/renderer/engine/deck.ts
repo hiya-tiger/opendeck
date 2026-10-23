@@ -669,6 +669,26 @@ export class Deck {
     this.setRate(enabled ? -Math.abs(this.rate) : Math.abs(this.rate));
   }
 
+  driveTimecode(rate: number, positionSeconds: number | null): void {
+    const clamped = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 0));
+    const active = Math.abs(clamped) > 0.02;
+    if (!this.pcmBuffer) {
+      this.setRate(Math.max(0.02, clamped));
+      if (positionSeconds !== null) this.seek(positionSeconds);
+      if (active && !this.playing) void this.play();
+      else if (!active) this.pause();
+      return;
+    }
+    this.rate = clamped;
+    this.el.preservesPitch = this.keylock;
+    if (clamped > 0) this.el.playbackRate = clamped;
+    const position = positionSeconds === null
+      ? null
+      : Math.round(positionSeconds * this.pcmBuffer.sampleRate);
+    this.pcm.drive(clamped, position, active);
+    this.emit();
+  }
+
   get reversed(): boolean {
     return this.rate < 0;
   }

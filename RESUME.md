@@ -11,8 +11,11 @@ following work is not done, in the order it should be picked up.
   element. The legacy raw worklet remains only as a load-failure fallback.
 - Diagnostics show engine, latency, xruns and pitch-hold state. Platter torque,
   friction and inertia drive scratch and DVS.
-- Still to do: Rust transport atomics/command ring and the live render thread,
-  sample-accurate reverse-loop correction, and exact DVS jump handoff.
+- DVS now hands rate and a sample-rounded target to `PcmSource` in one
+  scheduled transport segment; jumps and drift over 90 ms align exactly.
+- Rust now has transport atomics, a lock-free stereo SPSC ring and a tested
+  render thread. Still to do: native decode/device output and selecting the Rust
+  path in a shell; sample-accurate reverse-loop correction on external jumps.
 
 ## 2. Serato export UI
 
@@ -39,9 +42,11 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 
 ## Known gaps
 
-- The Rust live render thread is not wired; JS `PcmSource` owns playback. DVS
-  still drives `Deck.setRate` rather than transport atomics.
-- Reverse-loop correction after an external jump is coarse, not sample-accurate.
+- The Rust live render thread is tested but not wired to native decode or a
+  device; JS `PcmSource` still owns playback. The JS DVS handoff uses one
+  scheduled segment, not shared-memory atomics.
+- Reverse-loop correction after an external jump is coarse in the JS path, not
+  sample-accurate.
 - The PCM path passes the Electron smoke test and Node worklet tests, but has
   not been checked against a physical audio interface and real DJ hardware.
 - Serato cue import covers MP3, WAV and AIFF. The first saved loop and

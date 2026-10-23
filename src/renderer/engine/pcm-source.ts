@@ -497,6 +497,32 @@ export class PcmSource {
     });
   }
 
+  drive(rate: number, position: number | null, active = true): void {
+    this.rate = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 1));
+    this.playing = active;
+    if (position !== null) this.setTarget(position / (this.buffer?.sampleRate ?? this.ctx.sampleRate));
+    if (this.fallback) {
+      this.fallback.setRate(this.rate);
+      if (active) void this.fallback.play(position ?? this.positionSamples);
+      else this.fallback.pause();
+      return;
+    }
+    if (!this.stretch) return;
+    const seconds = position === null ? undefined : position / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
+    this.enqueue(async () => {
+      const node = this.stretch;
+      if (!node) return;
+      await node.schedule({
+        active,
+        input: seconds,
+        rate: this.rate,
+        semitones: this.semitones(),
+        output: this.ctx.currentTime + 0.02,
+      });
+      await this.applyLoop();
+    });
+  }
+
   setRate(rate: number): void {
     this.rate = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 1));
     if (this.fallback) {
