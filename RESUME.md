@@ -13,9 +13,10 @@ following work is not done, in the order it should be picked up.
   friction and inertia drive scratch and DVS.
 - DVS now hands rate and a sample-rounded target to `PcmSource` in one
   scheduled transport segment; jumps and drift over 90 ms align exactly.
-- Rust now has transport atomics, a lock-free stereo SPSC ring and a tested
-  render thread. Still to do: native decode/device output and selecting the Rust
-  path in a shell; sample-accurate reverse-loop correction on external jumps.
+- Rust now has transport atomics, a lock-free stereo SPSC ring, a tested
+  render thread and an optional cpal output stream at the exact source rate.
+  Still to do: native decode and selecting the Rust path in a shell;
+  sample-accurate reverse-loop correction on external jumps.
 
 ## 2. Serato export UI
 
@@ -42,9 +43,9 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 
 ## Known gaps
 
-- The Rust live render thread is tested but not wired to native decode or a
-  device; JS `PcmSource` still owns playback. The JS DVS handoff uses one
-  scheduled segment, not shared-memory atomics.
+- The Rust live render thread and cpal output are tested, but native decode is
+  missing and neither shell selects them; JS `PcmSource` still owns playback.
+  The JS DVS handoff uses one scheduled segment, not shared-memory atomics.
 - Reverse-loop correction after an external jump is coarse in the JS path, not
   sample-accurate.
 - The PCM path passes the Electron smoke test and Node worklet tests, but has

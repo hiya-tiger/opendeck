@@ -9,8 +9,12 @@ pub mod live;
 pub mod render;
 pub mod ring;
 pub mod transport;
+pub mod cpal_out;
 
 pub use live::LiveEngine;
 pub use render::{LoopRegion, PcmVoice, StereoSamples, Transport, VoiceOptions};
 pub use ring::{AudioRing, Consumer, Producer};
 pub use transport::{LiveVoice, TransportState};
+pub use cpal_out::{interleave_stereo, OutputError};
+#[cfg(feature = "native-output")]
+pub use cpal_out::NativeOutput;

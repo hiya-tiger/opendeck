@@ -38,9 +38,11 @@ accurate loops and predictable latency. The worklet keeps the existing graph
 and avoids a second audio API in the UI.
 
 **Status:** P1 ships the JS PCM path first. The Rust crate now has transport
-atomics, a lock-free stereo ring and a render thread, all covered by tests, but
-native decode and device output are not wired to either shell yet. Until then
-the JS `PcmSource` owns live playback and pitch hold.
+atomics, a lock-free stereo ring, a render thread and an optional cpal output
+stream, all covered by tests. The native output opens the default device at the
+voice's source rate, so it does not resample. Native decode and selecting the
+native path in a shell are still missing; until then the JS `PcmSource` owns
+live playback and pitch hold.
 
 **Revisit:** If N-API/SharedArrayBuffer plumbing proves unreliable in the Tauri
 WebView2 build, fall back to a native output device (`cpal_out`) behind the same
@@ -244,6 +246,23 @@ tear across a rate update. A true lock-free shared-state handoff waits for the
 Rust live path.
 
 **Revisit:** When the Rust transport atomics back the live deck.
+
+## D21: Native output opens the device at the source rate
+
+**Decision:** `NativeOutput::start` takes the voice's sample rate and selects a
+mono/stereo f32/i16/i32/u8 device config at exactly that rate. If the device
+does not offer it, startup returns `UnsupportedConfig` instead of playing at the
+wrong speed. Scratch buffers are preallocated at 32,768 frames and the callback
+zero-fills any excess. The `native-output` feature gates cpal, so the default
+build stays dependency-light.
+
+**Why:** An exact rate match removes the need for a resampler in the audio
+callback and guarantees the render thread's sample accounting remains true.
+Silently resampling or playing at the device maximum would make tempo and loop
+positions wrong, which is worse than a clear startup error.
+
+**Revisit:** When native decode lands, either keep source rates per voice and
+resample at load, or add a tested converter before the device callback.
 
 ## Open assumptions
 

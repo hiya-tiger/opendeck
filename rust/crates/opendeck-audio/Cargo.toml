@@ -6,3 +6,8 @@ license.workspace = true
 description = "Sample-accurate PCM transport for OpenDeck: voices, reverse playback and loops."
 
 [dependencies]
+cpal = { version = "0.15", optional = true, default-features = false }
+
+[features]
+default = []
+native-output = ["dep:cpal"]

@@ -53,7 +53,7 @@ transport state (atomics) ──► render thread ──► SPSC PCM ring ──
 | `voices.rs` | Multi-voice planar mixing; each voice has its own read position, rate, gain and loop window |
 | `render.rs` | `render_offline(frames)` and the realtime `render(frames)`; sample-accurate loop splitting happens here |
 | `ring.rs` | Lock-free SPSC ring of interleaved or planar f32 frames |
-| `cpal_out.rs` | Optional native output device, used when the JS graph bypass is enabled |
+| `cpal_out.rs` | Optional `native-output` feature: default cpal device at the voice's exact source rate; not selected by a shell yet |
 | `api.rs` | N-API (or Tauri command) surface: load, play, pause, seek, set rate, set loop, read meters |
 
 The crate must not depend on UI code and must build on Windows, macOS and
@@ -118,7 +118,10 @@ loop is seamless at any block size and independent of JS timer jitter.
   invariance and reverse loops, plus `TransportState` atomics, a lock-free
   stereo SPSC ring (`ring.rs`) and a real-time render thread (`live.rs`). The
   live thread follows rate, seek and loop atomics and publishes position.
-  Native decode, stretch, platter and device output are still to come.
+  `cpal_out.rs` adds an optional `native-output` stream that opens the default
+  device at the source sample rate and pulls `LiveVoice` without allocating or
+  locking in the callback. Native decode and selecting either native path in a
+  shell are still to come.
 
 ## Latency budget
 

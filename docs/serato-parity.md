@@ -296,9 +296,16 @@ Verified with the same toolchain:
 - `npm test`: 103 tests pass, including `test/platter.test.ts` and the
   ten-minute forward/reverse loop test.
 - `npx tsc --noEmit`: clean.
-- `cargo test --manifest-path rust/Cargo.toml`: 19 audio tests pass, including
+- `cargo test --manifest-path rust/Cargo.toml`: 26 audio tests pass, including
   ten minutes of forward and reverse looping on the exact sample, transport
-  atomics, the SPSC ring and the live render thread.
+  atomics, the SPSC ring, the live render thread and device-free interleave
+  tests.
+- `cargo test -p opendeck-audio --features native-output`: 25 tests pass and
+  the device test is ignored by default so a test run never claims the audio
+  device. `cargo test -p opendeck-audio --features native-output -- --ignored`
+  passes and opens/stops the default Windows output stream.
+- `cargo check --manifest-path rust/Cargo.toml --features native-output`:
+  clean, including the Tauri app and cpal 0.15.
 - `npm run build`: Electron main, preload and renderer bundles build.
 - `npm run smoke:audio`: passes repeatedly. It asserts PCM engine, analysed
   output above 0.05 RMS, sample loop bounds, reported latency `0.008 s`
@@ -312,8 +319,10 @@ Not verified yet:
 - DVS with a physical control record and audio interface. The jump/drift target
   is rounded to a sample frame and scheduled with the rate, but the JS path is
   not backed by shared-memory atomics.
-- Native decode and device output. The Rust render thread is tested but not
-  selected by either shell; the JS `PcmSource` remains the live path.
+- Native decode. The cpal `native-output` backend opens the default device at
+  the exact source rate and pulls the live voice, but neither shell selects it
+  and loading a new track needs a fresh stream; the JS `PcmSource` remains the
+  live path.
 - Physical audio interfaces, real DJ hardware and driver latency.
 - Reverse-loop correction after an external jump is coarse (250 ms guard);
   the Rust and JS offline transports and the Rust live state path are exact.
