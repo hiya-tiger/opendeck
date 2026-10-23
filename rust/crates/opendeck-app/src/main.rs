@@ -65,13 +65,34 @@ fn analyse(samples: Vec<f32>, sample_rate: f32) -> AnalysisPayload {
     payload(samples, sample_rate)
 }
 
+fn mono_samples(track: &opendeck_audio::DecodedTrack) -> Vec<f32> {
+    if track.channels.len() == 1 {
+        return track.channels[0].clone();
+    }
+    let scale = 1.0 / track.channels.len() as f32;
+    (0..track.frames)
+        .map(|frame| {
+            track
+                .channels
+                .iter()
+                .map(|channel| channel[frame])
+                .sum::<f32>()
+                * scale
+        })
+        .collect()
+}
+
+fn analyse_track(track: opendeck_audio::DecodedTrack) -> AnalysisPayload {
+    let samples = mono_samples(&track);
+    analyse(samples, track.sample_rate as f32)
+}
+
 #[tauri::command]
 async fn analyze_file(path: String) -> Result<AnalysisPayload, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let bytes = fs::read(&path).map_err(|error| format!("cannot read {path}: {error}"))?;
-        let (samples, sample_rate) =
-            opendeck_core::read_wav_mono(&bytes).map_err(|error| error.to_string())?;
-        Ok(analyse(samples, sample_rate))
+        let track = opendeck_audio::decode_file(&path)
+            .map_err(|error| format!("cannot decode {path}: {error}"))?;
+        Ok(analyse_track(track))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -80,9 +101,8 @@ async fn analyze_file(path: String) -> Result<AnalysisPayload, String> {
 #[tauri::command]
 async fn analyze_bytes(bytes: Vec<u8>) -> Result<AnalysisPayload, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (samples, sample_rate) =
-            opendeck_core::read_wav_mono(&bytes).map_err(|error| error.to_string())?;
-        Ok(analyse(samples, sample_rate))
+        let track = opendeck_audio::decode_bytes(bytes, None).map_err(|error| error.to_string())?;
+        Ok(analyse_track(track))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -92,12 +112,11 @@ async fn analyze_bytes(bytes: Vec<u8>) -> Result<AnalysisPayload, String> {
 async fn analyze_bytes_raw(request: Request<'_>) -> Result<AnalysisPayload, String> {
     let bytes = match request.body() {
         InvokeBody::Raw(bytes) => bytes.clone(),
-        InvokeBody::Json(_) => return Err("expected raw WAV bytes".into()),
+        InvokeBody::Json(_) => return Err("expected raw audio bytes".into()),
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let (samples, sample_rate) =
-            opendeck_core::read_wav_mono(&bytes).map_err(|error| error.to_string())?;
-        Ok(analyse(samples, sample_rate))
+        let track = opendeck_audio::decode_bytes(bytes, None).map_err(|error| error.to_string())?;
+        Ok(analyse_track(track))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -823,3 +842,30 @@ fn main() {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_downmix_averages_stereo_channels() {
+        let track = opendeck_audio::DecodedTrack {
+            channels: vec![vec![1.0, -1.0, 0.5], vec![0.0, 1.0, 0.5]],
+            sample_rate: 48_000,
+            frames: 3,
+            duration: 3.0 / 48_000.0,
+        };
+        assert_eq!(mono_samples(&track), vec![0.5, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn analysis_downmix_keeps_mono_untouched() {
+        let track = opendeck_audio::DecodedTrack {
+            channels: vec![vec![0.25, -0.25]],
+            sample_rate: 44_100,
+            frames: 2,
+            duration: 2.0 / 44_100.0,
+        };
+        assert_eq!(mono_samples(&track), vec![0.25, -0.25]);
+    }
+}

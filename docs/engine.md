@@ -45,7 +45,7 @@ transport state (atomics) ──► render thread ──► SPSC PCM ring ──
 
 | Module | Responsibility |
 | --- | --- |
-| `decode.rs` | Container/probe and decode via Symphonia into planar float PCM; resample to the engine rate once at load |
+| `decode.rs` | Container/probe and decode via Symphonia into planar float PCM; source sample rate preserved exactly, >2 channels folded to stereo |
 | `store.rs` | Immutable decoded track: sample rate, channels, planar buffers, duration, peak data |
 | `transport.rs` | Play/pause/seek/rate/loop state as atomics; command queue consumer |
 | `stretch.rs` | Time stretch and key lock via signalsmith-stretch |
@@ -120,8 +120,10 @@ loop is seamless at any block size and independent of JS timer jitter.
   live thread follows rate, seek and loop atomics and publishes position.
   `cpal_out.rs` adds an optional `native-output` stream that opens the default
   device at the source sample rate and pulls `LiveVoice` without allocating or
-  locking in the callback. Native decode and selecting either native path in a
-  shell are still to come.
+  locking in the callback. Native decoding is implemented behind the `decode`
+  feature and the Tauri shell uses it for file analysis. Live playback still
+  goes through the JS `PcmSource`, and no shell selects the native output path,
+  so EQ/FX and key lock stay in one Web Audio graph.
 
 ## Latency budget
 

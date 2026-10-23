@@ -33,15 +33,15 @@ other DJ vendor. Product names are used only to describe compatibility.
 OpenDeck invokes a user-installed FFmpeg executable and does not link against
 it. Users are responsible for choosing a build whose license fits their use.
 
-## Planned audio-engine dependencies
+## Optional audio-engine dependencies
 
-These are not shipped yet. They are listed here so the license position is
-reviewed before the engine work lands.
+These are optional features of the Rust engine. `decode` enables Symphonia in
+the Tauri shell; `native-output` enables cpal and is not selected by a shell.
 
 | Component | Used for | License |
 | --- | --- | --- |
-| cpal | Native audio output in the Rust engine | Apache-2.0 OR MIT |
-| symphonia | Decoding MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV | MPL-2.0 |
+| cpal 0.15 | Optional native audio output in the Rust engine | Apache-2.0 OR MIT |
+| symphonia 0.5 | Decoding MP3, AAC/M4A, FLAC, Ogg/Vorbis, WAV, AIFF and ADPCM | MPL-2.0 |
 
 MPL-2.0 is file-level copyleft: modifications to Symphonia's own files must be
 published under MPL-2.0, while OpenDeck's files can remain MIT. We do not

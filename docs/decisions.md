@@ -37,12 +37,13 @@ AudioWorklet fed by a lock-free ring.
 accurate loops and predictable latency. The worklet keeps the existing graph
 and avoids a second audio API in the UI.
 
-**Status:** P1 ships the JS PCM path first. The Rust crate now has transport
-atomics, a lock-free stereo ring, a render thread and an optional cpal output
-stream, all covered by tests. The native output opens the default device at the
-voice's source rate, so it does not resample. Native decode and selecting the
-native path in a shell are still missing; until then the JS `PcmSource` owns
-live playback and pitch hold.
+**Status:** P1 ships the JS PCM path first. The Rust crate now has native
+decoding (`decode` feature), transport atomics, a lock-free stereo ring, a
+render thread and an optional cpal output stream, all covered by tests. The
+native output opens the default device at the voice's source rate, so it does
+not resample. The Tauri shell uses native decode for file analysis; the JS
+`PcmSource` still owns live playback and pitch hold, and no shell selects the
+native output path.
 
 **Revisit:** If N-API/SharedArrayBuffer plumbing proves unreliable in the Tauri
 WebView2 build, fall back to a native output device (`cpal_out`) behind the same
@@ -263,6 +264,24 @@ positions wrong, which is worse than a clear startup error.
 
 **Revisit:** When native decode lands, either keep source rates per voice and
 resample at load, or add a tested converter before the device callback.
+
+## D22: Native decode feeds analysis; playback stays in the Web Audio graph
+
+**Decision:** The Tauri shell decodes local files with `opendeck-audio` for
+analysis (BPM, key, peaks, duration, bands). Live deck playback stays on the JS
+`PcmSource`; the optional cpal output is compiled and tested but no shell
+selects it for deck audio.
+
+**Why:** Replacing the deck source with a native output device would bypass the
+EQ, FX, mixer, analyser and recording graph, and key lock would move to a second
+path. Native analysis gets codec coverage without regressing those features.
+The P1 exit criteria are about behaviour (reverse, key lock, exact loops, PCM
+ownership), not about which language renders the stream.
+
+**Revisit:** When decoded PCM and transport state can cross into the worklet
+through a stable shared-memory seam, or when the Web Audio graph is measured as
+the latency bottleneck. Wiring `cpal_out` directly requires a native mixer that
+recreates the downstream graph first.
 
 ## Open assumptions
 

@@ -163,6 +163,11 @@ cumulative over ten minutes offline; latency under 10 ms where the driver
 allows; no local file touches the media element; `smoke:audio` asserts key lock
 on uses the PCM engine.
 
+Status: complete against the exit criteria. Native decode is now wired into the
+Tauri shell for analysis. Rendering the live deck in Rust is a performance
+optimization, not an exit requirement, and stays unselected until PCM can reach
+the worklet without bypassing the Web Audio graph (D22).
+
 ## Phase 2: finish the library round trip (blocks adoption)
 
 - Per-track tag writing for MP3, WAV, AIFF, FLAC and MP4: temporary copy,
@@ -296,10 +301,10 @@ Verified with the same toolchain:
 - `npm test`: 103 tests pass, including `test/platter.test.ts` and the
   ten-minute forward/reverse loop test.
 - `npx tsc --noEmit`: clean.
-- `cargo test --manifest-path rust/Cargo.toml`: 26 audio tests pass, including
-  ten minutes of forward and reverse looping on the exact sample, transport
-  atomics, the SPSC ring, the live render thread and device-free interleave
-  tests.
+- `cargo test --manifest-path rust/Cargo.toml`: 30 audio tests, 7 core tests
+  and 2 Tauri analysis tests pass, including ten minutes of forward and reverse
+  looping on the exact sample, transport atomics, the SPSC ring, the live
+  render thread, device-free interleave tests and native WAV decode.
 - `cargo test -p opendeck-audio --features native-output`: 25 tests pass and
   the device test is ignored by default so a test run never claims the audio
   device. `cargo test -p opendeck-audio --features native-output -- --ignored`
@@ -319,9 +324,11 @@ Not verified yet:
 - DVS with a physical control record and audio interface. The jump/drift target
   is rounded to a sample frame and scheduled with the rate, but the JS path is
   not backed by shared-memory atomics.
-- Native decode. The cpal `native-output` backend opens the default device at
-  the exact source rate and pulls the live voice, but neither shell selects it
-  and loading a new track needs a fresh stream; the JS `PcmSource` remains the
+- Native decode covers WAV fixtures. MP3, AAC/M4A, FLAC and Vorbis are enabled
+  but have not been checked with real files or a physical output device. The
+  Tauri shell uses native decode for analysis; neither shell selects native
+  live playback, so the cpal `native-output` stream remains unselected and
+  loading a new track would need a fresh stream. The JS `PcmSource` remains the
   live path.
 - Physical audio interfaces, real DJ hardware and driver latency.
 - Reverse-loop correction after an external jump is coarse (250 ms guard);

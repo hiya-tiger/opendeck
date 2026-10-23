@@ -10,6 +10,8 @@ pub mod render;
 pub mod ring;
 pub mod transport;
 pub mod cpal_out;
+#[cfg(feature = "decode")]
+pub mod decode;
 
 pub use live::LiveEngine;
 pub use render::{LoopRegion, PcmVoice, StereoSamples, Transport, VoiceOptions};
@@ -18,3 +20,5 @@ pub use transport::{LiveVoice, TransportState};
 pub use cpal_out::{interleave_stereo, OutputError};
 #[cfg(feature = "native-output")]
 pub use cpal_out::NativeOutput;
+#[cfg(feature = "decode")]
+pub use decode::{decode_bytes, decode_file, DecodedTrack, DecodeError};

@@ -3,20 +3,24 @@
 The format codecs, offline transport and cue import are committed. The
 following work is not done, in the order it should be picked up.
 
-## 1. Engine cutover (phase 3 remainder)
+## 1. Engine hardening (P1 complete)
 
-- Signalsmith Stretch 1.3.2 is in `PcmSource` with key lock, signed rate,
-  reverse, loop scheduling and latency/underrun reporting. Local files decode
-  once and use the PCM path; remote streams and decode failures keep the media
-  element. The legacy raw worklet remains only as a load-failure fallback.
+- P1 exit criteria are met: reverse with key lock, ten-minute sample-exact
+  loops, PCM ownership for local files and a smoke test that asserts the PCM
+  engine. Signalsmith Stretch 1.3.2 is in `PcmSource` with key lock, signed
+  rate, reverse, loop scheduling and latency/underrun reporting. Local files
+  decode once and use the PCM path; remote streams and decode failures keep the
+  media element. The legacy raw worklet remains only as a load-failure fallback.
 - Diagnostics show engine, latency, xruns and pitch-hold state. Platter torque,
   friction and inertia drive scratch and DVS.
 - DVS now hands rate and a sample-rounded target to `PcmSource` in one
   scheduled transport segment; jumps and drift over 90 ms align exactly.
-- Rust now has transport atomics, a lock-free stereo SPSC ring, a tested
-  render thread and an optional cpal output stream at the exact source rate.
-  Still to do: native decode and selecting the Rust path in a shell;
-  sample-accurate reverse-loop correction on external jumps.
+- Rust now has native decode (MP3, AAC/M4A, FLAC, Vorbis, WAV, AIFF, ADPCM),
+  transport atomics, a lock-free stereo SPSC ring, a tested render thread and
+  an optional cpal output stream at the exact source rate. The Tauri shell uses
+  native decode for analysis. Still to do: selecting the Rust live render path
+  in a shell (it needs a shared-memory/worklet seam so EQ/FX and key lock are
+  not bypassed); sample-accurate reverse-loop correction on external jumps.
 
 ## 2. Serato export UI
 
@@ -43,9 +47,10 @@ chosen `_Serato_` folder, with a zip fallback. WAV/AIFF tag reading and RIFF
 
 ## Known gaps
 
-- The Rust live render thread and cpal output are tested, but native decode is
-  missing and neither shell selects them; JS `PcmSource` still owns playback.
-  The JS DVS handoff uses one scheduled segment, not shared-memory atomics.
+- The Rust live render thread and cpal output are tested, and native decode is
+  wired into the Tauri shell for analysis. No shell selects native playback yet;
+  JS `PcmSource` still owns deck playback so EQ/FX and key lock stay in one
+  graph. The JS DVS handoff uses one scheduled segment, not shared-memory atomics.
 - Reverse-loop correction after an external jump is coarse in the JS path, not
   sample-accurate.
 - The PCM path passes the Electron smoke test and Node worklet tests, but has

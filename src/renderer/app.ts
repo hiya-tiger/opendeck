@@ -603,22 +603,11 @@ function loopSignature(deck: Deck): string {
 
 /* ------------------------------------------------------------- analysis */
 
-function isRiffWave(data: ArrayBuffer): boolean {
-  if (data.byteLength < 12) return false;
-  const head = new Uint8Array(data, 0, 12);
-  const tag = (offset: number): string =>
-    String.fromCharCode(head[offset], head[offset + 1], head[offset + 2], head[offset + 3]);
-  return tag(0) === "RIFF" && tag(8) === "WAVE";
-}
-
 async function nativeAnalysis(track: Track, data: ArrayBuffer | null): Promise<NativeAnalysis | null> {
   const api = desktop?.analysis;
   if (!api) return null;
   try {
-    if (data) {
-      if (!isRiffWave(data)) return null;
-      return await api.fromBytes(new Uint8Array(data));
-    }
+    if (data) return await api.fromBytes(new Uint8Array(data));
     if (/^[a-zA-Z]:[\\/]|^\//.test(track.path)) return await api.fromFile(track.path);
   } catch (error) {
     console.warn("native analysis unavailable, falling back", error);
