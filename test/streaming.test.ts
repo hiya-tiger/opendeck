@@ -2,6 +2,16 @@
 import assert from "node:assert/strict";
 import { PlayQueue } from "../src/renderer/streaming/queue.ts";
 import { PROVIDERS, findProvider } from "../src/renderer/streaming/providers.ts";
+import {
+  DRM_KEY_SYSTEMS,
+  DrmSessionManager,
+  buildClearKeyLicense,
+  buildOAuthAuthorizeUrl,
+  generatePkcePair,
+  parseCommercialSearchPayload,
+  probeKeySystems,
+  providerEmbedUrl,
+} from "../src/renderer/streaming/drm.ts";
 import { extractYtInitialData, parseTracks, parseSearchHtml, parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "../src/renderer/streaming/youtube.ts";
 import { parseWhipAnswer, resolveWhipLocation, validateOffer, whipHeaders } from "../src/renderer/broadcast/whip.ts";
 
@@ -163,4 +173,170 @@ test("embed urls use the no-cookie player and reject bad ids", () => {
   );
   assert.equal(youtubeEmbedUrl("short"), "");
   assert.equal(youtubeEmbedUrl("../../evil"), "");
+});
+
+
+test("all 8 commercial streaming providers declare EME DRM schemes, license URLs, and embed builders", () => {
+  assert.equal(PROVIDERS.length, 8);
+  for (const p of PROVIDERS) {
+    assert.equal(p.supportsSearch, true, p.id);
+    assert.ok(p.drmSchemes.length >= 1, p.id);
+    assert.ok(p.licenseUrl.startsWith("https://"), p.id);
+    assert.ok(typeof p.apiSearchUrl === "function", p.id);
+    assert.ok(typeof p.embedUrl === "function", p.id);
+  }
+  assert.equal(
+    providerEmbedUrl("spotify", "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"),
+    "https://open.spotify.com/embed/track/4uLU6hMCjMI75M1A2tKUQC?utm_source=generator&theme=0",
+  );
+  assert.equal(
+    providerEmbedUrl("tidal", "https://listen.tidal.com/track/12345678"),
+    "https://embed.tidal.com/tracks/12345678",
+  );
+  assert.equal(
+    providerEmbedUrl("beatport", "https://www.beatport.com/track/glue/987654"),
+    "https://embed.beatport.com/?id=987654&type=track",
+  );
+  assert.equal(
+    providerEmbedUrl("beatsource", "https://www.beatsource.com/track/delilah/543210"),
+    "https://embed.beatsource.com/?id=543210&type=track",
+  );
+  assert.equal(
+    providerEmbedUrl("deezer", "https://www.deezer.com/track/3135556"),
+    "https://widget.deezer.com/widget/dark/track/3135556",
+  );
+  assert.match(
+    providerEmbedUrl("soundcloud", "https://soundcloud.com/bicep/glue"),
+    /^https:\/\/w\.soundcloud\.com\/player\//,
+  );
+  assert.equal(
+    providerEmbedUrl("apple-music", "https://music.apple.com/us/album/glue/123?i=456"),
+    "https://embed.music.apple.com/us/album/glue/123?i=456",
+  );
+});
+
+test("W3C EME probeKeySystems, ClearKey JWK builder, PKCE OAuth, and DrmSessionManager license exchange", async () => {
+  const report = await probeKeySystems(async (ks) => {
+    if (ks === DRM_KEY_SYSTEMS.widevine || ks === DRM_KEY_SYSTEMS.clearkey) {
+      return {} as MediaKeySystemAccess;
+    }
+    throw new Error("unsupported");
+  });
+  assert.deepEqual(report.supportedSchemes, ["widevine", "clearkey"]);
+  assert.equal(report.activeScheme, "widevine");
+
+  const clearKeyBytes = buildClearKeyLicense({
+    "00112233445566778899aabbccddeeff": "0123456789abcdef0123456789abcdef",
+  });
+  const clearKeyJson = JSON.parse(new TextDecoder().decode(clearKeyBytes)) as {
+    keys: Array<{ kty: string; k: string; kid: string }>;
+    type: string;
+  };
+  assert.equal(clearKeyJson.type, "temporary");
+  assert.equal(clearKeyJson.keys.length, 1);
+  assert.equal(clearKeyJson.keys[0].kty, "oct");
+
+  const pkce = await generatePkcePair();
+  assert.ok(pkce.verifier.length >= 32);
+  assert.ok(pkce.challenge.length >= 32);
+  const authUrl = buildOAuthAuthorizeUrl({
+    authorizeEndpoint: "https://accounts.spotify.com/authorize",
+    clientId: "client-123",
+    redirectUri: "http://127.0.0.1:43821/callback",
+    scope: "streaming user-read-private",
+    codeChallenge: pkce.challenge,
+    state: "st-1",
+  });
+  assert.match(authUrl, /code_challenge_method=S256/);
+  assert.match(authUrl, /client_id=client-123/);
+
+  const manager = new DrmSessionManager();
+  manager.credentials.set({
+    provider: "tidal",
+    accessToken: "tidal-tok-99",
+    preferredDrm: "widevine",
+    updatedAt: Date.now(),
+  });
+  assert.equal(manager.credentials.hasCredentials("tidal"), true);
+
+  const licenseBytes = await manager.negotiateLicense(
+    new Uint8Array([1, 2, 3, 4]),
+    {
+      provider: "tidal",
+      scheme: "widevine",
+      licenseUrl: "https://api.tidal.com/v1/drm/licenses/widevine",
+      bearerToken: "tidal-tok-99",
+    },
+    (async (url: string, init?: RequestInit) => {
+      assert.equal(url, "https://api.tidal.com/v1/drm/licenses/widevine");
+      assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer tidal-tok-99");
+      return new Response(new Uint8Array([9, 8, 7, 6]), { status: 200 });
+    }) as typeof fetch,
+  );
+  assert.deepEqual(Array.from(licenseBytes), [9, 8, 7, 6]);
+});
+
+test("parseCommercialSearchPayload parses Spotify, Beatport, TIDAL, SoundCloud, and Apple Music payloads", () => {
+  const spotifyTracks = parseCommercialSearchPayload(
+    "spotify",
+    JSON.stringify({
+      tracks: {
+        items: [
+          {
+            id: "sp1",
+            name: "Glue",
+            artists: [{ name: "Bicep" }],
+            duration_ms: 269000,
+            external_urls: { spotify: "https://open.spotify.com/track/sp1" },
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(spotifyTracks.length, 1);
+  assert.equal(spotifyTracks[0].title, "Glue");
+  assert.equal(spotifyTracks[0].artist, "Bicep");
+  assert.equal(spotifyTracks[0].durationSec, 269);
+
+  const beatportTracks = parseCommercialSearchPayload(
+    "beatport",
+    JSON.stringify({
+      results: [
+        {
+          id: 991122,
+          name: "Delilah",
+          mix_name: "Original Mix",
+          artists: [{ name: "Fred again.." }],
+          length_ms: 241000,
+        },
+      ],
+    }),
+  );
+  assert.equal(beatportTracks.length, 1);
+  assert.equal(beatportTracks[0].title, "Delilah (Original Mix)");
+  assert.equal(beatportTracks[0].url, "https://www.beatport.com/track/-/991122");
+
+  const appleTracks = parseCommercialSearchPayload(
+    "apple-music",
+    JSON.stringify({
+      results: {
+        songs: {
+          data: [
+            {
+              id: "am77",
+              attributes: {
+                name: "Nanana",
+                artistName: "Peggy Gou",
+                durationInMillis: 230000,
+                url: "https://music.apple.com/us/song/nanana/am77",
+              },
+            },
+          ],
+        },
+      },
+    }),
+  );
+  assert.equal(appleTracks.length, 1);
+  assert.equal(appleTracks[0].artist, "Peggy Gou");
+  assert.equal(appleTracks[0].durationSec, 230);
 });

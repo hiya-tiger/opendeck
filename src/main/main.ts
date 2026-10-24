@@ -17,14 +17,37 @@ import { MODEL, findCache, installModel, loadManifestAt, modelInfo, readCache, s
 const root = (): string => app.getAppPath();
 
 const ALLOWED_HOSTS = [
+  "accounts.google.com",
   "music.youtube.com",
   "youtube.com",
   "www.youtube.com",
+  "accounts.spotify.com",
   "open.spotify.com",
+  "api.spotify.com",
+  "gew1-spclient.spotify.com",
+  "secure.soundcloud.com",
   "soundcloud.com",
+  "api.soundcloud.com",
+  "api-v2.soundcloud.com",
+  "w.soundcloud.com",
+  "login.tidal.com",
   "listen.tidal.com",
+  "api.tidal.com",
+  "embed.tidal.com",
   "www.deezer.com",
+  "api.deezer.com",
+  "media.deezer.com",
+  "widget.deezer.com",
   "music.apple.com",
+  "amp-api.music.apple.com",
+  "embed.music.apple.com",
+  "play.itunes.apple.com",
+  "www.beatport.com",
+  "api.beatport.com",
+  "embed.beatport.com",
+  "www.beatsource.com",
+  "api.beatsource.com",
+  "embed.beatsource.com",
 ];
 
 let mainWindow: BrowserWindow | null = null;
@@ -138,19 +161,49 @@ ipcMain.handle("streaming:logout", async (_event, provider: string) => {
   return { ok: true };
 });
 
-ipcMain.handle("streaming:search", async (_event, provider: string, url: string) => {
+ipcMain.handle("streaming:search", async (_event, provider: string, url: string, token?: string) => {
   const target = new URL(url);
   if (!ALLOWED_HOSTS.includes(target.host)) throw new Error("provider host not allowed");
   if (!/^[a-z0-9-]+$/.test(provider)) throw new Error("bad provider id");
-  const response = await sessionFor(provider).fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
+  const headers: Record<string, string> = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+  if (token && token.trim()) {
+    headers.Authorization = `Bearer ${token.trim()}`;
+  }
+  const response = await sessionFor(provider).fetch(url, { headers });
   return { status: response.status, body: await response.text() };
 });
+
+ipcMain.handle(
+  "streaming:license",
+  async (
+    _event,
+    provider: string,
+    licenseUrl: string,
+    challenge: Uint8Array,
+    token?: string,
+  ) => {
+    const target = new URL(licenseUrl);
+    if (!ALLOWED_HOSTS.includes(target.host)) throw new Error("license host not allowed");
+    if (!/^[a-z0-9-]+$/.test(provider)) throw new Error("bad provider id");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/octet-stream",
+    };
+    if (token && token.trim()) {
+      headers.Authorization = `Bearer ${token.trim()}`;
+    }
+    const response = await sessionFor(provider).fetch(licenseUrl, {
+      method: "POST",
+      headers,
+      body: Buffer.from(challenge),
+    });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return { ok: response.ok, status: response.status, license: bytes };
+  },
+);
 
 ipcMain.handle("media:fetch", async (_event, url: string) => {
   const target = new URL(url);

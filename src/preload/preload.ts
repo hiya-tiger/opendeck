@@ -24,7 +24,9 @@ const api = {
     open: (provider: string, url: string, hints: string[]) => ipcRenderer.invoke("streaming:open", provider, url, hints),
     status: (provider: string, hints: string[]) => ipcRenderer.invoke("streaming:status", provider, hints),
     logout: (provider: string) => ipcRenderer.invoke("streaming:logout", provider),
-    search: (provider: string, url: string) => ipcRenderer.invoke("streaming:search", provider, url),
+    search: (provider: string, url: string, token?: string) => ipcRenderer.invoke("streaming:search", provider, url, token),
+    license: (provider: string, licenseUrl: string, challenge: Uint8Array, token?: string) =>
+      ipcRenderer.invoke("streaming:license", provider, licenseUrl, challenge, token),
     onLogin: (handler: (payload: unknown) => void) => on("streaming:login", handler),
   },
   media: {

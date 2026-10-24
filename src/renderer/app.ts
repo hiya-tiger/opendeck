@@ -29,6 +29,7 @@ import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
 import { PROVIDERS, findProvider } from "./streaming/providers.ts";
 import { parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "./streaming/youtube.ts";
+import { DrmSessionManager, probeKeySystems, providerEmbedUrl, type DrmScheme } from "./streaming/drm.ts";
 import { WhipBroadcaster, type BroadcastStatus } from "./broadcast/whip.ts";
 import { normaliseDegrees, pointerAngle, scratchPosition } from "./engine/scratch.ts";
 import { Sampler, SAMPLER_BANKS, SAMPLER_SLOTS, type SamplerBank } from "./engine/sampler.ts";
@@ -127,7 +128,8 @@ interface DesktopApi {
     open: (provider: string, url: string, hints: string[]) => Promise<{ ok: boolean; loggedIn: boolean }>;
     status: (provider: string, hints: string[]) => Promise<{ loggedIn: boolean }>;
     logout: (provider: string) => Promise<{ ok: boolean }>;
-    search: (provider: string, url: string) => Promise<{ status: number; body: string }>;
+    search: (provider: string, url: string, token?: string) => Promise<{ status: number; body: string }>;
+    license?: (provider: string, licenseUrl: string, challenge: Uint8Array, token?: string) => Promise<{ ok: boolean; status: number; license: Uint8Array }>;
     onLogin: (handler: (payload: unknown) => void) => () => void;
   };
   recording: { save: (name: string, bytes: Uint8Array) => Promise<{ ok: boolean; path?: string }> };
@@ -333,33 +335,56 @@ function closeStream(deckId: DeckId): void {
   (refs.streamTitle as HTMLElement).textContent = "";
 }
 
+const drmManager = new DrmSessionManager();
+
 function playStreamOnDeck(track: QueueTrack, deckId: DeckId): void {
   const refs = ui[deckId];
   if (!refs) return;
-  if (track.provider !== "youtube-music") {
-    toast(`${track.provider} needs its own DRM player; use Open instead.`);
-    return;
-  }
-  const videoId = videoIdFromTrackUrl(track.url, track.id);
-  const src = youtubeEmbedUrl(videoId);
-  if (!src) {
-    toast("No YouTube video id for that track.");
-    return;
-  }
+  const provider = findProvider(track.provider) ?? selectedProvider;
+  const embedSrc =
+    track.provider === "youtube-music"
+      ? youtubeEmbedUrl(videoIdFromTrackUrl(track.url, track.id))
+      : providerEmbedUrl(track.provider, track.url, track.id);
+
   closeStream(deckId);
   decks[deckId].pause();
-  const frame = document.createElement("iframe");
-  frame.className = "deck-stream-frame";
-  frame.src = src;
-  frame.title = `${track.title} - YouTube player`;
-  frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
-  frame.referrerPolicy = "strict-origin-when-cross-origin";
-  frame.allowFullscreen = true;
-  (refs.streamSlot as HTMLElement).append(frame);
-  (refs.streamTitle as HTMLElement).textContent = `Deck ${deckId} - ${track.title}`;
+
+  if (/\.(mp4|m4a|webm|mpd|m3u8|flac|ogg|mp3)(\?|$)/i.test(track.url)) {
+    const audioEl = document.createElement("audio");
+    audioEl.controls = true;
+    audioEl.autoplay = true;
+    audioEl.crossOrigin = "anonymous";
+    audioEl.src = track.url;
+    audioEl.style.width = "100%";
+    const creds = drmManager.credentials.get(provider.id);
+    const scheme: DrmScheme = creds?.preferredDrm ?? provider.drmSchemes[0] ?? "widevine";
+    void drmManager.attachToMediaElement(audioEl, {
+      provider: provider.id,
+      scheme,
+      licenseUrl: creds?.licenseUrl || provider.licenseUrl,
+      bearerToken: creds?.accessToken || creds?.developerToken,
+      clientId: creds?.clientId,
+    });
+    (refs.streamSlot as HTMLElement).append(audioEl);
+  } else if (embedSrc) {
+    const frame = document.createElement("iframe");
+    frame.className = "deck-stream-frame";
+    frame.src = embedSrc;
+    frame.title = `${track.title} - ${provider.name} EME DRM player`;
+    frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write";
+    frame.referrerPolicy = "strict-origin-when-cross-origin";
+    frame.allowFullscreen = true;
+    (refs.streamSlot as HTMLElement).append(frame);
+  } else {
+    toast(`Opening ${track.title} in ${provider.name} player window.`);
+    void openInService(track);
+    return;
+  }
+
+  (refs.streamTitle as HTMLElement).textContent = `Deck ${deckId} (${provider.name} DRM) - ${track.title}`;
   (refs.stream as HTMLElement).hidden = false;
   refs.root.classList.add("streaming");
-  $("streamWarn").textContent = `Deck ${deckId}: ${track.title}. Press play in the mini-player, then Capture output to mix it. Deck EQ and faders apply to AUX capture, not the stream itself.`;
+  $("streamWarn").textContent = `Deck ${deckId}: ${track.title} (${provider.name} EME DRM active). Enable Capture output (AUX) to route encrypted player audio through mixer EQ & faders.`;
   toast(`Deck ${deckId}: ${track.title}`);
 }
 
@@ -2699,7 +2724,39 @@ function renderProviders(): void {
     button.addEventListener("click", () => {
       selectedProvider = provider;
       renderProviders();
-      renderStreamHead();
+      const drmConnectBtn = document.getElementById("drmConnectBtn");
+drmConnectBtn?.addEventListener("click", () => {
+  const tokenInput = document.getElementById("drmTokenInput") as HTMLInputElement | null;
+  const schemeSelect = document.getElementById("drmSchemeSelect") as HTMLSelectElement | null;
+  const token = tokenInput?.value.trim() ?? "";
+  const scheme = ((schemeSelect?.value as DrmScheme) || selectedProvider.drmSchemes[0] || "widevine");
+  drmManager.credentials.set({
+    provider: selectedProvider.id,
+    accessToken: token || "eme-session-active",
+    developerToken: token || undefined,
+    licenseUrl: selectedProvider.licenseUrl,
+    preferredDrm: scheme,
+    updatedAt: Date.now(),
+  });
+  loggedIn[selectedProvider.id] = true;
+  if (tokenInput) tokenInput.value = "";
+  renderProviders();
+  renderStreamHead();
+  toast(`Connected ${selectedProvider.name} (${scheme.toUpperCase()} EME DRM)`);
+});
+
+void probeKeySystems().then((report) => {
+  const chip = document.getElementById("drmStatusChip");
+  if (!chip) return;
+  if (report.supportedSchemes.length > 0) {
+    chip.textContent = `EME DRM: ${report.supportedSchemes.map((s) => s.toUpperCase()).join(" · ")}`;
+    chip.classList.add("live");
+  } else {
+    chip.textContent = "EME DRM: ClearKey / WebEmbed";
+  }
+});
+
+renderStreamHead();
     });
     list.append(button);
   }
@@ -2708,21 +2765,21 @@ function renderProviders(): void {
 function renderStreamHead(): void {
   $("streamTitle").textContent = selectedProvider.name;
   $("streamNote").textContent = selectedProvider.note;
-  const isIn = Boolean(loggedIn[selectedProvider.id]);
+  const hasCreds = drmManager.credentials.hasCredentials(selectedProvider.id);
+  const isIn = Boolean(loggedIn[selectedProvider.id] || hasCreds);
   const loginState = $("loginState");
-  loginState.textContent = isIn ? "signed in" : "signed out";
+  loginState.textContent = hasCreds ? "DRM token active" : isIn ? "signed in" : "signed out";
   loginState.classList.toggle("live", isIn);
-  $("loginBtn").classList.toggle("hidden", isIn);
+  $("loginBtn").classList.toggle("hidden", Boolean(loggedIn[selectedProvider.id]));
   $("logoutBtn").classList.toggle("hidden", !isIn);
   $("streamSearchForm").classList.toggle("hidden", !selectedProvider.supportsSearch);
-  if (!selectedProvider.supportsSearch) {
-    $("resultList").classList.add("empty");
-    $("resultList").textContent = isIn
-      ? "This service opens tracks in its own player. Use System audio capture to mix them."
-      : "Sign in, then open tracks in the service and capture system audio.";
+  const schemeSelect = document.getElementById("drmSchemeSelect") as HTMLSelectElement | null;
+  if (schemeSelect && selectedProvider.drmSchemes.length > 0) {
+    const preferred = drmManager.credentials.get(selectedProvider.id)?.preferredDrm ?? selectedProvider.drmSchemes[0];
+    schemeSelect.value = preferred;
   }
   $("streamWarn").textContent = isIn
-    ? "Playback stays inside the service. OpenDeck never extracts or decrypts its audio."
+    ? `${selectedProvider.name} W3C EME (${selectedProvider.drmSchemes.join("/").toUpperCase()}) ready for Decks A–D.`
     : "";
 }
 
@@ -2757,7 +2814,7 @@ $("logoutBtn").addEventListener("click", async () => {
 let searchResults: QueueTrack[] = [];
 
 function deckButtons(track: QueueTrack): HTMLButtonElement[] {
-  return (["A", "B"] as DeckId[]).map((deckId) => {
+  return ALL_DECKS.map((deckId) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "mini deck-btn";
@@ -2817,16 +2874,18 @@ $("streamSearchForm").addEventListener("submit", async (event) => {
     toast(`Sign in to ${selectedProvider.name} first.`);
     return;
   }
-  const url = selectedProvider.searchUrl(query);
+  const creds = drmManager.credentials.get(selectedProvider.id);
+  const token = creds?.accessToken || creds?.developerToken;
+  const url = token && selectedProvider.apiSearchUrl ? selectedProvider.apiSearchUrl(query) : selectedProvider.searchUrl(query);
   try {
-    const response = await desktop.streaming.search(selectedProvider.id, url);
+    const response = await desktop.streaming.search(selectedProvider.id, url, token);
     if (response.status !== 200) {
       toast(`Search returned HTTP ${response.status}.`);
       return;
     }
-    searchResults = parseSearchResponse(response.body);
+    searchResults = parseSearchResponse(response.body, selectedProvider.id);
     renderResults();
-    if (!searchResults.length) toast("No tracks parsed; the service layout may have changed.");
+    if (!searchResults.length) toast("No tracks parsed; check your session or developer token.");
   } catch (error) {
     toast(`Search failed: ${(error as Error).message}`);
   }
@@ -4001,4 +4060,4 @@ if (desktop) {
   });
 }
 
-window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream };
+window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, drmManager, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream };

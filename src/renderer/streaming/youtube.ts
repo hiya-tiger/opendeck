@@ -1,3 +1,4 @@
+import { parseCommercialSearchPayload } from "./drm.ts";
 import type { QueueTrack } from "./queue.ts";
 
 interface Runs {
@@ -137,12 +138,16 @@ export function parseSearchHtml(html: string): QueueTrack[] {
   return data ? parseTracks(data) : [];
 }
 
-export function parseSearchResponse(body: string): QueueTrack[] {
+export function parseSearchResponse(body: string, providerId = "youtube-music"): QueueTrack[] {
   try {
     const payload = JSON.parse(body) as { tracks?: QueueTrack[] };
-    if (Array.isArray(payload?.tracks)) return payload.tracks;
+    if (Array.isArray(payload?.tracks) && payload.tracks.every((t) => typeof t?.id === "string" && typeof t?.title === "string")) {
+      return payload.tracks;
+    }
   } catch {
-    /* not a native payload; fall back to HTML */
+    /* not a native payload; fall back to HTML or commercial parser */
   }
-  return parseSearchHtml(body);
+  const yt = parseSearchHtml(body);
+  if (yt.length > 0) return yt;
+  return parseCommercialSearchPayload(providerId, body);
 }

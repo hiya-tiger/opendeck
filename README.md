@@ -51,6 +51,10 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 - **Unified Undo Backup:** Every embedded tag write and `_Serato_` library export creates an automatic backup snapshot that can be restored in one click (`Undo tags` / `restoreLibraryBackup`).
 - **Smart Crates, Scratchpad & History:** Rule-based Smart Crates (`contains`, `equals`, `>=`, `<=`, `inRange` across BPM, key, crate, title, and play count), Prepare Scratchpad, Played History with CSV export, high-contrast **Day Mode**, and **Offline / Practice Mode**.
 
+### Direct Commercial Streaming DRM & 8-Provider Catalog Integration
+- **W3C Encrypted Media Extensions (EME) DRM Engine (`src/renderer/streaming/drm.ts`):** Native `MediaKeySystemAccess` / `MediaKeys` / `MediaKeySession` negotiation across **Widevine (`com.widevine.alpha`)**, **FairPlay (`com.apple.fps.1_0`)**, **PlayReady (`com.microsoft.playready`)**, and **ClearKey (`org.w3.clearkey`)** with OAuth2 PKCE (`S256`) and per-provider Developer/Bearer token management.
+- **8 Commercial Streaming Services on Decks A–D:** Direct catalog search, EME license exchange, and in-deck playback across **TIDAL**, **Beatport**, **Beatsource**, **SoundCloud Go+**, **Spotify**, **Apple Music**, **Deezer**, and **YouTube Music**.
+
 ### P6 — DVS Timecode Control & 195 Supported Hardware Devices
 - **Real DVS Timecode Decoder (`src/timecode`, `src/dvs`):** Supports **Serato CV02 Vinyl (Side A/B, 1 kHz)**, **Serato Control CD**, **Traktor Scratch MK2 (2 kHz)**, **MixVibes V2 / 7" (1.3 kHz)**, and **Pioneer rekordbox DVS (1 kHz)** with Absolute (`ABS`), Relative (`REL`), and Internal (`INT`) modes, needle-drop seeking, 1-second reference level & phase calibration (`Set needle position`), drift correction, and circular X-Y scope display.
 - **195 Supported Hardware Devices (`src/renderer/midi/profiles.ts`, [`docs/hardware.md`](docs/hardware.md)):** Built-in plug-and-play device recognition, auto-presets, 4-deck MIDI Learn (`mix.chA`–`mix.chD`, Decks `A–D`), and DVS audio interface auto-binding across **195 controllers, mixers, DVS interfaces, CDJs, motorized turntables, and accessories** from AlphaTheta, Pioneer DJ, Rane, Denon DJ, Numark, Hercules, Roland, Native Instruments, Reloop, Allen & Heath, DJ TechTools, Korg, Akai, Novation, Vestax, Gemini, Mixars, Stanton, Sony, Behringer, and Monster.
@@ -72,7 +76,7 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 npm install
 npm start          # builds dist/ + renderer/ bundles and launches OpenDeck Desktop
 npm run build      # builds dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js
-npm test           # runs all 19 TypeScript unit & integration test suites (187 tests)
+npm test           # runs all 19 TypeScript unit & integration test suites (190 tests)
 npm run smoke:audio # runs headless Electron audio + stems + video transport smoke test
 npm run package:win # builds standalone Windows bundle + OpenDeck.exe launcher
 ```
@@ -89,7 +93,7 @@ cargo build --release -p opendeck-app
 ## Verification Status
 
 - **TypeScript Typecheck (`npx tsc --noEmit`):** `0 errors`
-- **Node Unit & Integration Tests (`npm test`):** `187/187 passing` across 19 test files (`defs`, `timecode`, `dvs`, `engine`, `streaming`, `artwork`, `midi` [195-device catalogue], `formats`, `pcm-transport`, `serato`, `serato-write`, `serato-extra`, `cue-store`, `library-ux`, `pad-modes`, `pcm-worklet`, `platter`, `parts`, and `video-mixer`)
+- **Node Unit & Integration Tests (`npm test`):** `190/190 passing` across 19 test files (`defs`, `timecode`, `dvs`, `engine`, `streaming`, `artwork`, `midi` [195-device catalogue], `formats`, `pcm-transport`, `serato`, `serato-write`, `serato-extra`, `cue-store`, `library-ux`, `pad-modes`, `pcm-worklet`, `platter`, `parts`, and `video-mixer`)
 - **Rust Workspace Tests (`cargo test`):** `39/39 passing` (`opendeck-core`: 7, `opendeck-audio`: 30, `opendeck-app`: 2)
 - **Headless Electron Audio + Stems + Video Smoke Test (`npm run smoke:audio`):**
   ```json
