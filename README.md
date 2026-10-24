@@ -65,7 +65,7 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 ## Quick Start & Windows `.exe` Executable
 
 ### Run the Prebuilt Windows Executable
-- Double-click **`OpenDeck.exe`** in the repository root (or **`bin/opendeck-app.exe`** for the native Rust/Tauri shell, or **`release/OpenDeck-win32-x64/OpenDeck.exe`** after running `npm run package:win`).
+- Download and extract **[`OpenDeck-win64.zip`](OpenDeck-win64.zip)** (contains standalone **`OpenDeck.exe`**, `README.md`, `LICENSE`, and `NOTICE`), or double-click **`OpenDeck.exe`** directly in the repository root (or **`bin/opendeck-app.exe`** / **`release/OpenDeck-win32-x64/OpenDeck.exe`** after running `npm run package:win`).
 
 ### Build & Run from Source
 ```bash
