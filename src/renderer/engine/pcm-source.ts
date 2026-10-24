@@ -1,4 +1,4 @@
-﻿import type { StretchNode } from "signalsmith-stretch";
+import type { StretchNode } from "signalsmith-stretch";
 
 export const WORKLET_SOURCE = `
 class OpenDeckPcmProcessor extends AudioWorkletProcessor {
@@ -107,7 +107,7 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
         this.position = this.loopStart + ((this.position - this.loopStart) % length);
       }
     } else if (this.position < this.loopStart) {
-      this.position = this.loopEnd - ((this.loopEnd - this.position) % length);
+      this.position = this.loopEnd - ((this.position - this.position) % length);
     }
   }
 }
@@ -280,6 +280,7 @@ export class PcmSource {
   private playing = false;
   private rate = 1;
   private keylock = true;
+  private pitchShiftSemitones = 0;
   private loop: { start: number; end: number } | null = null;
   private targetPosition: number | null = null;
   private reportedPosition = 0;
@@ -331,6 +332,10 @@ export class PcmSource {
     return this.stretch !== null;
   }
 
+  get pitchShift(): number {
+    return this.pitchShiftSemitones;
+  }
+
   setGain(gain: number): void {
     this.gainNode.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.01);
   }
@@ -360,8 +365,13 @@ export class PcmSource {
   }
 
   private semitones(): number {
-    if (this.keylock) return 0;
-    return 12 * Math.log2(Math.max(0.01, Math.abs(this.rate)));
+    const base = this.keylock ? 0 : 12 * Math.log2(Math.max(0.01, Math.abs(this.rate)));
+    return Math.max(-24, Math.min(24, base + this.pitchShiftSemitones));
+  }
+
+  private fallbackEffectiveRate(): number {
+    if (this.pitchShiftSemitones === 0) return this.rate;
+    return this.rate * Math.pow(2, this.pitchShiftSemitones / 12);
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {
@@ -407,7 +417,7 @@ export class PcmSource {
     this.setTarget(position / buffer.sampleRate);
     if (this.fallback) {
       this.fallback.load(buffer, position);
-      this.fallback.setRate(this.rate);
+      this.fallback.setRate(this.fallbackEffectiveRate());
       return;
     }
     const left = buffer.getChannelData(0);
@@ -502,7 +512,7 @@ export class PcmSource {
     this.playing = active;
     if (position !== null) this.setTarget(position / (this.buffer?.sampleRate ?? this.ctx.sampleRate));
     if (this.fallback) {
-      this.fallback.setRate(this.rate);
+      this.fallback.setRate(this.fallbackEffectiveRate());
       if (active) void this.fallback.play(position ?? this.positionSamples);
       else this.fallback.pause();
       return;
@@ -526,7 +536,7 @@ export class PcmSource {
   setRate(rate: number): void {
     this.rate = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 1));
     if (this.fallback) {
-      this.fallback.setRate(this.rate);
+      this.fallback.setRate(this.fallbackEffectiveRate());
       return;
     }
     if (!this.stretch) return;
@@ -544,6 +554,12 @@ export class PcmSource {
 
   setKeylock(enabled: boolean): void {
     this.keylock = enabled;
+    this.setRate(this.rate);
+  }
+
+  setPitchShift(semitones: number): void {
+    const clamped = Number.isFinite(semitones) ? Math.max(-12, Math.min(12, semitones)) : 0;
+    this.pitchShiftSemitones = clamped;
     this.setRate(this.rate);
   }
 

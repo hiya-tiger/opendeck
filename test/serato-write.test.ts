@@ -162,3 +162,132 @@ test("MP4 writes keep the mdat payload and embed both marker frames", () => {
   assert.ok(sameBytes(seratoAudioPayload(input, "mp4"), seratoAudioPayload(output, "mp4")));
   assert.ok(output.length > input.length);
 });
+
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { SERATO_MP4_ATOM_PREFIX } from "../src/renderer/media/serato-extra.ts";
+import { readSeratoTagsFromBytes } from "../src/renderer/media/serato-file.ts";
+import {
+  CONTAINER_ASSET_LIST_COLUMNS_TABLE,
+  readSeratoSqliteColumns,
+  undoLastSeratoWrite,
+  writeSeratoLibraryExport,
+  writeSeratoSqliteColumns,
+  writeSeratoTags,
+} from "../src/main/serato-files.ts";
+
+test("SERATO_MP4_ATOM_PREFIX matches literal string ----:com.serato.dj:", () => {
+  assert.equal(SERATO_MP4_ATOM_PREFIX, "----:com.serato.dj:");
+});
+
+test("rewriteSeratoTags round-trips BPM and Key metadata across MP3, WAV, FLAC, and MP4 while preserving audio payload", () => {
+  const beatgrid = [{ position: 0.25, bpm: 125 }];
+  const meta = { bpm: 125, key: "9A" };
+
+  const mp3In = id3(new Uint8Array([0xff, 0xfb, 0x90, 0x64, 10, 20, 30, 40]));
+  const mp3Out = rewriteSeratoTags(mp3In, "mp3", seratoTagUpdates(markers, beatgrid, "mp3"), meta);
+  assert.ok(sameBytes(seratoAudioPayload(mp3In, "mp3"), seratoAudioPayload(mp3Out, "mp3")));
+  const mp3Parsed = readSeratoTagsFromBytes(mp3Out, "mp3");
+  assert.equal(mp3Parsed.bpm, 125);
+  assert.equal(mp3Parsed.key, "9A");
+
+  const wavIn = riff("wav", [
+    riffChunk("fmt ", new Uint8Array(16), true),
+    riffChunk("data", new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), true),
+  ]);
+  const wavOut = rewriteSeratoTags(wavIn, "wav", seratoTagUpdates(markers, beatgrid, "wav"), meta);
+  assert.ok(sameBytes(seratoAudioPayload(wavIn, "wav"), seratoAudioPayload(wavOut, "wav")));
+  const wavParsed = readSeratoTagsFromBytes(wavOut, "wav");
+  assert.equal(wavParsed.bpm, 125);
+  assert.equal(wavParsed.key, "9A");
+
+  const flacIn = flacWithAudio();
+  const flacOut = rewriteSeratoTags(flacIn, "flac", seratoTagUpdates(markers, beatgrid, "flac"), meta);
+  assert.ok(sameBytes(seratoAudioPayload(flacIn, "flac"), seratoAudioPayload(flacOut, "flac")));
+  const flacParsed = readSeratoTagsFromBytes(flacOut, "flac");
+  assert.equal(flacParsed.bpm, 125);
+  assert.equal(flacParsed.key, "9A");
+
+  const mp4In = mp4WithAudio();
+  const mp4Out = rewriteSeratoTags(mp4In, "mp4", seratoTagUpdates(markers, beatgrid, "mp4"), meta);
+  assert.ok(sameBytes(seratoAudioPayload(mp4In, "mp4"), seratoAudioPayload(mp4Out, "mp4")));
+  const mp4Parsed = readSeratoTagsFromBytes(mp4Out, "mp4");
+  assert.equal(mp4Parsed.bpm, 125);
+  assert.equal(mp4Parsed.key, "9A");
+});
+
+test("writeSeratoTags, writeSeratoLibraryExport, writeSeratoSqliteColumns and undoLastSeratoWrite round-trip and refuse when Serato is running", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "opendeck-serato-test-"));
+  const backupRoot = path.join(tmpDir, "backups");
+  try {
+    const mp3Path = path.join(tmpDir, "track.mp3");
+    const originalMp3 = id3(new Uint8Array([0xff, 0xfb, 0x90, 0x64, 7, 8, 9, 10]));
+    await fs.writeFile(mp3Path, originalMp3);
+
+    const blockedTag = await writeSeratoTags(
+      { root: tmpDir, tracks: [{ path: mp3Path, name: "track.mp3", markers, beatgrid: [{ position: 0, bpm: 128 }], meta: { bpm: 128, key: "8A" } }] },
+      { backupRoot, checkRunning: async () => true },
+    );
+    assert.equal(blockedTag.ok, false);
+
+    const tagWrite = await writeSeratoTags(
+      { root: tmpDir, tracks: [{ path: mp3Path, name: "track.mp3", markers, beatgrid: [{ position: 0, bpm: 128 }], meta: { bpm: 128, key: "8A" } }] },
+      { backupRoot, checkRunning: async () => false },
+    );
+    assert.equal(tagWrite.ok, true);
+    assert.equal(tagWrite.written, 1);
+
+    const undoTag = await undoLastSeratoWrite({ backupRoot, checkRunning: async () => false });
+    assert.equal(undoTag.ok, true);
+    const restoredMp3 = new Uint8Array(await fs.readFile(mp3Path));
+    assert.deepEqual(Array.from(restoredMp3), Array.from(originalMp3));
+
+    // Library export + undo (both overwritten and newly created files)
+    const seratoDir = path.join(tmpDir, "_Serato_");
+    await fs.mkdir(seratoDir, { recursive: true });
+    const existingDbPath = path.join(seratoDir, "database V2");
+    const initialDbBytes = new Uint8Array([1, 2, 3, 4]);
+    await fs.writeFile(existingDbPath, initialDbBytes);
+
+    const libExport = await writeSeratoLibraryExport(
+      {
+        rootDir: tmpDir,
+        files: {
+          "_Serato_/database V2": new Uint8Array([9, 9, 9, 9, 9]),
+          "_Serato_/Subcrates/Test.crate": new Uint8Array([5, 6, 7, 8]),
+        },
+      },
+      { backupRoot, checkRunning: async () => false },
+    );
+    assert.equal(libExport.ok, true);
+    assert.equal(libExport.written, 2);
+
+    const undoLib = await undoLastSeratoWrite({ backupRoot, checkRunning: async () => false });
+    assert.equal(undoLib.ok, true);
+    const restoredDb = new Uint8Array(await fs.readFile(existingDbPath));
+    assert.deepEqual(Array.from(restoredDb), Array.from(initialDbBytes));
+    await assert.rejects(fs.access(path.join(seratoDir, "Subcrates", "Test.crate")));
+
+    // SQLite container_asset_list_columns write + read + undo
+    assert.equal(CONTAINER_ASSET_LIST_COLUMNS_TABLE, "container_asset_list_columns");
+    const sqlitePath = path.join(tmpDir, "Serato Library.sqlite");
+    const sqliteHeader = new Uint8Array(64);
+    const magic = "SQLite format 3\0";
+    for (let i = 0; i < magic.length; i += 1) sqliteHeader[i] = magic.charCodeAt(i);
+    await fs.writeFile(sqlitePath, sqliteHeader);
+
+    const sqliteRes = await writeSeratoSqliteColumns(
+      { sqlitePath, columns: ["song", "artist", "bpm", "key", "playCount"], usage: 1 },
+      { backupRoot, checkRunning: async () => false },
+    );
+    assert.equal(sqliteRes.ok, true);
+    const readCols = await readSeratoSqliteColumns(sqlitePath, 1);
+    assert.deepEqual(readCols?.columns, ["song", "artist", "bpm", "key", "playCount"]);
+
+    const undoSqlite = await undoLastSeratoWrite({ backupRoot, checkRunning: async () => false });
+    assert.equal(undoSqlite.ok, true);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});

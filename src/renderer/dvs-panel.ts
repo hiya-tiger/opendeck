@@ -1,5 +1,8 @@
 import { TIMECODES, findTimecode } from "../timecode/defs.ts";
-import { DvsTransport } from "../dvs/transport.ts";
+import { DvsTransport, type DvsMode } from "../dvs/transport.ts";
+import { profileForDevice } from "./midi/profiles.ts";
+
+type DeckKey = "A" | "B" | "C" | "D";
 
 interface DeckLike {
   readonly duration: number;
@@ -11,10 +14,11 @@ interface DeckLike {
   seek(seconds: number): void;
   setRate(rate: number): void;
   driveTimecode(rate: number, positionSeconds: number | null): void;
+  setPlaybackMode?(mode: "INT" | "REL" | "ABS"): void;
 }
 
 interface OpenDeckGlobal {
-  decks: Record<"A" | "B", DeckLike>;
+  decks: Record<DeckKey, DeckLike>;
 }
 
 const bridge = window as unknown as { openDeck?: OpenDeckGlobal };
@@ -25,8 +29,10 @@ const enable = byId<HTMLInputElement>("dvsEnable");
 const deviceSelect = byId<HTMLSelectElement>("dvsDevice");
 const timecodeSelect = byId<HTMLSelectElement>("dvsTimecode");
 const targetSelect = byId<HTMLSelectElement>("dvsTarget");
+const modeSelect = document.getElementById("dvsMode") as HTMLSelectElement | null;
 const statusText = byId<HTMLSpanElement>("dvsStatus");
 const calibrate = byId<HTMLButtonElement>("dvsCalibrate");
+const scopeCanvas = document.getElementById("dvsScope") as HTMLCanvasElement | null;
 
 for (const timecode of TIMECODES) {
   const option = document.createElement("option");
@@ -44,6 +50,8 @@ let transport: DvsTransport | null = null;
 let offset = 0;
 let offsetReady = false;
 let lastStatus = "";
+let lastLeft: Float32Array | null = null;
+let lastRight: Float32Array | null = null;
 
 const setStatus = (text: string, state: "off" | "wait" | "live" | "warn"): void => {
   statusText.textContent = text;
@@ -53,14 +61,48 @@ const setStatus = (text: string, state: "off" | "wait" | "live" | "warn"): void 
 const targetDeck = (): DeckLike | null => {
   const decks = bridge.openDeck?.decks;
   if (!decks) return null;
-  return decks[targetSelect.value === "B" ? "B" : "A"] ?? null;
+  const key = (["A", "B", "C", "D"].includes(targetSelect.value) ? targetSelect.value : "A") as DeckKey;
+  return decks[key] ?? null;
+};
+
+const currentMode = (): DvsMode => {
+  const val = modeSelect?.value;
+  if (val === "internal" || val === "relative" || val === "absolute") return val;
+  return "absolute";
 };
 
 const buildTransport = (sampleRate: number): void => {
   const definition = findTimecode(timecodeSelect.value) ?? TIMECODES[0];
-  transport = new DvsTransport(definition, sampleRate, { jumpSeconds: 0.35 });
+  transport = new DvsTransport(definition, sampleRate, {
+    jumpSeconds: 0.35,
+    mode: currentMode(),
+  });
   offsetReady = false;
   offset = 0;
+};
+
+const drawScope = (left: Float32Array, right: Float32Array, locked: boolean): void => {
+  if (!scopeCanvas) return;
+  const ctx = scopeCanvas.getContext("2d");
+  if (!ctx) return;
+  const w = scopeCanvas.width;
+  const h = scopeCanvas.height;
+  ctx.fillStyle = "#080c14";
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = locked ? "#23b5a5" : "#e8567a";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  const step = Math.max(1, Math.floor(left.length / 96));
+  const cx = w / 2;
+  const cy = h / 2;
+  const r = Math.min(cx, cy) * 0.85;
+  for (let i = 0; i < left.length; i += step) {
+    const x = cx + Math.max(-1, Math.min(1, left[i])) * r;
+    const y = cy - Math.max(-1, Math.min(1, right[i])) * r;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
 };
 
 const stopCapture = (): void => {
@@ -80,8 +122,12 @@ const stopCapture = (): void => {
 
 const handleBlock = (left: Float32Array, right: Float32Array): void => {
   if (!transport) return;
+  lastLeft = left;
+  lastRight = right;
   const reading = transport.push(left, right);
-  const label = `${reading.status === "locked" ? "lock" : reading.status} · ${reading.speedPercent.toFixed(1)}%`;
+  drawScope(left, right, reading.status === "locked");
+  const modeTag = (reading.mode ?? "absolute").slice(0, 3).toUpperCase();
+  const label = `${modeTag} · ${reading.status === "locked" ? "lock" : reading.status} · ${reading.speedPercent.toFixed(1)}%`;
   const next = `${label} · ${reading.carrierHz.toFixed(0)} Hz`;
   if (next !== lastStatus) {
     lastStatus = next;
@@ -90,6 +136,10 @@ const handleBlock = (left: Float32Array, right: Float32Array): void => {
 
   const deck = targetDeck();
   if (!deck || !deck.hasTrack) return;
+
+  if (reading.mode === "internal") {
+    return;
+  }
 
   if (reading.status !== "locked") {
     if (deck.playing) deck.pause();
@@ -101,18 +151,21 @@ const handleBlock = (left: Float32Array, right: Float32Array): void => {
     offsetReady = true;
   }
 
-  const wanted = Math.max(-1.6, Math.min(1.6, reading.rate));
-  if (reading.jump !== null) {
+  const driftCorr = transport.computeDriftCorrection(deck.currentTime - offset);
+  const wanted = Math.max(-1.6, Math.min(1.6, reading.rate + driftCorr));
+  if (reading.jump !== null && reading.mode === "absolute") {
     deck.driveTimecode(wanted, reading.jump + offset);
     return;
   }
 
   const desired = reading.positionSeconds + offset;
-  const align = Math.abs(desired - deck.currentTime) > 0.09 ? desired : null;
+  const align =
+    reading.mode === "absolute" && Math.abs(desired - deck.currentTime) > 0.09 ? desired : null;
   deck.driveTimecode(wanted, align);
 };
 
 const listDevices = async (): Promise<void> => {
+  const previousDeviceId = deviceSelect.value;
   const devices = await navigator.mediaDevices.enumerateDevices();
   const inputs = devices.filter((device) => device.kind === "audioinput");
   deviceSelect.replaceChildren();
@@ -120,12 +173,28 @@ const listDevices = async (): Promise<void> => {
   fallback.value = "";
   fallback.textContent = "Default stereo input";
   deviceSelect.append(fallback);
+  let autoSelectedDvsId: string | null = null;
   for (const input of inputs) {
     if (!input.deviceId || input.deviceId === "default") continue;
     const option = document.createElement("option");
     option.value = input.deviceId;
-    option.textContent = input.label || `Input ${deviceSelect.options.length}`;
+    const rawLabel = input.label || `Input ${deviceSelect.options.length}`;
+    const profile = profileForDevice(rawLabel);
+    if (profile?.dvsReady) {
+      const badge = profile.dvsUpgrade ? " [DVS Upgrade]" : " [DVS Ready]";
+      option.textContent = `${rawLabel}${badge}`;
+      if (!autoSelectedDvsId) {
+        autoSelectedDvsId = input.deviceId;
+      }
+    } else {
+      option.textContent = rawLabel;
+    }
     deviceSelect.append(option);
+  }
+  if (previousDeviceId && [...deviceSelect.options].some((opt) => opt.value === previousDeviceId)) {
+    deviceSelect.value = previousDeviceId;
+  } else if (autoSelectedDvsId) {
+    deviceSelect.value = autoSelectedDvsId;
   }
 };
 
@@ -184,9 +253,19 @@ timecodeSelect.addEventListener("change", () => {
   if (context) buildTransport(context.sampleRate);
 });
 
+modeSelect?.addEventListener("change", () => {
+  const mode = currentMode();
+  transport?.setMode(mode);
+  const deck = targetDeck();
+  deck?.setPlaybackMode?.(mode === "internal" ? "INT" : mode === "relative" ? "REL" : "ABS");
+});
+
 calibrate.addEventListener("click", () => {
   const deck = targetDeck();
   if (!deck || !transport) return;
+  if (lastLeft && lastRight) {
+    transport.calibrate(lastLeft, lastRight);
+  }
   const state = transport.decoder.state;
   offset = deck.currentTime - state.positionSeconds;
   offsetReady = true;

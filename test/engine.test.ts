@@ -155,3 +155,105 @@ test("scratch rate follows hand speed and direction", () => {
   assert.equal(scratchRate(90, 0), 0);
   assert.equal(scratchRate(Number.NaN, 0.1), 0);
 });
+
+import {
+  addWarpMarker,
+  adjustBeatGridBpm,
+  beatGridToMarkers,
+  clearWarpMarkers,
+  createBeatGrid,
+  markersToBeatGrid,
+  scaleBeatGridBpm,
+  setBeatGridBpm,
+  setBeatGridLock,
+  setGridDownbeat,
+  shiftBeatGrid,
+  tapBeatGridBpm,
+  toggleBeatGridLock,
+} from "../src/renderer/engine/beatgrid.ts";
+import {
+  CustomFxStore,
+  DEFAULT_CUSTOM_FX_PRESETS,
+  FX_DEFS,
+  tapeStopRate,
+  tremoloRateHz,
+} from "../src/renderer/engine/fx.ts";
+import { channelFaderGain, crossfaderGains } from "../src/renderer/engine/mixer.ts";
+
+test("BeatGrid editor operations mutate unlocked grids and are blocked when locked", () => {
+  let grid = createBeatGrid(120, 0.1, false);
+  assert.equal(grid.bpm, 120);
+  assert.equal(grid.firstBeatSeconds, 0.1);
+  assert.equal(grid.locked, false);
+
+  grid = setGridDownbeat(grid, 0.25);
+  assert.equal(grid.firstBeatSeconds, 0.25);
+  grid = shiftBeatGrid(grid, 0.05);
+  assert.ok(Math.abs(grid.firstBeatSeconds - 0.3) < 1e-6);
+  grid = adjustBeatGridBpm(grid, 4);
+  assert.equal(grid.bpm, 124);
+  grid = scaleBeatGridBpm(grid, 0.5);
+  assert.equal(grid.bpm, 62);
+  grid = scaleBeatGridBpm(grid, 2);
+  assert.equal(grid.bpm, 124);
+  grid = addWarpMarker(grid, 2.5, 8);
+  assert.equal(grid.markers.length, 2);
+
+  // Lock prevents all mutations
+  const locked = setBeatGridLock(grid, true);
+  assert.equal(locked.locked, true);
+  assert.equal(setGridDownbeat(locked, 1.0).firstBeatSeconds, locked.firstBeatSeconds);
+  assert.equal(shiftBeatGrid(locked, 0.5).firstBeatSeconds, locked.firstBeatSeconds);
+  assert.equal(setBeatGridBpm(locked, 140).bpm, 124);
+  assert.equal(adjustBeatGridBpm(locked, 5).bpm, 124);
+  assert.equal(scaleBeatGridBpm(locked, 2).bpm, 124);
+  assert.equal(addWarpMarker(locked, 5.0).markers.length, 2);
+  assert.equal(clearWarpMarkers(locked).markers.length, 2);
+
+  const unlocked = toggleBeatGridLock(locked);
+  assert.equal(unlocked.locked, false);
+  const cleared = clearWarpMarkers(unlocked);
+  assert.equal(cleared.markers.length, 1);
+  const roundTrip = markersToBeatGrid(beatGridToMarkers(cleared), 120, 0, true);
+  assert.equal(roundTrip.bpm, 124);
+  assert.equal(roundTrip.locked, true);
+  assert.equal(tapBeatGridBpm([0, 500, 1000, 1500]), 120);
+});
+
+test("Expanded FX definitions and CustomFxStore save, update, remove, and serialize multi-slot chains", () => {
+  assert.ok(FX_DEFS.length >= 14);
+  assert.ok(FX_DEFS.some((f) => f.id === "tremolo"));
+  assert.ok(FX_DEFS.some((f) => f.id === "gate"));
+  assert.ok(FX_DEFS.some((f) => f.id === "tape-stop"));
+  assert.ok(FX_DEFS.some((f) => f.id === "combo-filter-echo"));
+  assert.equal(tremoloRateHz("1/4", 120), 2);
+  assert.ok(tapeStopRate(0) > tapeStopRate(0.8));
+
+  const store = new CustomFxStore();
+  assert.equal(store.list().length, DEFAULT_CUSTOM_FX_PRESETS.length);
+  const saved = store.save("My Riser Chain", [
+    { type: "filter", division: "1/4", amount: 0.7, wet: 0.9, enabled: true },
+    { type: "echo", division: "1/8", amount: 0.5, wet: 0.6, enabled: true },
+  ]);
+  assert.equal(saved.id, "my-riser-chain");
+  assert.equal(store.get("my-riser-chain")?.slots.length, 2);
+
+  const clone = CustomFxStore.fromJSON(store.toJSON());
+  assert.equal(clone.get("my-riser-chain")?.name, "My Riser Chain");
+  assert.equal(store.remove("my-riser-chain"), true);
+  assert.equal(store.get("my-riser-chain"), undefined);
+});
+
+test("4-deck crossfader gains, crossfader reverse (hamster), and channel fader curves", () => {
+  const normalLeft = crossfaderGains(0, "smooth", false);
+  assert.ok(normalLeft.a > 0.99 && normalLeft.c > 0.99);
+  assert.ok(normalLeft.b < 0.01 && normalLeft.d < 0.01);
+
+  const reversedLeft = crossfaderGains(0, "smooth", true);
+  assert.ok(reversedLeft.a < 0.01 && reversedLeft.c < 0.01);
+  assert.ok(reversedLeft.b > 0.99 && reversedLeft.d > 0.99);
+
+  assert.equal(channelFaderGain(0.5, "linear"), 0.5);
+  assert.ok(channelFaderGain(0.5, "log") < 0.5);
+  assert.ok(channelFaderGain(0.5, "sharp") > 0.5);
+});

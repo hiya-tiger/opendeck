@@ -8,3 +8,5 @@ renderer/analysis-worker.js
 .DS_Store
 models/
 .opendeck-stems/
+release/
+*.pdb

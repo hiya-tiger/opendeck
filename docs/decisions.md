@@ -360,3 +360,63 @@ user-configurable.
 - **[verify]** WebView2's SharedArrayBuffer/AudioWorklet combination for the
   Rust engine seam, and whether cross-origin isolation is needed in the Tauri
   build.
+
+## D25: Bidirectional Serato V2 database, text tags, and opt-in SQLite column layout
+
+**Decision:** Extend `serato-codec.ts` to decode and re-encode `database V2` `otrk` records (preserving unknown sub-chunks and mapping `tgrp` grouping, `trmx` remixer, `ulbl` track colour, `utpc` play count, `bbgl` beatgrid lock, and `bply` played flags), add `TBPM`/`TKEY` ID3v2 and FLAC/MP4 `BPM`/`INITIALKEY` text tag readers/writers alongside `Serato Markers2`/`Markers_`/`BeatGrid`, and format `container_asset_list_columns` payloads with the ASCII `0x1e` Record Separator for the opt-in SQLite layout command.
+
+**Why:** Serato DJ Pro 4 reads `TBPM`/`TKEY` and `database V2` fields when refreshing crates, while unknown `otrk` sub-chunks must survive round-trips untouched. Keeping `container_asset_list_columns` opt-in and backed up avoids touching Serato's live SQLite during normal crate exports.
+
+**Revisit:** If Serato 4 changes the `container_asset_list_columns` schema in a future release.
+
+## D26: DVS Internal, Relative, and Absolute modes with continuous drift correction
+
+**Decision:** `DvsTransport` supports `"internal" | "relative" | "absolute"` modes (`default: "absolute"` so existing DVS callers and tests see identical jump behaviour). In `"relative"` mode, needle drops shift `relativeAnchor` rather than emitting position jumps, and `computeDriftCorrection` returns a bounded rate trim (`±0.08`) to keep the PCM playhead locked to the vinyl phase without audible pitch warble.
+
+**Why:** Turntablists use Relative mode so cueing and looping work inside the software while the control vinyl governs speed and direction; Absolute mode preserves 1:1 needle-drop seeking.
+
+**Revisit:** When DVS moves into the native Rust audio thread.
+
+## D27: Independent pitch shift (semitones) on `PcmSource` and `Deck`
+
+**Decision:** `PcmSource` adds `pitchShiftSemitones` (`-12` to `+12`) summed into `semitones()` for `signalsmith-stretch` (and converted to `2^(semitones/12)` rate scaling on the fallback worklet). `Deck` exposes `setPitchShift`, `shiftKeySemitones`, and `resetKeyShift` across both main PCM and separated stem voices.
+
+**Why:** Harmonic mixing requires transposing key independently of tempo while key lock is active, and shifting all four separated stem voices in lockstep keeps stems in tune.
+
+**Revisit:** No.
+
+## D28: Return-Mode (Slip), Reverse-on-Hold (Censor), and Instant-Doubles on `Deck`
+
+**Decision:** `Deck` tracks a virtual forward timeline (`slipEntryPos`, `slipEntryMs`, `slipEntryRate`) using `rollingReleasePosition` when `returnMode` (`SLIP`) is active across hot-cue holds, platter scratches, and loop rolls. `beginReverseOnHold` / `endReverseOnHold` (`CENSOR`) reverses playback while advancing the ghost timeline forward and snaps to `censorReleasePosition` on release. `cloneFrom(other)` copies the decoded `AudioBuffer`, playhead sample, rate, keylock, pitchShift, cues, loops, and beatgrid to the target deck without re-decoding.
+
+**Why:** Slip, Censor, and Instant-Doubles are core performance primitives that should work identically on 2 or 4 decks without re-reading disk files.
+
+**Revisit:** No.
+
+## D29: Editable Beatgrid with lock enforcement
+
+**Decision:** `beatgrid.ts` provides `EditableBeatGrid` and pure helpers (`setBeatGridLock`, `setGridDownbeat`, `shiftBeatGrid`, `setBeatGridBpm`, `adjustBeatGridBpm`, `scaleBeatGridBpm`, `addWarpMarker`, `tapBeatGridBpm`, `beatGridToMarkers`, `markersToBeatGrid`). When `grid.locked` (`bbgl` / `Markers2.bpmLocked`) is `true`, all mutation helpers and `Deck` grid methods (`setBpm`, `shiftGrid`, `scaleGridBpm`, `adjustGridBpm`, `setGridDownbeatHere`, `tapGridBpm`) are no-ops.
+
+**Why:** Prevents accidental BPM or downbeat overwrites on tracks whose beatgrids have been manually verified and locked.
+
+**Revisit:** No.
+
+## D30: 4-Deck Mixer & Workspace, Playlists, Smart Crates, and Custom FX Presets
+
+**Decision:** `DeckId` widens to `"A" | "B" | "C" | "D"` with per-deck crossfader assignment (`"A" | "B" | "THRU"`), Hamster reverse (`crossfaderReverse`), booth output gain, and channel fader curves in `Mixer`. `Library` adds `PlaylistStore`, rule-based `LivePlaylistStore` (Smart Crates), 6-colour Serato track badges, and `playCount` sorting. `fx.ts` adds `tremolo`, `gate`, `tape-stop`, `brake`, `combo-filter-echo`, and `CustomFxStore` presets.
+
+**Why:** Completes the remaining Phase 4 & Phase 6 parity items additively while keeping the 2-deck default view clean.
+
+**Revisit:** When multi-insert Web Audio FX routing is expanded to run all 3 custom FX slots simultaneously in series.
+
+## D31: 195-Device Hardware Catalogue, 4-Deck MIDI Targets, and DVS Interface Auto-Recognition
+
+**Decision:** `src/renderer/midi/profiles.ts` exports `SUPPORTED_HARDWARE_RAW` (195 verbatim device strings), `HARDWARE_CATALOGUE` (195 typed entries across `controller-2deck`, `controller-4deck`, `mixer-dvs`, `dvs-interface`, `media-player`, and `accessory`), and `DEVICE_PROFILES` sorted by model specificity so longer suffixes (`CDJ-3000X`, `CDJ-2000NXS2`, `DDJ-SB3`, `DJM-V10-LF`, `PRIME 4+`, `SC6000M PRIME`, `Inpulse 200 MK3`, `Mixstream Pro Go`, `Party Mix II/Live/Pro`, `Reloop Flux Go`, `RP8000 MK2`, `TR-8S`) match before shorter prefix models. `profileForDevice(name)` normalizes trailing ` .` DVS-upgrade suffixes and matches full vendor names, vendor-stripped USB MIDI/Audio descriptors, and hyphen/space variants while preserving all existing `Hercules DJControl T10` and `Numark Party Mix III` bindings. `src/renderer/app.ts` expands `MIDI_TARGETS` and `midiInputFor` to all four decks (`A..D`, `mix.chC`, `mix.chD`) and auto-enables 4-deck mode when a 4-deck controller is detected. `src/renderer/dvs-panel.ts` badges recognized DVS mixers and interfaces with `[DVS Ready]` or `[DVS Upgrade]` and auto-selects the first detected DVS input.
+
+**Why:** Provides out-of-the-box MIDI and DVS hardware recognition across the complete 195-device Serato hardware matrix without breaking existing learned mappings or test assertions.
+
+**Revisit:** When vendor-specific HID platter/display feedback reports are added for CDJ/RANE motorized decks.
+
+### D32: Phase 7 Video Mixing & Secondary Fullscreen Output Window (2026-10-24)
+- **Context:** Phase 7 specifies one video file per deck position-locked to that deck's transport (play, pause, seek, reverse, and scratch follow), an independent video crossfader, `fit`/`fill` scaling, optional video FX, and a second fullscreen output window.
+- **Decision:** Implemented `src/renderer/engine/video-mixer.ts` (`VideoMixer`, `computeVideoSyncTarget`, `shouldResyncVideoElement`, `computeVideoCrossfaderWeights`, `computeAspectRect`, `formatVideoCssFilter`), `renderer/video-output.html`, and Electron IPC (`video:open-output`, `video:close-output`, `video:fullscreen-output`, `video:sync-output`) in `src/main/main.ts` and `src/preload/preload.ts`. Because HTML5 `<video>` elements do not support negative `playbackRate`, reverse playback (`rate < 0` / Censor) and active platter/DVS scratch step `currentTime` directly on every frame while forward playback uses native `playbackRate` with a 45 ms drift resync window.

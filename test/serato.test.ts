@@ -397,3 +397,91 @@ test("Serato export writes database, neworder and relative crate paths", () => {
 
   assert.deepEqual(decodeNeworder(result.files.get("_Serato_/neworder.pref")!), ["Peak_Time", "Warmup"]);
 });
+import {
+  SQLITE_COLUMN_SEPARATOR,
+  SQLITE_COLUMN_TABLE,
+  colorHexToU32,
+  colorU32ToHex,
+  decodeDatabaseTracks,
+  decodeSqliteColumnList,
+  encodeSqliteColumnList,
+} from "../src/renderer/media/serato-codec.ts";
+import { readId3TextMeta } from "../src/renderer/media/serato-id3.ts";
+
+test("database V2 round-trip preserves utpc playCount, ulbl track color, bbgl lock, and unknown otrk chunks", () => {
+  const customExtra = { tag: "txyz", payload: new Uint8Array([0xde, 0xad, 0xbe, 0xef]) };
+  const dbBytes = encodeDatabase([
+    {
+      path: "Music/Sub/TrackOne.wav",
+      type: seratoType("Music/Sub/TrackOne.wav"),
+      title: "Track One",
+      artist: "Artist A",
+      bpm: "128.00",
+      key: "8A",
+      grouping: "Mainstage",
+      playCount: 17,
+      color: "#99FF99",
+      beatgridLocked: true,
+      extraChunks: [customExtra],
+    },
+  ]);
+
+  const decoded = decodeDatabaseTracks(dbBytes);
+  assert.equal(decoded.tracks.length, 1);
+  const t = decoded.tracks[0]!;
+  assert.equal(t.type, "wave");
+  assert.equal(t.title, "Track One");
+  assert.equal(t.bpm, "128.00");
+  assert.equal(t.key, "8A");
+  assert.equal(t.grouping, "Mainstage");
+  assert.equal(t.utpc, 17);
+  assert.equal(t.playCount, 17);
+  assert.equal(t.color, "#99FF99");
+  assert.equal(t.ulbl, colorHexToU32("#99FF99"));
+  assert.equal(colorU32ToHex(t.ulbl), "#99FF99");
+  assert.equal(t.beatgridLocked, true);
+  assert.equal(t.played, true);
+  assert.equal(t.extraChunks?.length, 1);
+  assert.equal(t.extraChunks?.[0]?.tag, "txyz");
+  assert.deepEqual(Array.from(t.extraChunks?.[0]?.payload ?? []), [0xde, 0xad, 0xbe, 0xef]);
+
+  const reencoded = encodeDatabase(decoded.tracks);
+  assert.deepEqual(Array.from(reencoded), Array.from(dbBytes));
+});
+
+test("SQLite container_asset_list_columns table literal and 0x1e column list codec", () => {
+  assert.equal(SQLITE_COLUMN_TABLE, "container_asset_list_columns");
+  assert.equal(SQLITE_COLUMN_SEPARATOR, "\x1e");
+  const encoded = encodeSqliteColumnList([{ name: "song" }, "artist", { name: "bpm" }, "key", "playCount"]);
+  assert.equal(encoded, "song\x1eartist\x1ebpm\x1ekey\x1eplayCount");
+  assert.deepEqual(decodeSqliteColumnList(encoded), ["song", "artist", "bpm", "key", "playCount"]);
+});
+
+test("ID3 TBPM and TKEY text frames round-trip alongside Serato GEOB frames", () => {
+  const audio = new Uint8Array([0xff, 0xfb, 0x90, 0x64, 1, 2, 3, 4]);
+  const grid = encodeBeatGrid([{ position: 0.1, bpm: 126.5 }]);
+  const tagged = writeSeratoGeoB(
+    audio,
+    [{ description: "Serato BeatGrid", data: grid }],
+    512,
+    { bpm: 126.5, key: "5A", title: "Night Drive", artist: "DJ Test" },
+  );
+  const textMeta = readId3TextMeta(tagged);
+  assert.equal(textMeta.bpm, 126.5);
+  assert.equal(textMeta.key, "5A");
+  assert.equal(textMeta.title, "Night Drive");
+  assert.equal(textMeta.artist, "DJ Test");
+
+  const geobs = readSeratoGeoB(tagged);
+  assert.ok(geobs.has("Serato BeatGrid"));
+  const updated = writeSeratoGeoB(
+    tagged,
+    [{ description: "Serato BeatGrid", data: grid }],
+    512,
+    { bpm: 130, key: "6A" },
+  );
+  const updatedMeta = readId3TextMeta(updated);
+  assert.equal(updatedMeta.bpm, 130);
+  assert.equal(updatedMeta.key, "6A");
+  assert.equal(updatedMeta.title, "Night Drive");
+});

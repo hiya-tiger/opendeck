@@ -11,6 +11,13 @@ export interface Id3Tag {
   padding: number;
 }
 
+export interface SeratoTextMeta {
+  bpm?: number | string;
+  key?: string;
+  title?: string;
+  artist?: string;
+}
+
 function synchsafeDecode(bytes: Uint8Array, offset: number): number {
   return (
     ((bytes[offset] & 0x7f) << 21) |
@@ -56,6 +63,55 @@ function readNull(bytes: Uint8Array, offset: number): { value: string; next: num
   let value = "";
   for (let i = offset; i < end; i += 1) value += String.fromCharCode(bytes[i]);
   return { value, next: Math.min(bytes.length, end + 1) };
+}
+
+export function decodeId3Text(data: Uint8Array): string {
+  if (data.length === 0) return "";
+  const encoding = data[0];
+  const body = data.subarray(1);
+  let text = "";
+  if (encoding === 0 || encoding === 3) {
+    text = new TextDecoder(encoding === 3 ? "utf-8" : "latin1").decode(body);
+  } else if (encoding === 1) {
+    const le = body.length >= 2 && body[0] === 0xff && body[1] === 0xfe;
+    const start = body.length >= 2 && ((body[0] === 0xff && body[1] === 0xfe) || (body[0] === 0xfe && body[1] === 0xff)) ? 2 : 0;
+    text = new TextDecoder(le ? "utf-16le" : "utf-16be").decode(body.subarray(start));
+  } else if (encoding === 2) {
+    text = new TextDecoder("utf-16be").decode(body);
+  }
+  return text.replace(/\0+$/g, "").trim();
+}
+
+export function encodeId3Text(value: string): Uint8Array {
+  const encoded = new TextEncoder().encode(value);
+  const out = new Uint8Array(1 + encoded.length);
+  out[0] = 0; // Latin-1 / ASCII compatible
+  out.set(encoded, 1);
+  return out;
+}
+
+export function readId3TextMeta(bytes: Uint8Array): { bpm?: number; bpmText?: string; key?: string; title?: string; artist?: string } {
+  const tag = readId3(bytes);
+  if (!tag) return {};
+  const out: { bpm?: number; bpmText?: string; key?: string; title?: string; artist?: string } = {};
+  for (const frame of tag.frames) {
+    if (frame.id === "TBPM") {
+      const text = decodeId3Text(frame.data);
+      const parsed = Number.parseFloat(text);
+      if (text) out.bpmText = text;
+      if (Number.isFinite(parsed) && parsed > 0) out.bpm = parsed;
+    } else if (frame.id === "TKEY") {
+      const text = decodeId3Text(frame.data);
+      if (text) out.key = text;
+    } else if (frame.id === "TIT2") {
+      const text = decodeId3Text(frame.data);
+      if (text) out.title = text;
+    } else if (frame.id === "TPE1") {
+      const text = decodeId3Text(frame.data);
+      if (text) out.artist = text;
+    }
+  }
+  return out;
 }
 
 export interface GeoBFrame {
@@ -122,17 +178,43 @@ function concat(parts: Uint8Array[]): Uint8Array {
 export function writeSeratoGeoB(
   bytes: Uint8Array,
   updates: Array<{ description: string; data: Uint8Array }>,
-  padding = 1024,
+  paddingOrMeta: number | SeratoTextMeta = 1024,
+  maybeMeta?: SeratoTextMeta,
 ): Uint8Array {
+  const padding = typeof paddingOrMeta === "number" ? paddingOrMeta : 1024;
+  const meta = typeof paddingOrMeta === "object" && paddingOrMeta !== null ? paddingOrMeta : maybeMeta;
   const tag = readId3(bytes);
   const version = tag?.version ?? 3;
   const existing = tag?.frames ?? [];
   const replaced = new Set(updates.map((update) => update.description));
+  const textUpdates = new Map<string, string>();
+  if (meta?.bpm !== undefined && meta.bpm !== "" && meta.bpm !== 0) {
+    const val = typeof meta.bpm === "number" ? meta.bpm.toFixed(2).replace(/\.00$/, "") : String(meta.bpm).trim();
+    if (val) textUpdates.set("TBPM", val);
+  }
+  if (meta?.key !== undefined && meta.key.trim() !== "" && meta.key.trim() !== "--") {
+    textUpdates.set("TKEY", meta.key.trim());
+  }
+  if (meta?.title !== undefined && meta.title.trim() !== "") {
+    textUpdates.set("TIT2", meta.title.trim());
+  }
+  if (meta?.artist !== undefined && meta.artist.trim() !== "") {
+    textUpdates.set("TPE1", meta.artist.trim());
+  }
+
   const frames = existing.filter((frame) => {
+    if (textUpdates.has(frame.id)) return false;
     if (frame.id !== "GEOB") return true;
     const geob = parseGeoB(frame.data);
     return !replaced.has(geob.description);
   });
+  for (const [id, text] of textUpdates) {
+    frames.push({
+      id,
+      flags: new Uint8Array([0, 0]),
+      data: encodeId3Text(text),
+    });
+  }
   for (const update of updates) {
     frames.push({
       id: "GEOB",

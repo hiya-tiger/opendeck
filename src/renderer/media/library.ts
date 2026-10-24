@@ -1,10 +1,14 @@
 import { formatTime, type BandPeaks } from "../engine/analyze.ts";
 import { baseName } from "./serato.ts";
 import {
+  LivePlaylistStore,
   PlayedLog,
+  PlaylistStore,
   Scratchpad,
+  cycleTrackColor,
   filterTracks,
   sortTracks,
+  type LivePlaylistRule,
   type TrackSortKey,
 } from "./library-ux.ts";
 
@@ -30,6 +34,16 @@ export interface Track {
   missing: boolean;
   queued: boolean;
   crate: string;
+  crates?: string[];
+  color?: string;
+  playCount?: number;
+  artist?: string;
+  album?: string;
+  genre?: string;
+  comment?: string;
+  grouping?: string;
+  remixer?: string;
+  beatgridLocked?: boolean;
 }
 
 export const AUDIO_ACCEPT =
@@ -61,6 +75,9 @@ export function trackFromFile(file: File): Track {
     missing: false,
     queued: false,
     crate: "",
+    color: "",
+    playCount: 0,
+    beatgridLocked: false,
   };
 }
 
@@ -85,13 +102,19 @@ export function trackFromCrate(entry: { path: string; name: string }, crate: str
     missing: true,
     queued: false,
     crate,
+    crates: crate ? [crate] : [],
+    color: "",
+    playCount: 0,
+    beatgridLocked: false,
   };
 }
+
+export type LibraryDeckId = "A" | "B" | "C" | "D";
 
 interface LibraryElements {
   listEl: HTMLElement;
   countEl: HTMLElement;
-  onLoad: (track: Track, deck: "A" | "B") => void;
+  onLoad: (track: Track, deck: LibraryDeckId) => void;
   onQueue: (track: Track) => void;
 }
 
@@ -104,23 +127,100 @@ interface LibraryRow {
   length: HTMLTableCellElement;
   actions: HTMLTableCellElement;
   buttons: HTMLButtonElement[];
+  colorBtn: HTMLButtonElement;
   scratch: HTMLButtonElement;
 }
+
+const STORAGE_PLAYLISTS_KEY = "opendeck.playlists.v1";
+const STORAGE_LIVE_PLAYLISTS_KEY = "opendeck.livePlaylists.v1";
+const STORAGE_TRACK_META_KEY = "opendeck.trackMeta.v1";
 
 export class Library {
   tracks: Track[] = [];
   filter = "";
   crateName = "";
+  activeView = "all"; // "all" | "crate:<name>" | "playlist:<id>" | "live:<id>"
+  colorFilter = "";
   sortKey: TrackSortKey = "title";
   sortDirection: "asc" | "desc" = "asc";
   scratchOnly = false;
+  fourDeckMode = false;
   readonly playedLog = new PlayedLog();
   readonly scratchpad = new Scratchpad();
+  readonly playlists: PlaylistStore;
+  readonly livePlaylists: LivePlaylistStore;
   private elements: LibraryElements;
   private rows = new Map<string, LibraryRow>();
+  private persistedMeta = new Map<string, { color?: string; playCount?: number; beatgridLocked?: boolean }>();
 
   constructor(elements: LibraryElements) {
     this.elements = elements;
+    this.playlists = this.loadPlaylists();
+    this.livePlaylists = this.loadLivePlaylists();
+    this.loadPersistedTrackMeta();
+  }
+
+  private loadPlaylists(): PlaylistStore {
+    try {
+      const raw = globalThis.localStorage?.getItem(STORAGE_PLAYLISTS_KEY);
+      if (raw) return PlaylistStore.fromJSON(JSON.parse(raw));
+    } catch {
+      // ignore storage errors
+    }
+    return new PlaylistStore();
+  }
+
+  private loadLivePlaylists(): LivePlaylistStore {
+    try {
+      const raw = globalThis.localStorage?.getItem(STORAGE_LIVE_PLAYLISTS_KEY);
+      if (raw) return LivePlaylistStore.fromJSON(JSON.parse(raw));
+    } catch {
+      // ignore storage errors
+    }
+    return new LivePlaylistStore();
+  }
+
+  private loadPersistedTrackMeta(): void {
+    try {
+      const raw = globalThis.localStorage?.getItem(STORAGE_TRACK_META_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, { color?: string; playCount?: number; beatgridLocked?: boolean }>;
+      for (const [k, v] of Object.entries(parsed)) {
+        this.persistedMeta.set(k, v);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  saveStores(): void {
+    try {
+      globalThis.localStorage?.setItem(STORAGE_PLAYLISTS_KEY, JSON.stringify(this.playlists.toJSON()));
+      globalThis.localStorage?.setItem(STORAGE_LIVE_PLAYLISTS_KEY, JSON.stringify(this.livePlaylists.toJSON()));
+      const metaObj: Record<string, { color?: string; playCount?: number; beatgridLocked?: boolean }> = {};
+      for (const track of this.tracks) {
+        if (track.color || (track.playCount ?? 0) > 0 || track.beatgridLocked) {
+          metaObj[track.path || track.id] = {
+            color: track.color,
+            playCount: track.playCount,
+            beatgridLocked: track.beatgridLocked,
+          };
+        }
+      }
+      globalThis.localStorage?.setItem(STORAGE_TRACK_META_KEY, JSON.stringify(metaObj));
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  private applyPersistedMeta(track: Track): void {
+    const saved = this.persistedMeta.get(track.path) ?? this.persistedMeta.get(track.id);
+    if (!saved) return;
+    if (saved.color && !track.color) track.color = saved.color;
+    if (typeof saved.playCount === "number" && !track.playCount) track.playCount = saved.playCount;
+    if (saved.beatgridLocked !== undefined && track.beatgridLocked === undefined) {
+      track.beatgridLocked = saved.beatgridLocked;
+    }
   }
 
   addFiles(files: FileList | File[]): Track[] {
@@ -128,6 +228,7 @@ export class Library {
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("audio/") && !AUDIO_RE.test(file.name)) continue;
       const track = trackFromFile(file);
+      this.applyPersistedMeta(track);
       if (this.tracks.some((existing) => existing.id === track.id)) continue;
       this.tracks.push(track);
       added.push(track);
@@ -137,13 +238,21 @@ export class Library {
   }
 
   addCrate(crateName: string, entries: { path: string; name: string }[]): Track[] {
-    const existing = new Set(this.tracks.map((track) => baseName(track.path).toLowerCase()));
+    const existingByBase = new Map(this.tracks.map((track) => [baseName(track.path).toLowerCase(), track]));
     const added: Track[] = [];
     for (const entry of entries) {
       const key = baseName(entry.name).toLowerCase();
-      if (existing.has(key)) continue;
-      existing.add(key);
+      const found = existingByBase.get(key);
+      if (found) {
+        if (!found.crate) found.crate = crateName;
+        const crates = new Set(found.crates ?? (found.crate ? [found.crate] : []));
+        crates.add(crateName);
+        found.crates = [...crates];
+        continue;
+      }
       const track = trackFromCrate(entry, crateName);
+      this.applyPersistedMeta(track);
+      existingByBase.set(key, track);
       this.tracks.push(track);
       added.push(track);
     }
@@ -172,7 +281,17 @@ export class Library {
   }
 
   addStreamTrack(track: Omit<Track, "source" | "file" | "missing" | "queued" | "crate" | "artwork">): Track {
-    const full: Track = { ...track, source: "stream", file: null, missing: false, queued: false, crate: "", artwork: null };
+    const full: Track = {
+      ...track,
+      source: "stream",
+      file: null,
+      missing: false,
+      queued: false,
+      crate: "",
+      artwork: null,
+      color: track.color ?? "",
+      playCount: track.playCount ?? 0,
+    };
     this.tracks.push(full);
     this.render();
     return full;
@@ -180,11 +299,27 @@ export class Library {
 
   setMeta(track: Track, meta: Partial<Track>): void {
     Object.assign(track, meta, { analyzed: true });
+    this.saveStores();
     this.render();
   }
 
   setFilter(value: string): void {
     this.filter = value.trim();
+    this.render();
+  }
+
+  setActiveView(view: string): void {
+    this.activeView = view || "all";
+    this.render();
+  }
+
+  setColorFilter(color: string): void {
+    this.colorFilter = color.trim();
+    this.render();
+  }
+
+  setFourDeckMode(enabled: boolean): void {
+    this.fourDeckMode = enabled;
     this.render();
   }
 
@@ -205,7 +340,47 @@ export class Library {
     this.render();
   }
 
+  setTrackColor(trackId: string, color: string): void {
+    const track = this.find(trackId);
+    if (!track) return;
+    track.color = color;
+    this.saveStores();
+    this.render();
+  }
+
+  cycleColor(track: Track): void {
+    track.color = cycleTrackColor(track.color);
+    this.saveStores();
+    this.render();
+  }
+
+  createPlaylist(name: string, trackIds: string[] = []): string {
+    const created = this.playlists.create(name, trackIds);
+    this.saveStores();
+    this.render();
+    return created.id;
+  }
+
+  createLivePlaylist(name: string, rules: LivePlaylistRule[], match: "all" | "any" = "all"): string {
+    const created = this.livePlaylists.create(name, rules, match);
+    this.saveStores();
+    this.render();
+    return created.id;
+  }
+
+  crates(): string[] {
+    const set = new Set<string>();
+    for (const track of this.tracks) {
+      if (track.crate) set.add(track.crate);
+      for (const c of track.crates ?? []) {
+        if (c) set.add(c);
+      }
+    }
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }
+
   recordPlay(track: Track, startedAt = new Date().toISOString()): void {
+    track.playCount = (track.playCount ?? 0) + 1;
     this.playedLog.add({
       trackId: track.id,
       name: track.name,
@@ -216,6 +391,8 @@ export class Library {
       startedAt,
       duration: track.duration,
     });
+    this.saveStores();
+    this.render();
   }
 
   get missingCount(): number {
@@ -227,7 +404,28 @@ export class Library {
   }
 
   visible(): Track[] {
-    const filtered = filterTracks(this.tracks, this.filter);
+    let base: Track[] = this.tracks;
+    if (this.activeView.startsWith("crate:")) {
+      const targetCrate = this.activeView.slice("crate:".length);
+      base = base.filter((t) => t.crate === targetCrate || (t.crates?.includes(targetCrate) ?? false));
+    } else if (this.activeView.startsWith("playlist:")) {
+      const plId = this.activeView.slice("playlist:".length);
+      const pl = this.playlists.get(plId);
+      if (pl) {
+        const byId = new Map(base.map((t) => [t.id, t]));
+        base = pl.trackIds.map((id) => byId.get(id)).filter((t): t is Track => Boolean(t));
+      }
+    } else if (this.activeView.startsWith("live:")) {
+      const liveId = this.activeView.slice("live:".length);
+      base = this.livePlaylists.evaluate(liveId, base);
+    }
+
+    if (this.colorFilter) {
+      const targetColor = this.colorFilter.toUpperCase();
+      base = base.filter((t) => (t.color ?? "").toUpperCase() === targetColor);
+    }
+
+    const filtered = filterTracks(base, this.filter);
     const scoped = this.scratchOnly
       ? filtered.filter((track) => this.scratchpad.has(track.id))
       : filtered;
@@ -249,10 +447,10 @@ export class Library {
     const actions = document.createElement("td");
     actions.className = "load-btns";
     const buttons: HTMLButtonElement[] = [];
-    for (const deckId of ["A", "B"] as const) {
+    for (const deckId of ["A", "B", "C", "D"] as const) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "mini";
+      button.className = `mini deck-load-btn deck-load-${deckId.toLowerCase()}`;
       button.textContent = deckId;
       button.addEventListener("click", () => {
         if (!track.missing) this.elements.onLoad(track, deckId);
@@ -260,6 +458,13 @@ export class Library {
       buttons.push(button);
       actions.append(button);
     }
+    const colorBtn = document.createElement("button");
+    colorBtn.type = "button";
+    colorBtn.className = "mini track-color-btn";
+    colorBtn.textContent = "●";
+    colorBtn.title = "Cycle track colour";
+    colorBtn.addEventListener("click", () => this.cycleColor(track));
+
     const queueButton = document.createElement("button");
     queueButton.type = "button";
     queueButton.className = "mini";
@@ -270,26 +475,38 @@ export class Library {
     scratch.type = "button";
     scratch.className = "mini scratch-toggle";
     scratch.addEventListener("click", () => this.toggleScratchpad(track));
-    actions.append(queueButton, scratch);
+    actions.append(colorBtn, queueButton, scratch);
     row.addEventListener("dblclick", () => {
       if (!track.missing) this.elements.onLoad(track, "A");
     });
     row.append(num, title, bpm, key, length, actions);
-    return { row, num, title, bpm, key, length, actions, buttons, scratch };
+    return { row, num, title, bpm, key, length, actions, buttons, colorBtn, scratch };
   }
 
   private updateRow(entry: LibraryRow, track: Track, position: number): void {
     entry.row.className = track.missing ? "missing" : "";
+    if (track.color) {
+      entry.row.style.borderLeft = `3px solid ${track.color}`;
+      entry.colorBtn.style.color = track.color;
+    } else {
+      entry.row.style.borderLeft = "";
+      entry.colorBtn.style.color = "";
+    }
     entry.num.textContent = String(position);
-    entry.title.textContent = track.name;
+    const plays = track.playCount && track.playCount > 0 ? ` (${track.playCount}×)` : "";
+    entry.title.textContent = `${track.name}${plays}`;
     entry.title.title = track.path || track.name;
     entry.bpm.textContent = track.bpm ? track.bpm.toFixed(1) : "--";
     entry.key.textContent = track.key === "--" ? "--" : `${track.camelot} ${track.key}`;
     entry.length.textContent = track.duration ? formatTime(track.duration) : "--:--";
+    const deckIds: LibraryDeckId[] = ["A", "B", "C", "D"];
     for (const [index, button] of entry.buttons.entries()) {
-      const deckId = index === 0 ? "A" : "B";
+      const deckId = deckIds[index] ?? "A";
       button.title = track.missing ? "File not linked: link the music folder first" : `Load into deck ${deckId}`;
       button.disabled = Boolean(track.missing) || (!track.file && !track.url);
+      if (deckId === "C" || deckId === "D") {
+        button.hidden = !this.fourDeckMode;
+      }
     }
     const starred = this.scratchpad.has(track.id);
     entry.scratch.textContent = starred ? "S*" : "S";
@@ -324,9 +541,9 @@ export class Library {
 
     const parts = [`${this.tracks.length} track${this.tracks.length === 1 ? "" : "s"}`];
     if (this.crateName) parts.push(this.crateName);
+    if (this.activeView !== "all") parts.push(`${visible.length} shown`);
     if (this.scratchOnly) parts.push(`${visible.length} in scratchpad`);
     if (this.missingCount) parts.push(`${this.missingCount} unlinked`);
     this.elements.countEl.textContent = parts.join(" · ");
   }
 }
-

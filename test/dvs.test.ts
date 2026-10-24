@@ -92,3 +92,46 @@ test("offset shifts reported position", () => {
   }
   assert.ok(Math.abs(reading.positionSeconds - 14) < 0.4, `position ${reading.positionSeconds}`);
 });
+
+test("DvsTransport calibrates RMS gain and phase balance from stereo signal", () => {
+  const def = findTimecode("serato-2a")!;
+  const signal = renderSignal(def, { seconds: 1, startBit: 4000, gain: 0.175 }, RATE);
+  const transport = new DvsTransport(def, RATE);
+  const cal = transport.calibrate(signal.left, signal.right);
+  assert.ok(cal.rms > 0.05 && cal.rms < 0.35, `rms ${cal.rms}`);
+  assert.ok(cal.calibratedGain > 1.2 && cal.calibratedGain <= 8, `gain ${cal.calibratedGain}`);
+  assert.ok(cal.phaseBalance > 0.5 && cal.phaseBalance <= 1.0, `phaseBalance ${cal.phaseBalance}`);
+});
+
+test("DvsTransport supports internal, relative, and absolute modes and continuous drift correction", () => {
+  const def = findTimecode("serato-2a")!;
+  const first = renderSignal(def, { seconds: 1.5, startBit: 4000 }, RATE);
+  const second = renderSignal(def, { seconds: 1.5, startBit: 200000 }, RATE);
+  const transport = new DvsTransport(def, RATE, { mode: "relative" });
+  assert.equal(transport.mode, "relative");
+
+  let reading = transport.push(new Float32Array(480), new Float32Array(480));
+  for (let o = 0; o < first.left.length; o += 480) {
+    reading = transport.push(first.left.subarray(o, o + 480), first.right.subarray(o, o + 480));
+  }
+  const posBeforeDrop = reading.positionSeconds;
+  assert.equal(reading.status, "locked");
+
+  // In relative mode, a needle drop adjusts relativeAnchor instead of emitting a jump
+  for (let o = 0; o < second.left.length; o += 480) {
+    reading = transport.push(second.left.subarray(o, o + 480), second.right.subarray(o, o + 480));
+    assert.equal(reading.jump, null);
+  }
+  assert.ok(reading.positionSeconds > posBeforeDrop, `relative pos advanced smoothly: ${reading.positionSeconds}`);
+
+  // Drift correction returns bounded proportional rate adjustment when slightly behind/ahead
+  const corr = transport.computeDriftCorrection(reading.positionSeconds - 0.05);
+  assert.ok(corr > 0 && corr <= 0.08, `drift correction ${corr}`);
+
+  // Internal mode ignores timecode lock and reports 0 drift correction
+  transport.setMode("internal");
+  assert.equal(transport.getMode(), "internal");
+  assert.equal(transport.computeDriftCorrection(0), 0);
+  const internalReading = transport.push(second.left.subarray(0, 480), second.right.subarray(0, 480));
+  assert.equal(internalReading.status, "idle");
+});

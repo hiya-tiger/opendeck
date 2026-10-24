@@ -1,13 +1,20 @@
-﻿import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
-import { isSeratoRunning, undoLastSeratoWrite, writeSeratoTags, type SeratoWriteRequest } from "./serato-files.ts";
+import {
+  isSeratoRunning,
+  undoLastSeratoWrite,
+  writeSeratoLibraryExport,
+  writeSeratoSqliteColumns,
+  writeSeratoTags,
+  type SeratoLibraryExportRequest,
+  type SeratoSqliteColumnsRequest,
+  type SeratoWriteRequest,
+} from "./serato-files.ts";
 import { MODEL, findCache, installModel, loadManifestAt, modelInfo, readCache, separateToCache, type SeparateRequest } from "./separation.ts";
 
 const root = (): string => app.getAppPath();
-
-
 
 const ALLOWED_HOSTS = [
   "music.youtube.com",
@@ -21,6 +28,7 @@ const ALLOWED_HOSTS = [
 ];
 
 let mainWindow: BrowserWindow | null = null;
+let videoOutputWindow: BrowserWindow | null = null;
 const providerWindows = new Map<string, BrowserWindow>();
 let rtmp: ChildProcessWithoutNullStreams | null = null;
 let rtmpKey = "";
@@ -167,14 +175,17 @@ ipcMain.handle("media:fetch", async (_event, url: string) => {
 });
 
 ipcMain.handle("recording:save", async (_event, name: string, bytes: Uint8Array) => {
-  const result = await dialog.showSaveDialog(mainWindow ?? undefined, {
+  const saveOpts: Electron.SaveDialogOptions = {
     title: "Save mix",
     defaultPath: path.join(app.getPath("music"), name),
     filters: [
       { name: "WebM audio", extensions: ["webm"] },
       { name: "All files", extensions: ["*"] },
     ],
-  });
+  };
+  const result = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, saveOpts)
+    : await dialog.showSaveDialog(saveOpts);
   if (result.canceled || !result.filePath) return { ok: false };
   await fs.writeFile(result.filePath, Buffer.from(bytes));
   return { ok: true, path: result.filePath };
@@ -289,21 +300,154 @@ ipcMain.handle("serato:write-tags", async (_event, request: SeratoWriteRequest) 
   if (!request || !Array.isArray(request.tracks)) {
     return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Invalid tag write request." };
   }
-  let root = typeof request.root === "string" ? request.root : null;
-  if (!root && request.tracks.some((track) => !path.isAbsolute(track.path))) {
-    const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
+  let rootDir = typeof request.root === "string" ? request.root : null;
+  if (!rootDir && request.tracks.some((track) => !path.isAbsolute(track.path))) {
+    const openOpts: Electron.OpenDialogOptions = {
       title: "Choose the music folder that contains these tracks",
       properties: ["openDirectory"],
-    });
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, openOpts)
+      : await dialog.showOpenDialog(openOpts);
     if (result.canceled || !result.filePaths[0]) {
       return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Tag write cancelled." };
     }
-    root = result.filePaths[0];
+    rootDir = result.filePaths[0];
   }
-  return writeSeratoTags({ root, tracks: request.tracks.slice(0, 5000) });
+  return writeSeratoTags({ root: rootDir, tracks: request.tracks.slice(0, 5000) });
 });
 
+const handleExportLibrary = async (
+  _event: unknown,
+  request: Partial<SeratoLibraryExportRequest>,
+) => {
+  if (!request || !request.files) {
+    return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Invalid library export request." };
+  }
+  let rootDir = typeof request.rootDir === "string" ? request.rootDir : "";
+  if (!rootDir) {
+    const openOpts: Electron.OpenDialogOptions = {
+      title: "Choose folder for _Serato_ library export",
+      properties: ["openDirectory", "createDirectory"],
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, openOpts)
+      : await dialog.showOpenDialog(openOpts);
+    if (result.canceled || !result.filePaths[0]) {
+      return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Library export cancelled." };
+    }
+    rootDir = result.filePaths[0];
+  }
+  return writeSeratoLibraryExport({ rootDir, files: request.files });
+};
+
+ipcMain.handle("serato:export-library", handleExportLibrary);
+ipcMain.handle("serato:write-library", handleExportLibrary);
+
+const handleSqliteColumns = async (
+  _event: unknown,
+  request: Partial<SeratoSqliteColumnsRequest>,
+) => {
+  if (!request || !Array.isArray(request.columns)) {
+    return { ok: false, written: 0, skipped: 0, undoId: null, detail: "Invalid SQLite column request." };
+  }
+  let sqlitePath = typeof request.sqlitePath === "string" ? request.sqlitePath : "";
+  if (!sqlitePath) {
+    const openOpts: Electron.OpenDialogOptions = {
+      title: "Choose Serato master.sqlite / Serato Library.sqlite database",
+      properties: ["openFile"],
+      filters: [
+        { name: "SQLite database", extensions: ["sqlite", "db", "*"] },
+      ],
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, openOpts)
+      : await dialog.showOpenDialog(openOpts);
+    if (result.canceled || !result.filePaths[0]) {
+      return { ok: false, written: 0, skipped: 0, undoId: null, detail: "SQLite column sync cancelled." };
+    }
+    sqlitePath = result.filePaths[0];
+  }
+  return writeSeratoSqliteColumns({
+    sqlitePath,
+    columns: request.columns,
+    usage: request.usage,
+  });
+};
+
+ipcMain.handle("serato:apply-crate-columns", handleSqliteColumns);
+ipcMain.handle("serato:sqlite-columns", handleSqliteColumns);
+
 ipcMain.handle("serato:undo", () => undoLastSeratoWrite());
+ipcMain.handle("serato:undo-library", () => undoLastSeratoWrite());
+
+ipcMain.handle("video:open-output", async (_event, opts?: { fullscreen?: boolean }) => {
+  if (!videoOutputWindow || videoOutputWindow.isDestroyed()) {
+    videoOutputWindow = new BrowserWindow({
+      width: 1280,
+      height: 720,
+      minWidth: 640,
+      minHeight: 360,
+      title: "OpenDeck · Video Output",
+      backgroundColor: "#000000",
+      autoHideMenuBar: true,
+      fullscreen: Boolean(opts?.fullscreen),
+      webPreferences: {
+        preload: path.join(root(), "dist", "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+    videoOutputWindow.on("closed", () => {
+      videoOutputWindow = null;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("video:output-closed", { open: false, fullscreen: false });
+      }
+    });
+    await videoOutputWindow.loadFile(path.join(root(), "renderer", "video-output.html"));
+  } else {
+    if (typeof opts?.fullscreen === "boolean") {
+      videoOutputWindow.setFullScreen(opts.fullscreen);
+    }
+    videoOutputWindow.focus();
+  }
+  return {
+    open: Boolean(videoOutputWindow && !videoOutputWindow.isDestroyed()),
+    fullscreen: Boolean(videoOutputWindow && !videoOutputWindow.isDestroyed() && videoOutputWindow.isFullScreen()),
+  };
+});
+
+ipcMain.handle("video:close-output", () => {
+  if (videoOutputWindow && !videoOutputWindow.isDestroyed()) {
+    videoOutputWindow.close();
+    videoOutputWindow = null;
+  }
+  return { open: false, fullscreen: false };
+});
+
+ipcMain.handle("video:fullscreen-output", (_event, fullscreen?: boolean) => {
+  if (!videoOutputWindow || videoOutputWindow.isDestroyed()) {
+    return { open: false, fullscreen: false };
+  }
+  const next = typeof fullscreen === "boolean" ? fullscreen : !videoOutputWindow.isFullScreen();
+  videoOutputWindow.setFullScreen(next);
+  return { open: true, fullscreen: videoOutputWindow.isFullScreen() };
+});
+
+ipcMain.handle("video:status-output", () => ({
+  open: Boolean(videoOutputWindow && !videoOutputWindow.isDestroyed()),
+  fullscreen: Boolean(videoOutputWindow && !videoOutputWindow.isDestroyed() && videoOutputWindow.isFullScreen()),
+}));
+
+ipcMain.handle("video:sync-output", (_event, state: unknown) => {
+  if (videoOutputWindow && !videoOutputWindow.isDestroyed()) {
+    videoOutputWindow.webContents.send("video:output-state", state);
+    return { ok: true };
+  }
+  return { ok: false };
+});
+
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
@@ -342,4 +486,3 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
   rtmp?.kill();
 });
-

@@ -1,4 +1,5 @@
 import { base64Decode, base64Encode } from "./serato-tags.ts";
+import type { SeratoTextMeta } from "./serato-id3.ts";
 
 export type SeratoExtraKind = "flac" | "mp4";
 
@@ -29,6 +30,7 @@ const DESCRIPTION_TO_MP4_NAME = new Map<string, string>([
   [MARKERS_, "markers"],
   [BEATGRID, "beatgrid"],
 ]);
+export const SERATO_MP4_ATOM_PREFIX = "----:com.serato.dj:";
 const MP4_MEAN = "com.serato.dj";
 
 function ascii(bytes: Uint8Array, start: number, end: number): string {
@@ -203,7 +205,25 @@ function readFlacTags(bytes: Uint8Array): Map<string, Uint8Array> {
   return tags;
 }
 
-function writeFlacTags(bytes: Uint8Array, updates: Map<string, Uint8Array>): Uint8Array {
+function readFlacMeta(bytes: Uint8Array): { bpm?: number; bpmText?: string; key?: string } {
+  const out: { bpm?: number; bpmText?: string; key?: string } = {};
+  const block = parseFlacBlocks(bytes).find((entry) => entry.type === FLAC_VORBIS_COMMENT);
+  if (!block) return out;
+  const comments = parseFlacComments(bytes, block.dataStart, block.dataEnd);
+  for (const { key, value } of comments.comments) {
+    const upper = key.toUpperCase();
+    if (upper === "BPM" || upper === "TBPM") {
+      out.bpmText = value.trim();
+      const parsed = Number.parseFloat(out.bpmText);
+      if (Number.isFinite(parsed) && parsed > 0) out.bpm = parsed;
+    } else if (upper === "INITIALKEY" || upper === "KEY" || upper === "TKEY") {
+      if (value.trim()) out.key = value.trim();
+    }
+  }
+  return out;
+}
+
+function writeFlacTags(bytes: Uint8Array, updates: Map<string, Uint8Array>, meta?: SeratoTextMeta): Uint8Array {
   const blocks = parseFlacBlocks(bytes);
   const block = blocks.find((entry) => entry.type === FLAC_VORBIS_COMMENT);
   if (!block) throw new Error("FLAC file has no VORBIS_COMMENT block to hold Serato tags");
@@ -212,16 +232,35 @@ function writeFlacTags(bytes: Uint8Array, updates: Map<string, Uint8Array>): Uin
   for (const [description] of updated) {
     if (!DESCRIPTION_TO_FLAC_KEY.has(description)) throw new Error(`Unsupported Serato tag description: ${description}`);
   }
+  const metaUpdates = new Map<string, string>();
+  if (meta?.bpm !== undefined && meta.bpm !== "" && meta.bpm !== 0) {
+    const val = typeof meta.bpm === "number" ? meta.bpm.toFixed(2).replace(/\.00$/, "") : String(meta.bpm).trim();
+    if (val) metaUpdates.set("BPM", val);
+  }
+  if (meta?.key !== undefined && meta.key.trim() !== "" && meta.key.trim() !== "--") {
+    metaUpdates.set("INITIALKEY", meta.key.trim());
+  }
+
   const next: Array<{ key: string; value: string }> = [];
   const replaced = new Set<string>();
+  const replacedMeta = new Set<string>();
   for (const comment of comments.comments) {
-    const description = FLAC_KEYS.get(comment.key.toUpperCase());
+    const upper = comment.key.toUpperCase();
+    const description = FLAC_KEYS.get(upper);
     if (description && updated.has(description)) {
       if (replaced.has(description)) continue;
       replaced.add(description);
       const data = updated.get(description) as Uint8Array;
       const key = DESCRIPTION_TO_FLAC_KEY.get(description) as string;
       next.push({ key, value: b64EncodeField(wrapFrameBytes(description, data), true) });
+    } else if ((upper === "BPM" || upper === "TBPM") && metaUpdates.has("BPM")) {
+      if (replacedMeta.has("BPM")) continue;
+      replacedMeta.add("BPM");
+      next.push({ key: "BPM", value: metaUpdates.get("BPM")! });
+    } else if ((upper === "INITIALKEY" || upper === "KEY" || upper === "TKEY") && metaUpdates.has("INITIALKEY")) {
+      if (replacedMeta.has("INITIALKEY")) continue;
+      replacedMeta.add("INITIALKEY");
+      next.push({ key: "INITIALKEY", value: metaUpdates.get("INITIALKEY")! });
     } else {
       next.push(comment);
     }
@@ -230,6 +269,10 @@ function writeFlacTags(bytes: Uint8Array, updates: Map<string, Uint8Array>): Uin
     if (replaced.has(description)) continue;
     const key = DESCRIPTION_TO_FLAC_KEY.get(description) as string;
     next.push({ key, value: b64EncodeField(wrapFrameBytes(description, data), true) });
+  }
+  for (const [key, value] of metaUpdates) {
+    if (replacedMeta.has(key)) continue;
+    next.push({ key, value });
   }
   const body = buildFlacCommentBlock({ vendor: comments.vendor, comments: next });
   const prefix = bytes.slice(0, block.headerStart);
@@ -284,23 +327,19 @@ function parseMp4Atoms(bytes: Uint8Array, start: number, end: number, where: str
 }
 
 function findMp4Atom(bytes: Uint8Array, atoms: Mp4Atom[], type: string, where: string): Mp4Atom | null {
-  const found = atoms.filter((atom) => atom.type === type);
-  if (found.length > 1) throw new Error(`Multiple ${type} atoms in ${where}`);
-  return found.length === 1 ? found[0] : null;
-}
-
-function requireMp4Atom(bytes: Uint8Array, atoms: Mp4Atom[], type: string, where: string): Mp4Atom {
-  const atom = findMp4Atom(bytes, atoms, type, where);
-  if (!atom) throw new Error(`MP4 file is missing the ${type} atom in ${where}`);
-  return atom;
+  const matches = atoms.filter((atom) => atom.type === type);
+  if (matches.length > 1) throw new Error(`Multiple ${type} atoms in ${where}`);
+  return matches[0] ?? null;
 }
 
 function readMp4Tags(bytes: Uint8Array): Map<string, Uint8Array> {
   const tags = new Map<string, Uint8Array>();
   const ilst = findMp4IlstWith(bytes);
   if (!ilst) return tags;
-  for (const atom of parseMp4Atoms(bytes, ilst.contentStart, ilst.contentEnd, "ilst")) {
-    const children = parseMp4Atoms(bytes, atom.contentStart, atom.contentEnd, "ilst entry");
+  const entries = parseMp4Atoms(bytes, ilst.contentStart, ilst.contentEnd, "ilst");
+  for (const entry of entries) {
+    if (entry.type !== "----") continue;
+    const children = parseMp4Atoms(bytes, entry.contentStart, entry.contentEnd, "----");
     const mean = children.find((child) => child.type === "mean" && child.contentEnd - child.contentStart >= 4);
     const name = children.find((child) => child.type === "name" && child.contentEnd - child.contentStart >= 4);
     if (!mean || !name) continue;
@@ -322,6 +361,45 @@ function readMp4Tags(bytes: Uint8Array): Map<string, Uint8Array> {
     tags.set(description, unwrapFrameBytes(b64DecodeField(value, `mp4 ${entryName}`), `mp4 ${entryName}`).data);
   }
   return tags;
+}
+
+function readMp4Meta(bytes: Uint8Array): { bpm?: number; bpmText?: string; key?: string } {
+  const out: { bpm?: number; bpmText?: string; key?: string } = {};
+  const ilst = findMp4IlstWith(bytes);
+  if (!ilst) return out;
+  const entries = parseMp4Atoms(bytes, ilst.contentStart, ilst.contentEnd, "ilst");
+  for (const entry of entries) {
+    if (entry.type === "tmpo") {
+      const children = parseMp4Atoms(bytes, entry.contentStart, entry.contentEnd, "tmpo");
+      const data = children.find((child) => child.type === "data" && child.contentEnd - child.contentStart >= 10);
+      if (data) {
+        const bpm = new DataView(bytes.buffer, bytes.byteOffset + data.contentStart + 8, 2).getUint16(0, false);
+        if (bpm > 0) {
+          out.bpm = bpm;
+          out.bpmText = String(bpm);
+        }
+      }
+      continue;
+    }
+    if (entry.type !== "----") continue;
+    const children = parseMp4Atoms(bytes, entry.contentStart, entry.contentEnd, "----");
+    const mean = children.find((child) => child.type === "mean" && child.contentEnd - child.contentStart >= 4);
+    const name = children.find((child) => child.type === "name" && child.contentEnd - child.contentStart >= 4);
+    const data = children.find((child) => child.type === "data" && child.contentEnd - child.contentStart >= 8);
+    if (!mean || !name || !data) continue;
+    const meanStr = ascii(bytes, mean.contentStart + 4, mean.contentEnd);
+    const nameStr = ascii(bytes, name.contentStart + 4, name.contentEnd).toLowerCase();
+    if (meanStr !== MP4_MEAN && meanStr !== "com.apple.iTunes") continue;
+    const text = new TextDecoder("utf-8").decode(bytes.subarray(data.contentStart + 8, data.contentEnd)).trim();
+    if ((nameStr === "bpm" || nameStr === "tbpm") && text) {
+      out.bpmText = text;
+      const parsed = Number.parseFloat(text);
+      if (Number.isFinite(parsed) && parsed > 0) out.bpm = parsed;
+    } else if ((nameStr === "initialkey" || nameStr === "key" || nameStr === "tkey") && text) {
+      out.key = text;
+    }
+  }
+  return out;
 }
 
 interface Mp4Paths {
@@ -405,30 +483,50 @@ function buildMp4Freeform(description: string, data: Uint8Array): Uint8Array {
   ]);
 }
 
-function writeMp4Tags(bytes: Uint8Array, updates: Map<string, Uint8Array>): Uint8Array {
+function buildMp4TextFreeform(mean: string, name: string, value: string): Uint8Array {
+  return buildMp4Atom("----", [
+    buildFullBox("mean", 0, mean),
+    buildFullBox("name", 0, name),
+    buildMp4Data(value),
+  ]);
+}
+
+function writeMp4Tags(bytes: Uint8Array, updates: Map<string, Uint8Array>, meta?: SeratoTextMeta): Uint8Array {
   for (const [description] of updates) {
     if (!DESCRIPTION_TO_MP4_NAME.has(description)) throw new Error(`Unsupported Serato tag description: ${description}`);
   }
-  const { moov, udta, meta, ilst } = requireMp4IlstPaths(bytes);
-  const metaListChildrenStart = meta.contentStart + 4;
+  const { moov, udta, meta: metaAtom, ilst } = requireMp4IlstPaths(bytes);
+  const metaListChildrenStart = metaAtom.contentStart + 4;
   const entries = parseMp4Atoms(bytes, ilst.contentStart, ilst.contentEnd, "ilst");
-  type Entry = { type: string; start: number; end: number; raw: Uint8Array; name: string | null };
+  const metaPending = new Map<string, string>();
+  if (meta?.bpm !== undefined && meta.bpm !== "" && meta.bpm !== 0) {
+    const val = typeof meta.bpm === "number" ? meta.bpm.toFixed(2).replace(/\.00$/, "") : String(meta.bpm).trim();
+    if (val) metaPending.set("bpm", val);
+  }
+  if (meta?.key !== undefined && meta.key.trim() !== "" && meta.key.trim() !== "--") {
+    metaPending.set("initialkey", meta.key.trim());
+  }
+
+  type Entry = { type: string; start: number; end: number; raw: Uint8Array; name: string | null; metaKey: string | null };
   const parsed: Entry[] = entries.map((atom) => {
     const raw = bytes.slice(atom.start, atom.end);
     let entryName: string | null = null;
+    let metaKey: string | null = null;
     if (atom.type === "----") {
       const children = parseMp4Atoms(bytes, atom.contentStart, atom.contentEnd, "ilst entry");
       const mean = children.find((child) => child.type === "mean" && child.contentEnd - child.contentStart >= 4);
       const name = children.find((child) => child.type === "name" && child.contentEnd - child.contentStart >= 4);
       if (mean && name) {
         const meanText = requireAscii(bytes, mean.contentStart + 4, mean.contentEnd, "mp4 mean");
-        if (meanText === MP4_MEAN) {
-          entryName = requireAscii(bytes, name.contentStart + 4, name.contentEnd, "mp4 name");
-          if (!MP4_NAMES.has(entryName)) entryName = null;
+        const rawName = requireAscii(bytes, name.contentStart + 4, name.contentEnd, "mp4 name");
+        if (meanText === MP4_MEAN && MP4_NAMES.has(rawName)) {
+          entryName = rawName;
+        } else if ((meanText === MP4_MEAN || meanText === "com.apple.iTunes") && (rawName.toLowerCase() === "bpm" || rawName.toLowerCase() === "initialkey")) {
+          metaKey = rawName.toLowerCase();
         }
       }
     }
-    return { type: atom.type, start: atom.start, end: atom.end, raw, name: entryName };
+    return { type: atom.type, start: atom.start, end: atom.end, raw, name: entryName, metaKey };
   });
   const children: Uint8Array[] = [];
   const pending = new Map(updates);
@@ -441,18 +539,26 @@ function writeMp4Tags(bytes: Uint8Array, updates: Map<string, Uint8Array>): Uint
         continue;
       }
     }
+    if (entry.metaKey && metaPending.has(entry.metaKey)) {
+      children.push(buildMp4TextFreeform("com.apple.iTunes", entry.metaKey, metaPending.get(entry.metaKey)!));
+      metaPending.delete(entry.metaKey);
+      continue;
+    }
     children.push(entry.raw);
   }
   for (const [description, data] of pending) {
     children.push(buildMp4Freeform(description, data));
   }
+  for (const [metaKey, value] of metaPending) {
+    children.push(buildMp4TextFreeform("com.apple.iTunes", metaKey, value));
+  }
   const newIlst = buildMp4Atom("ilst", children);
 
-  const flagsAndChildren = bytes.slice(meta.contentStart, metaListChildrenStart);
-  const newMetaBody = replaceSpan(bytes, metaListChildrenStart, meta.contentEnd, ilst.start, ilst.end, newIlst);
+  const flagsAndChildren = bytes.slice(metaAtom.contentStart, metaListChildrenStart);
+  const newMetaBody = replaceSpan(bytes, metaListChildrenStart, metaAtom.contentEnd, ilst.start, ilst.end, newIlst);
   const newMeta = buildMp4AtomWithHeader("meta", flagsAndChildren, newMetaBody);
 
-  const newUdtaBody = replaceSpan(bytes, udta.contentStart, udta.contentEnd, meta.start, meta.end, newMeta);
+  const newUdtaBody = replaceSpan(bytes, udta.contentStart, udta.contentEnd, metaAtom.start, metaAtom.end, newMeta);
   const newUdta = buildMp4Atom("udta", [newUdtaBody]);
 
   const newMoov = replaceSpan(bytes, moov.start, moov.end, udta.start, udta.end, newUdta);
@@ -485,9 +591,20 @@ export function readSeratoExtraTags(bytes: Uint8Array, kind: SeratoExtraKind): M
   throw new Error(`Unsupported Serato extra kind: ${kind as string}`);
 }
 
-export function writeSeratoExtraTags(bytes: Uint8Array, kind: SeratoExtraKind, updates: Map<string, Uint8Array>): Uint8Array {
-  if (kind === "flac") return writeFlacTags(bytes, updates);
-  if (kind === "mp4") return writeMp4Tags(bytes, updates);
+export function readSeratoExtraMeta(bytes: Uint8Array, kind: SeratoExtraKind): { bpm?: number; bpmText?: string; key?: string } {
+  if (kind === "flac") return readFlacMeta(bytes);
+  if (kind === "mp4") return readMp4Meta(bytes);
+  throw new Error(`Unsupported Serato extra kind: ${kind as string}`);
+}
+
+export function writeSeratoExtraTags(
+  bytes: Uint8Array,
+  kind: SeratoExtraKind,
+  updates: Map<string, Uint8Array>,
+  meta?: SeratoTextMeta,
+): Uint8Array {
+  if (kind === "flac") return writeFlacTags(bytes, updates, meta);
+  if (kind === "mp4") return writeMp4Tags(bytes, updates, meta);
   throw new Error(`Unsupported Serato extra kind: ${kind as string}`);
 }
 

@@ -102,3 +102,14 @@ test("sampler exposes 32 slots across four banks", () => {
   assert.equal(SAMPLER_SLOTS[8]!.bank, "B");
   assert.equal(SAMPLER_SLOTS[8]!.label, "B1 Kick");
 });
+
+import { censorReleasePosition, slipReleasePosition } from "../src/renderer/engine/pad-modes.ts";
+
+test("slipReleasePosition and censorReleasePosition advance virtual timeline accurately", () => {
+  // Slip (return-mode): 2 seconds elapsed at 1.25x rate from 10s -> 12.5s
+  assert.ok(Math.abs(slipReleasePosition(10, 1000, 3000, 1.25, 180) - 12.5) < 1e-9);
+  // Censor (reverse-on-hold): even when rate is passed negative, forward timeline advances by |rate| * elapsed
+  assert.ok(Math.abs(censorReleasePosition(20, 500, 2000, -1.0, 180) - 21.5) < 1e-9);
+  // Clamps to duration - 0.02
+  assert.ok(Math.abs(censorReleasePosition(59, 0, 5000, 1.0, 60) - 59.98) < 1e-9);
+});

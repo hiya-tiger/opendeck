@@ -1,6 +1,6 @@
-import { readSeratoGeoB } from "./serato-id3.ts";
-import { detectRiffKind, type RiffKind } from "./serato-riff.ts";
-import { readSeratoExtraTags, type SeratoExtraKind } from "./serato-extra.ts";
+import { readId3TextMeta, readSeratoGeoB } from "./serato-id3.ts";
+import { detectRiffKind, readRiffId3, type RiffKind } from "./serato-riff.ts";
+import { readSeratoExtraMeta, readSeratoExtraTags, type SeratoExtraKind } from "./serato-extra.ts";
 import {
   decodeBeatGrid,
   decodeMarkers2,
@@ -10,10 +10,13 @@ import {
   type BeatGridMarker,
   type SeratoMarkers,
 } from "./serato-tags.ts";
+import type { SeratoContainer } from "./serato-write.ts";
 
 export interface SeratoFileTags {
   markers: SeratoMarkers | null;
   beatgrid: BeatGridMarker[] | null;
+  bpm?: number;
+  key?: string;
 }
 
 function hasId3(bytes: Uint8Array): boolean {
@@ -30,7 +33,11 @@ function tagSize(bytes: Uint8Array): number {
   );
 }
 
-function parseTagMap(tags: Map<string, Uint8Array>, mp4Legacy = false): SeratoFileTags {
+function parseTagMap(
+  tags: Map<string, Uint8Array>,
+  mp4Legacy = false,
+  meta?: { bpm?: number; key?: string },
+): SeratoFileTags {
   let markers: SeratoMarkers | null = null;
   const legacy = tags.get("Serato Markers_");
   const current = tags.get("Serato Markers2");
@@ -53,12 +60,29 @@ function parseTagMap(tags: Map<string, Uint8Array>, mp4Legacy = false): SeratoFi
     markers.cues = markers.cues.map((cue) => ({ ...cue, color: nearestCueColor(cue.color) }));
   }
   const grid = tags.get("Serato BeatGrid");
-  return { markers, beatgrid: grid ? decodeBeatGrid(grid) : null };
+  const out: SeratoFileTags = { markers, beatgrid: grid ? decodeBeatGrid(grid) : null };
+  if (meta?.bpm !== undefined) out.bpm = meta.bpm;
+  if (meta?.key !== undefined) out.key = meta.key;
+  return out;
 }
 
 function parseTags(bytes: Uint8Array): SeratoFileTags {
   const frames = readSeratoGeoB(bytes);
-  return parseTagMap(new Map([...frames].map(([name, frame]) => [name, frame.data])));
+  const meta = readId3TextMeta(bytes);
+  return parseTagMap(new Map([...frames].map(([name, frame]) => [name, frame.data])), false, meta);
+}
+
+export function readSeratoTagsFromBytes(bytes: Uint8Array, container: SeratoContainer): SeratoFileTags {
+  if (container === "flac" || container === "mp4") {
+    const tags = readSeratoExtraTags(bytes, container);
+    const meta = readSeratoExtraMeta(bytes, container);
+    return parseTagMap(tags, container === "mp4", meta);
+  }
+  if (container === "wav" || container === "aiff") {
+    const id3 = readRiffId3(bytes, container);
+    return id3 ? parseTags(id3) : { markers: null, beatgrid: null };
+  }
+  return parseTags(bytes);
 }
 
 async function readRiffTagChunk(file: File, kind: RiffKind): Promise<Uint8Array | null> {
@@ -87,7 +111,8 @@ export async function readSeratoTagsFromFile(file: File): Promise<SeratoFileTags
     if (flac || mp4) {
       const kind: SeratoExtraKind = flac ? "flac" : "mp4";
       const bytes = new Uint8Array(await file.arrayBuffer());
-      return parseTagMap(readSeratoExtraTags(bytes, kind), kind === "mp4");
+      const meta = readSeratoExtraMeta(bytes, kind);
+      return parseTagMap(readSeratoExtraTags(bytes, kind), kind === "mp4", meta);
     }
     const head = new Uint8Array(await file.slice(0, Math.min(file.size, 12)).arrayBuffer());
     if (hasId3(head)) {

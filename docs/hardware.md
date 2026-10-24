@@ -84,3 +84,232 @@ Mappings are stored per browser profile in `localStorage` under `opendeck.midi.m
 - **No sound from pads:** the sampler feeds the master bus, so check the mixer's master level, the sampler volume slider and the browser's audio output.
 
 Physical-device testing is still pending for the DJControl T10, Party Mix III, SP-404MKII, MPK Mini and U6MIDI Pro. The T10 values come from DJUCED's bundled `DJControl_T10.djm`, the Party Mix III values from the community Mixxx mapping, and the MIDI parser, presets, learn flow and persistence have unit tests.
+
+## Supported Hardware Catalogue (195 Devices)
+
+OpenDeck includes built-in presets and USB MIDI / USB Audio auto-detection for **195** DJ controllers, all-in-one systems, battle/club mixers, DVS interfaces, media players, motorized turntables, and pad/rhythm accessories (plus the legacy Hercules DJControl T10 and Numark Party Mix III presets). Connecting a 4-deck controller automatically enables the 4-deck workspace, and connecting a DVS mixer or audio interface badges it as `[DVS Ready]` or `[DVS Upgrade]` in the DVS input selector.
+
+### 2-Deck Controllers (66)
+
+| Device | Vendor | Decks | DVS |
+| --- | --- | --- | --- |
+| Hercules DJControl T10 | Hercules | 2 | — |
+| Numark Party Mix III | Numark | 2 | — |
+| Numark MixTrack Go | Numark | 2 | — |
+| Hercules DJControl Inpulse 200 MK3 | Hercules | 2 | — |
+| RANE ONE MKII | RANE | 2 | — |
+| Pioneer DJ DDJ-RB | Pioneer DJ | 2 | — |
+| AlphaTheta DDJ-FLX2 | AlphaTheta | 2 | — |
+| Pioneer DJ DDJ-400 | Pioneer DJ | 2 | — |
+| Pioneer DJ DDJ-200 | Pioneer DJ | 2 | — |
+| AlphaTheta OMNIS-DUO | AlphaTheta | 2 | — |
+| Pioneer DJ DDJ-REV5 | Pioneer DJ | 2 | — |
+| Hercules DJControl Inpulse T7 | Hercules | 2 | — |
+| Numark Mixstream Pro Go | Numark | 2 | — |
+| Hercules DJControl Inpulse 200 MK2 | Hercules | 2 | — |
+| Numark Mixstream Pro + | Numark | 2 | — |
+| Numark Mixstream Pro | Numark | 2 | — |
+| Hercules DJControl Inpulse 300 MK2 | Hercules | 2 | — |
+| Pioneer DJ DDJ-FLX4 | Pioneer DJ | 2 | — |
+| Denon DJ SC Live 2 | Denon DJ | 2 | — |
+| Pioneer DJ DDJ-REV1 | Pioneer DJ | 2 | — |
+| Pioneer DJ DDJ-REV7 | Pioneer DJ | 2 | — |
+| Numark Party Mix Live | Numark | 2 | — |
+| Numark Party Mix II | Numark | 2 | — |
+| Reloop Ready | Reloop | 2 | — |
+| RANE ONE | RANE | 2 | — |
+| Hercules DJControl Inpulse 500 | Hercules | 2 | — |
+| Numark Mixtrack Platinum FX | Numark | 2 | — |
+| Numark Mixtrack Pro FX | Numark | 2 | — |
+| Numark DJ2GO2 Touch | Numark | 2 | — |
+| Mixars PRIMO | Mixars | 2 | — |
+| Hercules DJControl Inpulse 300 | Hercules | 2 | — |
+| Hercules DJControl Inpulse 200 | Hercules | 2 | — |
+| Hercules DJControl Starlight | Hercules | 2 | — |
+| Numark Party Mix | Numark | 2 | — |
+| Pioneer DJ DDJ SB3 | Pioneer DJ | 2 | — |
+| Roland DJ-505 | Roland | 2 | — |
+| Roland DJ-202 | Roland | 2 | — |
+| Pioneer DJ DDJ-SR2 | Pioneer DJ | 2 | — |
+| Numark Mixtrack Platinum | Numark | 2 | — |
+| Pioneer DJ DDJ-SB2 | Pioneer DJ | 2 | — |
+| Numark Party Mix Pro | Numark | 2 | — |
+| Numark DJ2GO2 | Numark | 2 | — |
+| Hercules DJControl Jogvision | Hercules | 2 | — |
+| Denon DJ MC4000 | Denon DJ | 2 | — |
+| Numark Mixtrack Pro 3 | Numark | 2 | — |
+| Pioneer DJ DDJ-SB | Pioneer DJ | 2 | — |
+| Numark Mixtrack Pro II | Numark | 2 | — |
+| Pioneer DJ DDJ-SR | Pioneer DJ | 2 | — |
+| Pioneer DJ DDJ-WeGO3 | Pioneer DJ | 2 | — |
+| Numark MixDeck Express | Numark | 2 | — |
+| Denon DJ MC2000 | Denon DJ | 2 | — |
+| Pioneer DJ DDJ-WeGO | Pioneer DJ | 2 | — |
+| Reloop Terminal Mix 2 | Reloop | 2 | — |
+| Pioneer DJ DDJ-ERGO | Pioneer DJ | 2 | — |
+| Numark Mixtrack Pro | Numark | 2 | — |
+| Vestax Typhoon | Vestax | 2 | — |
+| Reloop Beatmix 2 | Reloop | 2 | — |
+| Vestax VCI-100 mk II | Vestax | 2 | — |
+| Vestax VCI-380 | Vestax | 2 | — |
+| Vestax VCI-300 | Vestax | 2 | — |
+| Gemini Slate | Gemini | 2 | — |
+| Pioneer DJ DDJ-S1 | Pioneer DJ | 2 | — |
+| Korg KAOSS DJ | Korg | 2 | — |
+| Numark MixDeck | Numark | 2 | — |
+| Novation TWITCH | Novation | 2 | — |
+| Numark Mixtrack Edge | Numark | 2 | — |
+
+### 4-Deck Controllers & All-In-One Systems (45)
+
+| Device | Vendor | Decks | DVS |
+| --- | --- | --- | --- |
+| AlphaTheta XDJ-AN | AlphaTheta | 4 | — |
+| RANE SYSTEM ONE | RANE | 4 | — |
+| AlphaTheta XDJ-AZ | AlphaTheta | 4 | — |
+| AlphaTheta DDJ-GRV6 | AlphaTheta | 4 | — |
+| Native Instruments Traktor Kontrol S3 | Native Instruments | 4 | — |
+| Native Instruments Traktor Kontrol S2 MK3 | Native Instruments | 4 | — |
+| RANE PERFORMER | RANE | 4 | — |
+| Denon DJ PRIME 4+ | Denon DJ | 4 | — |
+| Pioneer DJ OPUS-QUAD | Pioneer DJ | 4 | — |
+| Reloop Mixon 8 Pro | Reloop | 4 | — |
+| Pioneer DJ DDJ-FLX10 | Pioneer DJ | 4 | — |
+| RANE FOUR | RANE | 4 | — |
+| Denon DJ SC Live 4 | Denon DJ | 4 | — |
+| Numark NS4FX | Numark | 4 | — |
+| Pioneer DJ XDJ-RX3 | Pioneer DJ | 4 | — |
+| Pioneer DJ DDJ-FLX6 | Pioneer DJ | 4 | — |
+| Pioneer DJ XDJ-XZ | Pioneer DJ | 4 | — |
+| Denon DJ PRIME 4 | Denon DJ | 4 | — |
+| Roland DJ-707M | Roland | 4 | — |
+| Pioneer DJ DDJ-1000SRT | Pioneer DJ | 4 | — |
+| Pioneer DJ DDJ-SX3 | Pioneer DJ | 4 | — |
+| Roland DJ-808 | Roland | 4 | — |
+| Numark NS6II | Numark | 4 | — |
+| Pioneer DJ DDJ-SZ2 | Pioneer DJ | 4 | — |
+| Denon DJ MC7000 | Denon DJ | 4 | — |
+| Pioneer DJ DDJ-SX2 | Pioneer DJ | 4 | — |
+| Reloop Mixon 4 | Reloop | 4 | — |
+| Denon DJ MCX8000 | Denon DJ | 4 | — |
+| Numark NS7 III | Numark | 4 | — |
+| Pioneer DJ DDJ-SZ | Pioneer DJ | 4 | — |
+| Numark NVII | Numark | 4 | — |
+| Numark NV | Numark | 4 | — |
+| Reloop Beatmix 4 | Reloop | 4 | — |
+| Denon DJ MC6000MK2 | Denon DJ | 4 | — |
+| Pioneer DJ DDJ-SX | Pioneer DJ | 4 | — |
+| Gemini Slate 4 | Gemini | 4 | — |
+| Reloop Terminal Mix 4 | Reloop | 4 | — |
+| Numark Mixtrack Quad | Numark | 4 | — |
+| Numark MixDeck Quad | Numark | 4 | — |
+| Numark N4 | Numark | 4 | — |
+| Reloop Terminal Mix 8 | Reloop | 4 | — |
+| Vestax VCI-400 | Vestax | 4 | — |
+| Numark NS6 | Numark | 4 | — |
+| Numark NS7 II | Numark | 4 | — |
+| Numark NS7 | Numark | 4 | — |
+
+### DVS, Battle & Club Mixers (39)
+
+| Device | Vendor | Decks | DVS |
+| --- | --- | --- | --- |
+| Pioneer DJ DJM-750MK2 | Pioneer DJ | 4 | DVS Ready |
+| Pioneer DJ DJM-450 | Pioneer DJ | 2 | DVS Ready |
+| Pioneer DJ DJM-250MK2 | Pioneer DJ | 2 | DVS Ready |
+| AlphaTheta DJM-V5 | AlphaTheta | 4 | DVS Upgrade |
+| Native Instruments Traktor Kontrol Z2 | Native Instruments | 2 | DVS Upgrade |
+| AlphaTheta Euphonia | AlphaTheta | 4 | DVS Upgrade |
+| Pioneer DJ DJM-A9 | Pioneer DJ | 4 | DVS Upgrade |
+| Pioneer DJ DJM-S5 | Pioneer DJ | 2 | DVS Ready |
+| RANE SEVENTY A-Trak Edition | RANE | 2 | DVS Ready |
+| Pioneer DJ DJM-S7 | Pioneer DJ | 2 | DVS Ready |
+| Pioneer DJ DJM-S11 | Pioneer DJ | 2 | DVS Ready |
+| RANE SEVENTY-TWO MKII | RANE | 2 | DVS Ready |
+| Pioneer DJ DJM-V10-LF | Pioneer DJ | 4 | DVS Upgrade |
+| Pioneer DJ DJM-V10 | Pioneer DJ | 4 | DVS Upgrade |
+| Denon DJ X1850 PRIME | Denon DJ | 4 | DVS Upgrade |
+| Rane SEVENTY | RANE | 2 | DVS Ready |
+| Numark Scratch | Numark | 2 | DVS Ready |
+| Reloop ELITE | Reloop | 2 | DVS Ready |
+| Rane SEVENTY-TWO | RANE | 2 | DVS Ready |
+| Denon DJ X1800 Prime | Denon DJ | 4 | DVS Upgrade |
+| Mixars QUATTRO | Mixars | 4 | DVS Ready |
+| Pioneer DJ DJM-S3 | Pioneer DJ | 2 | DVS Ready |
+| Reloop RMX-90 DVS | Reloop | 4 | DVS Ready |
+| Pioneer DJ DJM-900NXS2 | Pioneer DJ | 4 | DVS Upgrade |
+| Pioneer DJ DJM-S9 | Pioneer DJ | 2 | DVS Ready |
+| Akai Pro AMX | Akai Pro | 2 | DVS Ready |
+| Mixars DUO | Mixars | 2 | DVS Ready |
+| Allen & Heath Xone:43C | Allen & Heath | 4 | DVS Upgrade |
+| Pioneer DJ DJM-900SRT | Pioneer DJ | 4 | DVS Ready |
+| Rane MP2015 | RANE | 4 | DVS Upgrade |
+| Pioneer DJ DJM-900NXS | Pioneer DJ | 4 | DVS Upgrade |
+| Pioneer DJ DJM-850 | Pioneer DJ | 4 | DVS Upgrade |
+| Rane TTM57mkII | RANE | 2 | DVS Ready |
+| Rane Sixty-Two | RANE | 2 | DVS Ready |
+| Allen & Heath Xone:DB4 | Allen & Heath | 4 | DVS Upgrade |
+| Rane Sixty-Four | RANE | 4 | DVS Ready |
+| Allen & Heath Xone:DB2 | Allen & Heath | 4 | DVS Upgrade |
+| Rane Sixty-One | RANE | 2 | DVS Ready |
+| Rane Sixty-Eight | RANE | 4 | DVS Ready |
+
+### DVS Audio Interfaces (6)
+
+| Device | Vendor | Decks | DVS |
+| --- | --- | --- | --- |
+| Reloop Flux Go | Reloop | 2 | DVS Ready |
+| Reloop Flux | Reloop | 4 | DVS Ready |
+| Denon DJ DS1 | Denon DJ | 2 | DVS Ready |
+| Rane SL3 | RANE | 4 | DVS Ready |
+| Rane SL4 | RANE | 4 | DVS Ready |
+| Rane SL2 | RANE | 2 | DVS Ready |
+
+### Single-Deck Media Players & Motorized Turntables (23)
+
+| Device | Vendor | Decks | DVS |
+| --- | --- | --- | --- |
+| AlphaTheta CDJ-1500X | AlphaTheta | 1 | — |
+| AlphaTheta CDJ-3000X | AlphaTheta | 1 | — |
+| Pioneer DJ PLX-CRSS12 | Pioneer DJ | 1 | DVS Ready |
+| Pioneer DJ CDJ-3000 | Pioneer DJ | 1 | — |
+| Denon DJ LC6000 PRIME | Denon DJ | 1 | — |
+| Phase | MWM | 1 | DVS Ready |
+| Denon DJ SC6000 PRIME | Denon DJ | 1 | — |
+| Denon DJ SC6000M PRIME | Denon DJ | 1 | DVS Ready |
+| RANE TWELVE MKII | RANE | 1 | DVS Ready |
+| Denon DJ SC5000M Prime | Denon DJ | 1 | DVS Ready |
+| Reloop RP8000 MK2 | Reloop | 1 | DVS Ready |
+| Rane TWELVE | RANE | 1 | DVS Ready |
+| Denon DJ SC5000 Prime | Denon DJ | 1 | — |
+| Pioneer DJ CDJ-2000NXS2 | Pioneer DJ | 1 | — |
+| Pioneer DJ CDJ-850 | Pioneer DJ | 1 | — |
+| Pioneer DJ CDJ-900 | Pioneer DJ | 1 | — |
+| Pioneer DJ CDJ-2000NXS | Pioneer DJ | 1 | — |
+| Pioneer DJ CDJ-2000 | Pioneer DJ | 1 | — |
+| Pioneer DJ CDJ-900NXS | Pioneer DJ | 1 | — |
+| Reloop RP-8000 | Reloop | 1 | DVS Ready |
+| Numark NDX500 | Numark | 1 | — |
+| Pioneer DJ XDJ-1000 | Pioneer DJ | 1 | — |
+| Numark V7 | Numark | 1 | DVS Ready |
+
+### Accessories, Pad Controllers & Rhythm Machines (16)
+
+| Device | Vendor | Decks | DVS |
+| --- | --- | --- | --- |
+| AlphaTheta SLAB | AlphaTheta | 2 | — |
+| Roland SP-404MKII | Roland | 2 | — |
+| Pioneer DJ DDJ-XP2 | Pioneer DJ | 2 | — |
+| Roland TR-8S | Roland | 2 | — |
+| Roland TR-8 | Roland | 2 | — |
+| Roland TR-08 | Roland | 2 | — |
+| Roland TR-09 | Roland | 2 | — |
+| Numark Dashboard | Numark | 2 | — |
+| Vestax VFX-1 | Vestax | 2 | — |
+| Allen & Heath Xone:K1 | Allen & Heath | 2 | — |
+| Pioneer DJ DDJ-SP1 | Pioneer DJ | 2 | — |
+| Novation Dicers | Novation | 2 | — |
+| Numark NSFX | Numark | 2 | — |
+| Reloop NEON | Reloop | 2 | — |
+| Akai Pro AFX | Akai Pro | 2 | — |
+| Denon DJ DN-HC1000S | Denon DJ | 2 | — |

@@ -181,3 +181,116 @@ test("sampler bank has eight labelled pads", () => {
     ["Kick", "Snare", "Clap", "Hat", "Open", "Tom", "Rim", "Crash"],
   );
 });
+
+import { describe } from "node:test";
+import {
+  HARDWARE_CATALOGUE,
+  lookupHardwareDevice,
+  normalizeHardwareName,
+  SUPPORTED_HARDWARE_RAW,
+} from "../src/renderer/midi/profiles.ts";
+
+describe("195-device hardware catalogue & profile matching", () => {
+  test("catalogue contains all 195 supported hardware models and matches every raw and stripped line", () => {
+    assert.equal(SUPPORTED_HARDWARE_RAW.length, 195);
+    assert.equal(HARDWARE_CATALOGUE.length, 195);
+
+    for (const rawLine of SUPPORTED_HARDWARE_RAW) {
+      const stripped = normalizeHardwareName(rawLine);
+      const byRaw = profileForDevice(rawLine);
+      const byStripped = profileForDevice(stripped);
+      const catalogueEntry = lookupHardwareDevice(rawLine);
+
+      assert.ok(byRaw, `Expected profileForDevice to match raw line: "${rawLine}"`);
+      assert.ok(byStripped, `Expected profileForDevice to match stripped line: "${stripped}"`);
+      assert.equal(byRaw.id, byStripped.id, `Expected raw and stripped to match same profile for "${rawLine}"`);
+      assert.ok(catalogueEntry, `Expected lookupHardwareDevice to find "${rawLine}"`);
+    }
+  });
+
+  test("short USB descriptors and hyphen/space variations resolve to expected profiles", () => {
+    const cases: [string, string][] = [
+      ["DDJ-FLX10", "pioneer-dj-ddj-flx10"],
+      ["DJM-S11", "pioneer-dj-djm-s11"],
+      ["CDJ-3000X", "alphatheta-cdj-3000x"],
+      ["CDJ-3000", "pioneer-dj-cdj-3000"],
+      ["XDJ-AZ", "alphatheta-xdj-az"],
+      ["SC6000 PRIME", "denon-dj-sc6000-prime"],
+      ["SC6000M PRIME", "denon-dj-sc6000m-prime"],
+      ["Kontrol S3", "native-instruments-traktor-kontrol-s3"],
+      ["Kontrol Z2", "native-instruments-traktor-kontrol-z2"],
+      ["Xone:DB4", "allen-and-heath-xone-db4"],
+      ["Xone:43C", "allen-and-heath-xone-43c"],
+      ["Flux Go", "reloop-flux-go"],
+      ["Reloop Flux", "reloop-flux"],
+      ["SL4", "rane-sl4"],
+      ["SP-404MKII", "roland-sp-404mkii"],
+      ["DJControl Inpulse 500", "hercules-djcontrol-inpulse-500"],
+      ["DDJ SB3", "pioneer-dj-ddj-sb3"],
+      ["DDJ-SB3", "pioneer-dj-ddj-sb3"],
+      ["DDJ-SB", "pioneer-dj-ddj-sb"],
+      ["RP8000 MK2", "reloop-rp8000-mk2"],
+      ["RP-8000 MK2", "reloop-rp8000-mk2"],
+      ["RP-8000", "reloop-rp-8000"],
+      ["Numark Party Mix II", "numark-party-mix-ii"],
+      ["Numark Party Mix Live", "numark-party-mix-live"],
+      ["Numark Party Mix Pro", "numark-party-mix-pro"],
+      ["Numark Party Mix", "numark-party-mix-iii"],
+    ];
+
+    for (const [descriptor, expectedId] of cases) {
+      const profile = profileForDevice(descriptor);
+      assert.equal(profile?.id, expectedId, `Descriptor "${descriptor}" should resolve to "${expectedId}"`);
+    }
+    assert.equal(profileForDevice("Akai MPK Mini"), null);
+  });
+
+  test("all 15 trailing-dot club mixers are flagged with dvsReady and dvsUpgrade", () => {
+    const upgradeLines = SUPPORTED_HARDWARE_RAW.filter((line) => /\.\s*$/.test(line));
+    assert.equal(upgradeLines.length, 15);
+    for (const rawLine of upgradeLines) {
+      const profile = profileForDevice(rawLine);
+      assert.ok(profile, `Expected profile for "${rawLine}"`);
+      assert.equal(profile.category, "mixer-dvs");
+      assert.equal(profile.dvsReady, true, `Expected dvsReady=true for "${rawLine}"`);
+      assert.equal(profile.dvsUpgrade, true, `Expected dvsUpgrade=true for "${rawLine}"`);
+    }
+  });
+
+  test("all 6 DVS audio interfaces have category dvs-interface and dvsReady true", () => {
+    const interfaces = [
+      "Reloop Flux",
+      "Reloop Flux Go",
+      "Denon DJ DS1",
+      "Rane SL2",
+      "Rane SL3",
+      "Rane SL4",
+    ];
+    for (const name of interfaces) {
+      const profile = profileForDevice(name);
+      assert.ok(profile, `Expected profile for DVS interface "${name}"`);
+      assert.equal(profile.category, "dvs-interface", `Expected category="dvs-interface" for "${name}"`);
+      assert.equal(profile.dvsReady, true, `Expected dvsReady=true for "${name}"`);
+    }
+  });
+
+  test("4-deck controllers have decks=4 and include Deck C/D and mix.chC/chD bindings", () => {
+    const fourDeckControllers = [
+      "Pioneer DJ DDJ-FLX10",
+      "RANE FOUR",
+      "AlphaTheta XDJ-AZ",
+      "Denon DJ PRIME 4+",
+      "Reloop Mixon 8 Pro",
+      "Native Instruments Traktor Kontrol S3",
+    ];
+    for (const name of fourDeckControllers) {
+      const profile = profileForDevice(name);
+      assert.ok(profile, `Expected profile for 4-deck controller "${name}"`);
+      assert.equal(profile.decks, 4, `Expected decks=4 for "${name}"`);
+      assert.ok(profile.bindings["C.play"], `Expected C.play binding on "${name}"`);
+      assert.ok(profile.bindings["D.play"], `Expected D.play binding on "${name}"`);
+      assert.ok(profile.bindings["mix.chC"], `Expected mix.chC binding on "${name}"`);
+      assert.ok(profile.bindings["mix.chD"], `Expected mix.chD binding on "${name}"`);
+    }
+  });
+});

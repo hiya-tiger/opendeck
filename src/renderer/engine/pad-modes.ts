@@ -76,6 +76,18 @@ export function rollingReleasePosition(
   return Math.max(0, Math.min(limit, target));
 }
 
+export const slipReleasePosition = rollingReleasePosition;
+
+export function censorReleasePosition(
+  entryPosition: number,
+  startedAtMs: number,
+  releasedAtMs: number,
+  forwardRate: number,
+  duration: number,
+): number {
+  return rollingReleasePosition(entryPosition, startedAtMs, releasedAtMs, Math.abs(forwardRate), duration);
+}
+
 export function cueLoopRange(cueTime: number, bpm: number, beats = 4): { start: number; end: number } {
   const start = Math.max(0, cueTime);
   return { start, end: start + beatSeconds(bpm) * beats };

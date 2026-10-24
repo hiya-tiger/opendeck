@@ -213,3 +213,86 @@ test("sortTracks searches do not mutate the input", () => {
   assert.deepEqual(tracks.map((track) => track.name), ["b", "a"]);
   assert.notEqual(sorted, tracks);
 });
+
+import {
+  LivePlaylistStore,
+  PlaylistStore,
+  TRACK_COLOR_PALETTE,
+  cycleTrackColor,
+  evaluateLivePlaylist,
+} from "../src/renderer/media/library-ux.ts";
+
+test("PlaylistStore creates, renames, reorders tracks/playlists, removes, and serializes cleanly", () => {
+  const store = new PlaylistStore();
+  const warmup = store.create("Warmup Set", ["t1", "t2", "t1"]);
+  assert.deepEqual(warmup.trackIds, ["t1", "t2"]);
+  assert.equal(store.addTrack(warmup.id, "t3"), true);
+  assert.equal(store.addTrack(warmup.id, "t2"), false);
+  assert.equal(store.moveTrack(warmup.id, 2, 0), true);
+  assert.deepEqual(store.get(warmup.id)?.trackIds, ["t3", "t1", "t2"]);
+  assert.equal(store.rename(warmup.id, "Opening Hour"), true);
+  assert.equal(store.get(warmup.id)?.name, "Opening Hour");
+
+  const peak = store.create("Peak Hour", ["t4"]);
+  assert.equal(store.movePlaylist(1, 0), true);
+  assert.deepEqual(store.list().map((p) => p.id), [peak.id, warmup.id]);
+
+  const roundTrip = PlaylistStore.fromJSON(store.toJSON());
+  assert.deepEqual(roundTrip.list(), store.list());
+
+  assert.equal(store.removeTrack(warmup.id, "t1"), true);
+  assert.deepEqual(store.get(warmup.id)?.trackIds, ["t3", "t2"]);
+  assert.equal(store.remove(peak.id), true);
+  assert.equal(store.list().length, 1);
+});
+
+test("LivePlaylistStore and evaluateLivePlaylist evaluate all/any rules across numeric, text, and boolean fields", () => {
+  const tracks = [
+    { id: "1", name: "Acid Rain", artist: "Floorplan", crate: "Techno", bpm: 128, key: "8A", playCount: 5, color: "#FF9999", duration: 360 },
+    { id: "2", name: "Deep Groove", artist: "Kerri", crate: "House", bpm: 123, key: "5A", playCount: 0, color: "#99FF99", duration: 410 },
+    { id: "3", name: "Warehouse 99", artist: "Surgeon", crate: "Techno", bpm: 136, key: "8A", playCount: 12, color: "#99CCFF", duration: 300 },
+  ];
+
+  const liveStore = new LivePlaylistStore();
+  const technoPeak = liveStore.create(
+    "Techno 126-138",
+    [
+      { field: "crate", operator: "equals", value: "techno" },
+      { field: "bpm", operator: "between", value: 126, valueTo: 138 },
+      { field: "played", operator: "equals", value: true },
+    ],
+    "all",
+  );
+  assert.deepEqual(liveStore.evaluate(technoPeak.id, tracks).map((t) => t.id), ["1", "3"]);
+
+  const anyMatch = evaluateLivePlaylist(tracks, {
+    id: "any-test",
+    name: "Any Match",
+    match: "any",
+    rules: [
+      { field: "artist", operator: "contains", value: "kerri" },
+      { field: "playCount", operator: "gte", value: 10 },
+    ],
+  });
+  assert.deepEqual(anyMatch.map((t) => t.id), ["2", "3"]);
+
+  liveStore.update(technoPeak.id, { limit: 1 });
+  assert.deepEqual(liveStore.evaluate(technoPeak.id, tracks).map((t) => t.id), ["1"]);
+});
+
+test("cycleTrackColor and sortTracks support playCount, color, artist, and genre", () => {
+  const firstColor = cycleTrackColor("");
+  assert.equal(firstColor, TRACK_COLOR_PALETTE[0]);
+  const secondColor = cycleTrackColor(firstColor);
+  assert.equal(secondColor, TRACK_COLOR_PALETTE[1]);
+  assert.equal(cycleTrackColor(TRACK_COLOR_PALETTE[TRACK_COLOR_PALETTE.length - 1]), "");
+
+  const tracks = [
+    { name: "B", playCount: 2, color: "#FF9999", artist: "Zed" },
+    { name: "A", playCount: 9, color: "#99FF99", artist: "Alpha" },
+    { name: "C", color: "#CC99FF", artist: "Beta" },
+  ];
+  assert.deepEqual(sortTracks(tracks, "playCount", "desc").map((t) => t.name), ["A", "B", "C"]);
+  assert.deepEqual(sortTracks(tracks, "color", "asc").map((t) => t.name), ["A", "C", "B"]);
+  assert.deepEqual(sortTracks(tracks, "artist", "asc").map((t) => t.name), ["A", "C", "B"]);
+});

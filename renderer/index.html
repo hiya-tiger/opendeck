@@ -25,14 +25,18 @@
     <div class="topbar-right">
       <span class="muted mono" id="clock">--:--</span>
       <span class="rec-time mono" id="recTime">00:00</span>
+      <button id="fourDeckToggle" class="pill-btn" type="button" aria-pressed="false" title="Toggle 2-deck / 4-deck workspace">4 Decks</button>
       <button id="waveMode" class="pill-btn" type="button" aria-pressed="false">Vertical waves</button>
       <button id="recBtn" class="pill-btn" type="button" aria-pressed="false"><span class="rec-dot"></span>Record</button>
       <a id="saveMix" class="pill-btn hidden" download="opendeck-mix.webm">Save mix</a>
     </div>
   </header>
 
-  <main class="workspace">
-    <div id="deckSlotA" class="deck-slot"></div>
+  <main class="workspace" id="workspace">
+    <div class="deck-column">
+      <div id="deckSlotA" class="deck-slot"></div>
+      <div id="deckSlotC" class="deck-slot hidden"></div>
+    </div>
 
     <section class="mixer" aria-label="Mixer">
       <div class="mixer-head">
@@ -45,18 +49,23 @@
         <canvas id="meterB" width="14" height="120" aria-label="Deck B level"></canvas>
       </div>
       <div class="xfader">
-        <div class="xfader-labels"><span>A</span><span class="eyebrow">Crossfader</span><span>B</span></div>
+        <div class="xfader-labels"><span>A/C</span><span class="eyebrow">Crossfader</span><span>B/D</span></div>
         <input id="crossfader" type="range" min="0" max="1" step="0.01" value="0.5" aria-label="Crossfader">
-        <select id="xfCurve" class="mini-select" aria-label="Crossfader curve">
-          <option value="smooth">Smooth curve</option>
-          <option value="fast">Fast curve</option>
-          <option value="cut">Cut</option>
-        </select>
+        <div class="xfader-opts">
+          <select id="xfCurve" class="mini-select" aria-label="Crossfader curve">
+            <option value="smooth">Smooth curve</option>
+            <option value="fast">Fast curve</option>
+            <option value="cut">Cut</option>
+          </select>
+          <button id="xfReverse" type="button" class="mini" aria-pressed="false" title="Reverse crossfader (Hamster)">HAM</button>
+        </div>
       </div>
       <div class="fader-row">
+        <label class="vfader hidden" id="chCWrap">C<input id="chC" type="range" min="0" max="1" step="0.01" value="0.85"></label>
         <label class="vfader">A<input id="chA" type="range" min="0" max="1" step="0.01" value="0.85"></label>
         <label class="vfader master-fader">MASTER<input id="master" type="range" min="0" max="1" step="0.01" value="0.8"></label>
         <label class="vfader">B<input id="chB" type="range" min="0" max="1" step="0.01" value="0.85"></label>
+        <label class="vfader hidden" id="chDWrap">D<input id="chD" type="range" min="0" max="1" step="0.01" value="0.85"></label>
       </div>
       <div class="aux-card">
         <div class="aux-head"><span class="eyebrow">System audio</span><span class="chip" id="auxState">off</span></div>
@@ -92,17 +101,28 @@
       </div>
     </section>
 
-    <div id="deckSlotB" class="deck-slot"></div>
+    <div class="deck-column">
+      <div id="deckSlotB" class="deck-slot"></div>
+      <div id="deckSlotD" class="deck-slot hidden"></div>
+    </div>
   </main>
 
   <section class="dvs" aria-label="DVS timecode">
     <label class="dvs-toggle"><input type="checkbox" id="dvsEnable"> DVS timecode</label>
     <select id="dvsDevice" aria-label="Audio input"><option value="">Default stereo input</option></select>
     <select id="dvsTimecode" aria-label="Timecode"></select>
+    <label class="dvs-target">Mode
+      <select id="dvsMode" aria-label="DVS mode">
+        <option value="absolute">ABS</option>
+        <option value="relative">REL</option>
+        <option value="internal">INT</option>
+      </select>
+    </label>
     <label class="dvs-target">Deck
-      <select id="dvsTarget"><option value="A">A</option><option value="B">B</option></select>
+      <select id="dvsTarget"><option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="D">D</option></select>
     </label>
     <button id="dvsCalibrate" type="button" class="ghost small">Set needle position</button>
+    <canvas id="dvsScope" width="32" height="32" aria-label="DVS scope"></canvas>
     <span id="dvsStatus" class="chip mono" data-state="off">off</span>
     <span class="micro">Serato CV02/CD, Traktor MK2, MixVibes, rekordbox timecode</span>
   </section>
@@ -112,6 +132,7 @@
       <button type="button" class="tab" data-tab="library" role="tab" aria-selected="true">Library</button>
       <button type="button" class="tab" data-tab="stream" role="tab" aria-selected="false">Stream</button>
       <button type="button" class="tab" data-tab="broadcast" role="tab" aria-selected="false">Broadcast</button>
+      <button type="button" class="tab" data-tab="video" role="tab" aria-selected="false">Video</button>
       <div class="spacer"></div>
       <span class="muted micro" id="consoleHint">Local files, Serato crates and streamed sources</span>
     </nav>
@@ -125,12 +146,19 @@
         </label>
         <div class="lib-tools">
           <input id="search" type="search" placeholder="Filter title, path, crate or key" aria-label="Filter tracks">
+          <select id="playlistFilter" class="mini-select" aria-label="Filter by playlist">
+            <option value="">All tracks</option>
+          </select>
+          <button id="newPlaylistBtn" type="button" class="ghost" title="Create a playlist from visible tracks">+ Playlist</button>
+          <button id="newLivePlaylistBtn" type="button" class="ghost" title="Create a rule-based Smart Crate">+ Smart Crate</button>
           <select id="sortBy" class="mini-select" aria-label="Sort tracks">
             <option value="title" selected>Title</option>
             <option value="bpm">BPM</option>
             <option value="key">Key</option>
             <option value="duration">Length</option>
             <option value="crate">Crate</option>
+            <option value="playCount">Plays</option>
+            <option value="color">Color</option>
           </select>
           <button id="sortDir" type="button" class="ghost" title="Toggle sort direction">A-Z</button>
           <button id="scratchBtn" type="button" class="ghost" title="Show only scratchpad tracks">Scratchpad 0</button>
@@ -140,6 +168,7 @@
           <button id="exportBtn" type="button" class="ghost" title="Download a Serato-compatible _Serato_ folder as a zip">Export Serato zip</button>
           <button id="writeTagsBtn" type="button" class="ghost" title="Write cues and beatgrid into the audio files with an undo backup">Write tags</button>
           <button id="undoTagsBtn" type="button" class="ghost" title="Restore the files changed by the last tag write">Undo tags</button>
+          <button id="applyColumnsBtn" type="button" class="ghost" title="Apply crate column layout to Serato SQLite">Sync columns</button>
           <span id="libCount" class="chip mono">0 tracks</span>
         </div>
       </div>
@@ -253,6 +282,99 @@
         </div>
       </div>
     </div>
+
+    <div class="panel hidden" data-panel="video" role="tabpanel">
+      <input id="videoFileInput" type="file" accept="video/*,.mp4,.webm,.mov,.m4v,.mkv,.ogv" hidden>
+      <div class="video-panel-grid">
+        <div class="card video-deck-card">
+          <div class="card-head">
+            <span class="eyebrow">Deck Video Transport Lock</span>
+            <span class="chip mono" id="videoLeftChip">Left: Deck A</span>
+          </div>
+          <div class="video-deck-controls">
+            <label class="micro">Left Source
+              <select id="videoLeftDeck" class="mini-select" aria-label="Left video deck">
+                <option value="A" selected>Deck A</option>
+                <option value="C">Deck C</option>
+              </select>
+            </label>
+            <button id="videoLoadA" type="button" class="ghost small" title="Load Video on Deck A">Load A</button>
+            <button id="videoLoadC" type="button" class="ghost small" title="Load Video on Deck C">Load C</button>
+            <button id="videoLoadLeftBtn" type="button" class="ghost small">Load (L)</button>
+            <button id="videoEjectLeftBtn" type="button" class="ghost small">Eject</button>
+          </div>
+          <canvas id="videoLeftCanvas" class="video-preview-canvas" width="320" height="180" aria-label="Left deck video preview"></canvas>
+          <div class="video-meta-row">
+            <span class="micro mono" id="videoLeftTitle">No video loaded</span>
+            <span class="micro mono" id="videoLeftTime">00:00.0</span>
+          </div>
+        </div>
+
+        <div class="card video-master-card">
+          <div class="card-head">
+            <span class="eyebrow">Master Video Mix & Output</span>
+            <span class="chip mono" id="videoOutputState">Window: closed</span>
+          </div>
+          <canvas id="videoMasterCanvas" class="video-master-canvas" width="480" height="270" aria-label="Master video output preview"></canvas>
+          <div class="video-xf-row">
+            <span class="micro mono">L</span>
+            <input id="videoCrossfader" type="range" min="-1" max="1" step="0.01" value="0" aria-label="Video crossfader">
+            <span class="micro mono">R</span>
+          </div>
+          <div class="video-options-row">
+            <label class="micro"><input type="checkbox" id="videoLinkXf"> Link Audio XF</label>
+            <label class="micro">Blend
+              <select id="videoBlendMode" class="mini-select" aria-label="Video blend mode">
+                <option value="fade" selected>Fade</option>
+                <option value="cut">Cut</option>
+                <option value="add">Add</option>
+                <option value="luma">Luma</option>
+              </select>
+            </label>
+            <label class="micro">Scale
+              <select id="videoScaleMode" class="mini-select" aria-label="Video scale mode">
+                <option value="fit" selected>Fit (Letterbox)</option>
+                <option value="fill">Fill (Crop)</option>
+              </select>
+            </label>
+          </div>
+          <div class="video-fx-row">
+            <label class="micro">Bright <input id="videoFxBright" type="range" min="0.4" max="1.8" step="0.05" value="1"></label>
+            <label class="micro">Contrast <input id="videoFxContrast" type="range" min="0.5" max="2" step="0.05" value="1"></label>
+            <label class="micro"><input type="checkbox" id="videoFxMono"> B&W</label>
+            <label class="micro"><input type="checkbox" id="videoFxInvert"> Invert</label>
+          </div>
+          <div class="video-output-actions">
+            <button id="videoOutputBtn" type="button" class="primary small">Open 2nd Output Window</button>
+            <button id="videoFullscreenBtn" type="button" class="ghost small">Fullscreen Output</button>
+          </div>
+        </div>
+
+        <div class="card video-deck-card">
+          <div class="card-head">
+            <span class="eyebrow">Deck Video Transport Lock</span>
+            <span class="chip mono" id="videoRightChip">Right: Deck B</span>
+          </div>
+          <div class="video-deck-controls">
+            <label class="micro">Right Source
+              <select id="videoRightDeck" class="mini-select" aria-label="Right video deck">
+                <option value="B" selected>Deck B</option>
+                <option value="D">Deck D</option>
+              </select>
+            </label>
+            <button id="videoLoadB" type="button" class="ghost small" title="Load Video on Deck B">Load B</button>
+            <button id="videoLoadD" type="button" class="ghost small" title="Load Video on Deck D">Load D</button>
+            <button id="videoLoadRightBtn" type="button" class="ghost small">Load (R)</button>
+            <button id="videoEjectRightBtn" type="button" class="ghost small">Eject</button>
+          </div>
+          <canvas id="videoRightCanvas" class="video-preview-canvas" width="320" height="180" aria-label="Right deck video preview"></canvas>
+          <div class="video-meta-row">
+            <span class="micro mono" id="videoRightTitle">No video loaded</span>
+            <span class="micro mono" id="videoRightTime">00:00.0</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 </div>
 
@@ -274,6 +396,8 @@
       </div>
       <span class="chip mono deck-bpm">-- BPM</span>
       <span class="chip mono deck-key">--</span>
+      <button type="button" class="mini clone-btn" title="Instant Double from opposite deck">2×</button>
+      <button type="button" class="mini eject-btn" title="Eject track">⏏</button>
     </header>
 
     <div class="wave-card">
@@ -302,6 +426,8 @@
       <button type="button" class="play" title="Play / pause">PLAY</button>
       <button type="button" class="sync" title="Beat sync to the other deck">SYNC</button>
       <button type="button" class="loop" title="Toggle loop">LOOP</button>
+      <button type="button" class="mini slip-toggle" aria-pressed="false" title="Return-Mode (Slip): snap back to underlying timeline on release">SLIP</button>
+      <button type="button" class="mini censor-btn" aria-pressed="false" title="Hold to reverse playback and snap forward on release">CENSOR</button>
     </div>
 
     <div class="control-row">
@@ -328,6 +454,19 @@
       </div>
     </div>
 
+    <div class="control-row grid-row">
+      <span class="row-label">Grid</span>
+      <div class="grid-btns">
+        <button type="button" class="mini grid-shift-left" title="Slide beatgrid earlier">◀</button>
+        <button type="button" class="mini grid-downbeat" title="Set first beat marker at playhead">SET 1</button>
+        <button type="button" class="mini grid-shift-right" title="Slide beatgrid later">▶</button>
+        <button type="button" class="mini grid-half" title="Halve BPM">÷2</button>
+        <button type="button" class="mini grid-double" title="Double BPM">×2</button>
+        <button type="button" class="mini grid-tap" title="Tap BPM">TAP</button>
+        <button type="button" class="mini grid-lock" aria-pressed="false" title="Lock beatgrid and BPM">LOCK</button>
+      </div>
+    </div>
+
     <div class="control-row tempo-row">
       <span class="row-label">Tempo</span>
       <input class="pitch" type="range" min="-50" max="50" step="0.1" value="0" aria-label="Tempo">
@@ -338,6 +477,9 @@
         <option value="50" selected>±50%</option>
       </select>
       <button type="button" class="mini keylock" aria-pressed="true" title="Key lock">KEY</button>
+      <button type="button" class="mini key-down" title="Transpose key down 1 semitone">−</button>
+      <button type="button" class="mini key-val mono" title="Click to reset key shift">0 st</button>
+      <button type="button" class="mini key-up" title="Transpose key up 1 semitone">+</button>
     </div>
 
     <div class="eq-row">

@@ -611,3 +611,63 @@ body.vertical-waves canvas.wf-zoom { height: 240px; }
 body.vertical-waves .wave-card { display: flex; flex-direction: column; }
 
 
+
+/* 4-deck workspace, beatgrid row, color dots, DVS scope & track end warning */
+.deck-column { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.deck-slot.hidden { display: none; }
+.xfader-opts { display: flex; align-items: center; gap: 6px; }
+.grid-btns { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.deck-time.track-end-warn { color: var(--bad); font-weight: 700; animation: pulse-warn 0.9s infinite alternate; }
+@keyframes pulse-warn { from { opacity: 1; } to { opacity: 0.45; } }
+.color-dot {
+  width: 11px; height: 11px; border-radius: 50%; padding: 0;
+  border: 1px solid var(--line-strong); background: transparent; cursor: pointer;
+  margin-right: 5px; vertical-align: middle;
+}
+.play-count-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 5px;
+  font-size: 9.5px; border-radius: 99px; background: var(--surface-2); color: var(--muted);
+}
+#dvsScope {
+  border-radius: 6px; border: 1px solid var(--line-strong); background: #080c14;
+}
+#fourDeckToggle[aria-pressed="true"] {
+  background: var(--brand-soft); border-color: #33447a; color: var(--brand-ink);
+}
+
+/* Phase 7: Video Mixing Panel */
+.video-panel-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.25fr 1fr;
+  gap: 12px;
+  padding: 10px 0;
+}
+.video-deck-card,
+.video-master-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.video-preview-canvas,
+.video-master-canvas {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #05070b;
+  border: 1px solid var(--line, rgba(140, 160, 200, 0.22));
+  border-radius: 6px;
+}
+.video-deck-controls,
+.video-options-row,
+.video-fx-row,
+.video-output-actions,
+.video-meta-row,
+.video-xf-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.video-xf-row input[type="range"] {
+  flex: 1;
+}

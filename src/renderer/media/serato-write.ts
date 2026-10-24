@@ -1,4 +1,4 @@
-import { readId3, writeSeratoGeoB } from "./serato-id3.ts";
+import { readId3, writeSeratoGeoB, type SeratoTextMeta } from "./serato-id3.ts";
 import { writeSeratoExtraTags } from "./serato-extra.ts";
 import { detectRiffKind, readRiffId3, writeRiffId3, type RiffKind } from "./serato-riff.ts";
 import {
@@ -44,8 +44,8 @@ export function seratoTagUpdates(
   return updates;
 }
 
-function id3TagFrom(existing: Uint8Array | null, updates: SeratoTagUpdate[]): Uint8Array {
-  const merged = writeSeratoGeoB(existing ?? new Uint8Array(0), updates);
+function id3TagFrom(existing: Uint8Array | null, updates: SeratoTagUpdate[], meta?: SeratoTextMeta): Uint8Array {
+  const merged = writeSeratoGeoB(existing ?? new Uint8Array(0), updates, 1024, meta);
   const tag = readId3(merged);
   if (!tag) throw new Error("could not build an ID3 tag");
   return merged.subarray(0, tag.audioOffset);
@@ -55,15 +55,16 @@ export function rewriteSeratoTags(
   bytes: Uint8Array,
   container: SeratoContainer,
   updates: SeratoTagUpdate[],
+  meta?: SeratoTextMeta,
 ): Uint8Array {
-  if (container === "mp3") return writeSeratoGeoB(bytes, updates);
+  if (container === "mp3") return writeSeratoGeoB(bytes, updates, 1024, meta);
   if (container === "wav" || container === "aiff") {
     const kind: RiffKind = container;
-    const tag = id3TagFrom(readRiffId3(bytes, kind), updates);
+    const tag = id3TagFrom(readRiffId3(bytes, kind), updates, meta);
     return writeRiffId3(bytes, kind, tag);
   }
   if (container === "flac" || container === "mp4") {
-    return writeSeratoExtraTags(bytes, container, new Map(updates.map((update) => [update.description, update.data])));
+    return writeSeratoExtraTags(bytes, container, new Map(updates.map((update) => [update.description, update.data])), meta);
   }
   throw new Error(`${container} tag writing is not wired yet`);
 }

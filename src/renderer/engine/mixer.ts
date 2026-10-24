@@ -1,21 +1,49 @@
 import { Deck, type DeckId } from "./deck.ts";
 
 export type CrossfaderCurve = "smooth" | "fast" | "cut";
+export type ChannelFaderCurve = "linear" | "log" | "logarithmic" | "sharp";
+export type CrossfaderAssign = "A" | "B" | "THRU";
 
 export interface CrossfaderGains {
   a: number;
   b: number;
+  c: number;
+  d: number;
 }
 
-export function crossfaderGains(value: number, curve: CrossfaderCurve = "smooth"): CrossfaderGains {
-  const x = Math.max(0, Math.min(1, value));
+export function crossfaderGains(
+  value: number,
+  curve: CrossfaderCurve = "smooth",
+  reversed = false,
+): CrossfaderGains {
+  const raw = Math.max(0, Math.min(1, value));
+  const x = reversed ? 1 - raw : raw;
+  let left = 0;
+  let right = 0;
   if (curve === "cut") {
-    return x < 0.5 ? { a: 1, b: 0 } : { a: 0, b: 1 };
+    left = x <= 0.92 ? 1 : 0;
+    right = x >= 0.08 ? 1 : 0;
+    if (value < 0.5 && !reversed) right = 0;
+    else if (value >= 0.5 && !reversed) left = 0;
+    else if (reversed) {
+      left = x < 0.5 ? 1 : 0;
+      right = x < 0.5 ? 0 : 1;
+    }
+  } else if (curve === "fast") {
+    left = Math.pow(1 - x, 2);
+    right = Math.pow(x, 2);
+  } else {
+    left = Math.cos((x * Math.PI) / 2);
+    right = Math.sin((x * Math.PI) / 2);
   }
-  if (curve === "fast") {
-    return { a: Math.pow(1 - x, 2), b: Math.pow(x, 2) };
-  }
-  return { a: Math.cos((x * Math.PI) / 2), b: Math.sin((x * Math.PI) / 2) };
+  return { a: left, b: right, c: left, d: right };
+}
+
+export function channelFaderGain(value: number, curve: ChannelFaderCurve = "linear"): number {
+  const x = Math.max(0, Math.min(1, value));
+  if (curve === "log" || curve === "logarithmic") return Math.pow(x, 2.2);
+  if (curve === "sharp") return x > 0.05 ? Math.pow(x, 0.55) : (x / 0.05) * Math.pow(0.05, 0.55);
+  return x;
 }
 
 export interface RecordingResult {
@@ -27,6 +55,7 @@ export interface RecordingResult {
 export class Mixer {
   readonly ctx: AudioContext;
   readonly master: GainNode;
+  readonly booth: GainNode;
   readonly limiter: DynamicsCompressorNode;
   readonly streamDest: MediaStreamAudioDestinationNode;
   readonly masterAnalyser: AnalyserNode;
@@ -38,6 +67,14 @@ export class Mixer {
   private auxStream: MediaStream | null = null;
   private crossValue = 0.5;
   private crossCurve: CrossfaderCurve = "smooth";
+  private crossReversed = false;
+  private chanCurve: ChannelFaderCurve = "linear";
+  private deckAssign: Record<DeckId, CrossfaderAssign> = {
+    A: "A",
+    B: "B",
+    C: "A",
+    D: "B",
+  };
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private recordStartedAt = 0;
@@ -47,6 +84,9 @@ export class Mixer {
     this.ctx = new AudioContext({ latencyHint: "interactive" });
     this.master = this.ctx.createGain();
     this.master.gain.value = 0.8;
+
+    this.booth = this.ctx.createGain();
+    this.booth.gain.value = 0.8;
 
     this.limiter = this.ctx.createDynamicsCompressor();
     this.limiter.threshold.value = -3;
@@ -61,6 +101,7 @@ export class Mixer {
     this.masterAnalyser.smoothingTimeConstant = 0.55;
 
     this.master.connect(this.limiter);
+    this.master.connect(this.booth);
     this.limiter.connect(this.ctx.destination);
     this.limiter.connect(this.streamDest);
     this.limiter.connect(this.masterAnalyser);
@@ -71,20 +112,79 @@ export class Mixer {
   }
 
   deck(id: DeckId): Deck {
-    if (!this.decks[id]) this.decks[id] = new Deck(this.ctx, id, this.master);
+    if (!this.decks[id]) {
+      this.decks[id] = new Deck(this.ctx, id, this.master);
+      this.applyCrossfader();
+    }
     return this.decks[id]!;
+  }
+
+  private applyCrossfader(): void {
+    const gains = crossfaderGains(this.crossValue, this.crossCurve, this.crossReversed);
+    for (const id of ["A", "B", "C", "D"] as const) {
+      const deck = this.decks[id];
+      if (!deck) continue;
+      const assign = this.deckAssign[id];
+      if (assign === "THRU") deck.setCrossGain(1);
+      else if (assign === "A") deck.setCrossGain(gains.a);
+      else deck.setCrossGain(gains.b);
+    }
   }
 
   setCrossfader(value: number, curve: CrossfaderCurve = this.crossCurve): void {
     this.crossValue = Math.max(0, Math.min(1, value));
     this.crossCurve = curve;
-    const gains = crossfaderGains(this.crossValue, curve);
-    this.decks.A?.setCrossGain(gains.a);
-    this.decks.B?.setCrossGain(gains.b);
+    this.applyCrossfader();
+  }
+
+  setCrossfaderReverse(reversed: boolean): void {
+    this.crossReversed = Boolean(reversed);
+    this.applyCrossfader();
+  }
+
+  get crossfaderReverse(): boolean {
+    return this.crossReversed;
+  }
+
+  setDeckAssign(id: DeckId, assign: CrossfaderAssign): void {
+    this.deckAssign[id] = assign;
+    this.applyCrossfader();
+  }
+
+  getDeckAssign(id: DeckId): CrossfaderAssign {
+    return this.deckAssign[id];
+  }
+
+  setChannelCurve(curve: ChannelFaderCurve): void {
+    this.chanCurve = curve;
+  }
+
+  get channelCurve(): ChannelFaderCurve {
+    return this.chanCurve;
   }
 
   setMaster(value: number): void {
     this.master.gain.setTargetAtTime(value, this.ctx.currentTime, 0.01);
+  }
+
+  setBoothGain(value: number): void {
+    this.booth.gain.setTargetAtTime(Math.max(0, Math.min(1.5, value)), this.ctx.currentTime, 0.01);
+  }
+
+  get boothGainValue(): number {
+    return this.booth.gain.value;
+  }
+
+  get limiterReductionDb(): number {
+    return typeof this.limiter.reduction === "number" ? this.limiter.reduction : 0;
+  }
+
+  get limiterActive(): boolean {
+    return this.limiterReductionDb < -0.5;
+  }
+
+  limiterWarning(): boolean {
+    return this.limiterActive;
   }
 
   get crossfader(): number {

@@ -1,5 +1,6 @@
-﻿import { Deck } from "../src/renderer/engine/deck.ts";
+import { Deck } from "../src/renderer/engine/deck.ts";
 import { PcmSource } from "../src/renderer/engine/pcm-source.ts";
+import { VideoMixer, computeAspectRect, shouldResyncVideoElement } from "../src/renderer/engine/video-mixer.ts";
 
 interface SmokeResult {
   ok: boolean;
@@ -13,14 +14,19 @@ interface SmokeResult {
   deckLoopPosition: number;
   deckLatency: number;
   deckPitch: boolean;
+  pitchShiftChecked: boolean;
+  censorChecked: boolean;
+  customFxChecked: boolean;
   reversed: boolean;
   deckPlaying: boolean;
   stemParts: number;
   stemRms: number;
   stemPosition: number;
   stemScratch: boolean;
+  stemPlatterScratch: boolean;
   stemPlaying: boolean;
   stemEngine: string;
+  videoSyncChecked: boolean;
   error?: string;
 }
 
@@ -87,14 +93,19 @@ async function run(): Promise<SmokeResult> {
     deckLoopPosition: 0,
     deckLatency: 1,
     deckPitch: false,
+    pitchShiftChecked: false,
+    censorChecked: false,
+    customFxChecked: false,
     reversed: false,
     deckPlaying: false,
     stemParts: 0,
     stemRms: 0,
     stemPosition: 0,
     stemScratch: false,
+    stemPlatterScratch: false,
     stemPlaying: false,
     stemEngine: "media",
+    videoSyncChecked: false,
   };
   const ctx = new AudioContext({ latencyHint: "interactive" });
   try {
@@ -136,12 +147,30 @@ async function run(): Promise<SmokeResult> {
       result.deckEngine = deck.engine;
       result.deckLatency = deck.latencySeconds;
       result.deckPitch = deck.pitchPreserved;
+      deck.setPitchShift(3);
+      result.pitchShiftChecked = deck.pitchShift === 3;
+      deck.setPitchShift(0);
+      deck.setCustomFxChain([
+        { type: "filter", division: "1/4", amount: 0.6, wet: 0.7, enabled: true },
+        { type: "echo", division: "1/8", amount: 0.4, wet: 0.5, enabled: true },
+      ]);
+      result.customFxChecked = deck.customFxChain.length === 2 && deck.fx === "filter";
+      deck.setCustomFxChain([]);
+      deck.setFx("off");
+
       await deck.play();
       await waitFor(() => deck.currentTime > 0.1, 3000);
       await wait(200);
       result.deckRms = deck.level;
       result.deckPosition = deck.currentTime;
       result.deckPlaying = deck.playing;
+      deck.setReturnMode(true);
+      deck.beginReverseOnHold();
+      const reverseActive = deck.censorActive;
+      await wait(40);
+      deck.endReverseOnHold();
+      result.censorChecked = Boolean(reverseActive) && !deck.censorActive && Boolean(deck.returnMode);
+      deck.setReturnMode(false);
       deck.setLoopRange(0.5, 0.75, true);
       await waitFor(() => deck.currentTime >= 0.49, 1500);
       result.deckLoopPosition = deck.currentTime;
@@ -176,7 +205,33 @@ async function run(): Promise<SmokeResult> {
       await wait(120);
       deck.endPartScratch();
       result.stemScratch = result.stemScratch && deck.partScratching === null;
+
+      deck.beginScratch();
+      const platterStarted = deck.scratchingActive;
+      deck.scratchDrive(1, 0.04);
+      await wait(60);
+      deck.endScratch();
+      result.stemPlatterScratch = Boolean(platterStarted) && !deck.scratchingActive;
       deck.pause();
+
+      const vm = new VideoMixer();
+      vm.loadVideo("A", "blob:smoke-video-a", "smoke-a.mp4", 2);
+      const vSlotFwd = vm.syncDeck("A", { currentTime: deck.currentTime, duration: 2, playing: true, rate: 1 });
+      const vSyncFwd = shouldResyncVideoElement(vSlotFwd.currentTime, vSlotFwd.currentTime, true, 1, false, false);
+      const vSlotRev = vm.syncDeck("A", { currentTime: 0.4, duration: 2, playing: true, rate: -1, reversed: true });
+      const vSyncRev = shouldResyncVideoElement(0.6, vSlotRev.currentTime, true, -1, true, false);
+      vm.setCrossfader(-0.5);
+      const w = vm.weights();
+      const fit = computeAspectRect(1920, 1080, 1280, 720, "fit");
+      result.videoSyncChecked =
+        vSyncFwd.shouldPlay === true &&
+        vSyncRev.shouldPlay === false &&
+        vSyncRev.seek === true &&
+        w.left === 0.75 &&
+        w.right === 0.25 &&
+        fit.width === 1280 &&
+        fit.height === 720;
+
     } finally {
       deck.destroy();
     }
@@ -193,11 +248,16 @@ async function run(): Promise<SmokeResult> {
       result.deckLatency > 0 &&
       result.deckLatency < 0.01 &&
       result.deckPitch &&
+      result.pitchShiftChecked &&
+      result.censorChecked &&
+      result.customFxChecked &&
       result.reversed &&
       result.stemParts === 4 &&
       result.stemRms > 0.05 &&
       result.stemPosition > 0.1 &&
-      result.stemScratch;
+      result.stemScratch &&
+      result.stemPlatterScratch &&
+      result.videoSyncChecked;
   } catch (error) {
     result.error = (error as Error).message;
   } finally {

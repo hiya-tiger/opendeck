@@ -1,7 +1,7 @@
 import { Mixer, type CrossfaderCurve } from "./engine/mixer.ts";
 import { Deck, HOT_CUE_COLORS, type DeckState, type DeckId } from "./engine/deck.ts";
 import { analyzeBuffer, formatTime, formatClock, type AnalysisResult } from "./engine/analyze.ts";
-import { beatSeconds, formatBeatPosition, LOOP_BEATS } from "./engine/beatgrid.ts";
+import { beatSeconds, formatBeatPosition, LOOP_BEATS, beatGridToMarkers, markersToBeatGrid } from "./engine/beatgrid.ts";
 import { syncDeck } from "./engine/sync.ts";
 import { FX_DEFS, DIVISIONS, fxDefault, type Division, type FxType } from "./engine/fx.ts";
 import { STEMS, type StemId } from "./engine/stems.ts";
@@ -23,7 +23,7 @@ import {
   type CueRecord,
   type SavedLoop,
 } from "./media/cue-store.ts";
-import type { PlayedEntry } from "./media/library-ux.ts";
+import type { PlayedEntry, TrackSortKey, LivePlaylistRule } from "./media/library-ux.ts";
 import { zipSync } from "fflate";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
@@ -33,6 +33,15 @@ import { WhipBroadcaster, type BroadcastStatus } from "./broadcast/whip.ts";
 import { normaliseDegrees, pointerAngle, scratchPosition } from "./engine/scratch.ts";
 import { Sampler, SAMPLER_BANKS, SAMPLER_SLOTS, type SamplerBank } from "./engine/sampler.ts";
 import { ScratchBank } from "./engine/scratch-bank.ts";
+import {
+  VideoMixer,
+  computeAspectRect,
+  formatVideoCssFilter,
+  isVideoFile,
+  shouldResyncVideoElement,
+  type VideoBlendMode,
+  type VideoScaleMode,
+} from "./engine/video-mixer.ts";
 import {
   PART_FX_PADS,
   PAD_MODE_DEFS,
@@ -96,6 +105,7 @@ interface SeratoWritePayload {
   name: string;
   markers: SeratoMarkers;
   beatgrid: BeatGridMarker[] | null;
+  meta?: { bpm?: number; key?: string; title?: string; artist?: string };
 }
 
 interface SeratoWriteResult {
@@ -147,11 +157,25 @@ interface DesktopApi {
     read: (dir: string) => Promise<{ manifest: StemManifest; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }>;
     onProgress: (handler: (payload: unknown) => void) => () => void;
   };
+  video?: {
+    openOutput: (opts?: { fullscreen?: boolean }) => Promise<{ open: boolean; fullscreen: boolean }>;
+    closeOutput: () => Promise<{ open: boolean; fullscreen: boolean }>;
+    fullscreenOutput: (fullscreen?: boolean) => Promise<{ open: boolean; fullscreen: boolean }>;
+    statusOutput: () => Promise<{ open: boolean; fullscreen: boolean }>;
+    syncOutput: (state: unknown) => Promise<{ ok: boolean }>;
+    onOutputState: (handler: (payload: unknown) => void) => () => void;
+    onOutputClosed: (handler: (payload: unknown) => void) => () => void;
+  };
   serato?: {
     running: () => Promise<boolean>;
     writeTags: (request: { root: string | null; tracks: SeratoWritePayload[] }) => Promise<SeratoWriteResult>;
     undo: () => Promise<SeratoWriteResult>;
+    applyCrateColumns?: (request: { sqlitePath?: string; columns: { name: string; width: number }[] }) => Promise<{ ok: boolean; detail: string }>;
   };
+  videoOpenOutput?: (fullscreen?: boolean) => Promise<{ open: boolean; fullscreen: boolean }>;
+  videoCloseOutput?: () => Promise<{ open: boolean; fullscreen: boolean }>;
+  videoFullscreenOutput?: (fullscreen?: boolean) => Promise<{ open: boolean; fullscreen: boolean }>;
+  videoSyncOutput?: (state: unknown) => Promise<{ ok: boolean; open: boolean; fullscreen: boolean }>;
 }
 
 declare global {
@@ -166,25 +190,34 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getEl
 const mixer = new Mixer();
 const sampler = new Sampler(mixer.ctx, mixer.master);
 const scratchBank = new ScratchBank(mixer.ctx, mixer.master);
-const decks: Record<DeckId, Deck> = { A: mixer.deck("A"), B: mixer.deck("B") };
+const videoMixer = new VideoMixer();
+const ALL_DECKS: readonly DeckId[] = ["A", "B", "C", "D"] as const;
+const decks: Record<DeckId, Deck> = {
+  A: mixer.deck("A"),
+  B: mixer.deck("B"),
+  C: mixer.deck("C"),
+  D: mixer.deck("D"),
+};
 const waves: Partial<Record<DeckId, Waveform>> = {};
 const zooms: Partial<Record<DeckId, ZoomWaveform>> = {};
 const meta: Partial<Record<DeckId, Track>> = {};
 const ui: Partial<Record<DeckId, Record<string, HTMLElement>>> = {};
-const synced: Record<DeckId, boolean> = { A: false, B: false };
+const synced: Record<DeckId, boolean> = { A: false, B: false, C: false, D: false };
 const states: Partial<Record<DeckId, DeckState>> = {};
-const savedLoops: Record<DeckId, SavedLoop[]> = { A: [], B: [] };
-const loopsOpen: Record<DeckId, boolean> = { A: false, B: false };
-const wasPlaying: Record<DeckId, boolean> = { A: false, B: false };
+const savedLoops: Record<DeckId, SavedLoop[]> = { A: [], B: [], C: [], D: [] };
+const loopsOpen: Record<DeckId, boolean> = { A: false, B: false, C: false, D: false };
+const wasPlaying: Record<DeckId, boolean> = { A: false, B: false, C: false, D: false };
 let lastPadVersion: Partial<Record<DeckId, string>> = {};
 let rafPending = false;
 
-const padModes: Record<DeckId, PadMode> = { A: "hot-cue", B: "hot-cue" };
+const padModes: Record<DeckId, PadMode> = { A: "hot-cue", B: "hot-cue", C: "hot-cue", D: "hot-cue" };
 const padSequences: Record<DeckId, SequenceRecorder> = {
   A: new SequenceRecorder(),
   B: new SequenceRecorder(),
+  C: new SequenceRecorder(),
+  D: new SequenceRecorder(),
 };
-const padSequenceEvents: Record<DeckId, ReturnType<SequenceRecorder["list"]>> = { A: [], B: [] };
+const padSequenceEvents: Record<DeckId, ReturnType<SequenceRecorder["list"]>> = { A: [], B: [], C: [], D: [] };
 const sequencePlayback: Partial<
   Record<DeckId, { timer: number; startedAt: number; next: number; cycle: number; loopMs: number }>
 > = {};
@@ -204,10 +237,14 @@ const padHolds: Partial<Record<DeckId, PadHold>> = {};
 const partFxMuted: Record<DeckId, Record<PartId, boolean>> = {
   A: { drums: false, bass: false, other: false, vocals: false },
   B: { drums: false, bass: false, other: false, vocals: false },
+  C: { drums: false, bass: false, other: false, vocals: false },
+  D: { drums: false, bass: false, other: false, vocals: false },
 };
 const partFxFiltered: Record<DeckId, Record<PartId, boolean>> = {
   A: { drums: false, bass: false, other: false, vocals: false },
   B: { drums: false, bass: false, other: false, vocals: false },
+  C: { drums: false, bass: false, other: false, vocals: false },
+  D: { drums: false, bass: false, other: false, vocals: false },
 };
 let samplerBank: SamplerBank = "A";
 
@@ -478,6 +515,20 @@ function buildDeck(deckId: DeckId): void {
     fxType: node.querySelector(".fx-type") as HTMLSelectElement,
     fxWet: node.querySelector(".fx-wet") as HTMLInputElement,
     fxDiv: node.querySelector(".fx-div") as HTMLSelectElement,
+    cloneBtn: node.querySelector(".clone-btn") as HTMLButtonElement | null,
+    ejectBtn: node.querySelector(".eject-btn") as HTMLButtonElement | null,
+    slipToggle: node.querySelector(".slip-toggle") as HTMLButtonElement | null,
+    censorBtn: node.querySelector(".censor-btn") as HTMLButtonElement | null,
+    keyDown: node.querySelector(".key-down") as HTMLButtonElement | null,
+    keyVal: node.querySelector(".key-val") as HTMLButtonElement | null,
+    keyUp: node.querySelector(".key-up") as HTMLButtonElement | null,
+    gridShiftLeft: node.querySelector(".grid-shift-left") as HTMLButtonElement | null,
+    gridDownbeat: node.querySelector(".grid-downbeat") as HTMLButtonElement | null,
+    gridShiftRight: node.querySelector(".grid-shift-right") as HTMLButtonElement | null,
+    gridHalf: node.querySelector(".grid-half") as HTMLButtonElement | null,
+    gridDouble: node.querySelector(".grid-double") as HTMLButtonElement | null,
+    gridTap: node.querySelector(".grid-tap") as HTMLButtonElement | null,
+    gridLock: node.querySelector(".grid-lock") as HTMLButtonElement | null,
   };
   ui[deckId] = refs;
 
@@ -545,6 +596,7 @@ function buildDeck(deckId: DeckId): void {
     pad.addEventListener("pointerup", (event) => {
       if (event.button !== 0) return;
       releasePadHold(deckId);
+      if (padModes[deckId] === "hot-cue") deck.releaseHotCue();
     });
     pad.addEventListener("pointercancel", () => releasePadHold(deckId));
     pad.addEventListener("pointerleave", () => releasePadHold(deckId));
@@ -601,6 +653,129 @@ function buildDeck(deckId: DeckId): void {
     refs.pitch.min = String(-max);
     refs.pitch.max = String(max);
     if (Math.abs(deck.tempo) > max) applyTempo(deckId, Math.sign(deck.tempo) * max);
+  });
+
+
+  const refreshGridUi = (): void => {
+    const track = meta[deckId];
+    if (track) {
+      track.bpm = deck.info.bpm;
+      track.beatPhase = deck.info.beatPhase;
+      track.beatgridLocked = deck.beatgridLocked;
+      library.setMeta(track, {});
+    }
+    refs.bpm.textContent = deck.info.bpm ? `${deck.info.bpm.toFixed(1)} BPM` : "-- BPM";
+    zooms[deckId]?.setBpm(deck.info.bpm, deck.info.beatPhase);
+    refs.gridLock?.setAttribute("aria-pressed", String(deck.beatgridLocked));
+    if (refs.gridLock) refs.gridLock.textContent = deck.beatgridLocked ? "LOCKED" : "LOCK";
+  };
+
+  refs.cloneBtn?.addEventListener("click", async () => {
+    const sourceOrder: DeckId[] = deckId === "A" ? ["B", "C", "D"] : deckId === "B" ? ["A", "D", "C"] : deckId === "C" ? ["A", "B", "D"] : ["B", "A", "C"];
+    const sourceId = sourceOrder.find((id) => decks[id].hasTrack) ?? sourceOrder[0]!;
+    if (!decks[sourceId].hasTrack) {
+      toast("No active track on opposite deck to clone.");
+      return;
+    }
+    await deck.cloneFrom(decks[sourceId]);
+    meta[deckId] = meta[sourceId];
+    const track = meta[deckId];
+    if (track) {
+      refs.title.textContent = track.name;
+      refs.sub.textContent = track.file ? track.file.name : track.path;
+      setVinylArt(deckId, track.artwork);
+      applyTrackToDeck(track, deckId);
+    }
+    updatePads(deckId, true);
+    syncLoopButtons(deckId);
+    toast(`Instant Double ${sourceId} → ${deckId}`);
+  });
+
+  refs.ejectBtn?.addEventListener("click", () => {
+    deck.eject();
+    delete meta[deckId];
+    refs.title.textContent = "No track";
+    refs.sub.textContent = "Drop audio or load from the library";
+    refs.bpm.textContent = "-- BPM";
+    refs.key.textContent = "--";
+    setVinylArt(deckId, null);
+    waves[deckId]?.clear();
+    updatePads(deckId, true);
+  });
+
+  refs.slipToggle?.addEventListener("click", () => {
+    const enabled = deck.toggleReturnMode();
+    refs.slipToggle.setAttribute("aria-pressed", String(enabled));
+  });
+
+  if (refs.censorBtn) {
+    const stopCensor = (): void => {
+      if (!deck.censorActive) return;
+      deck.endReverseOnHold();
+      refs.censorBtn.setAttribute("aria-pressed", "false");
+    };
+    refs.censorBtn.addEventListener("pointerdown", (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      deck.beginReverseOnHold();
+      refs.censorBtn.setAttribute("aria-pressed", "true");
+    });
+    refs.censorBtn.addEventListener("pointerup", stopCensor);
+    refs.censorBtn.addEventListener("pointercancel", stopCensor);
+    refs.censorBtn.addEventListener("pointerleave", stopCensor);
+  }
+
+  const updateKeyShiftUi = (): void => {
+    if (!refs.keyVal) return;
+    const st = deck.pitchShift;
+    refs.keyVal.textContent = `${st > 0 ? "+" : ""}${st} st`;
+  };
+  refs.keyDown?.addEventListener("click", () => {
+    deck.shiftKeySemitones(-1);
+    updateKeyShiftUi();
+  });
+  refs.keyUp?.addEventListener("click", () => {
+    deck.shiftKeySemitones(1);
+    updateKeyShiftUi();
+  });
+  refs.keyVal?.addEventListener("click", () => {
+    deck.resetKeyShift();
+    updateKeyShiftUi();
+  });
+
+  refs.gridShiftLeft?.addEventListener("click", () => {
+    if (deck.beatgridLocked) { toast("Beatgrid is locked."); return; }
+    deck.shiftGrid(-0.01);
+    refreshGridUi();
+  });
+  refs.gridShiftRight?.addEventListener("click", () => {
+    if (deck.beatgridLocked) { toast("Beatgrid is locked."); return; }
+    deck.shiftGrid(0.01);
+    refreshGridUi();
+  });
+  refs.gridDownbeat?.addEventListener("click", () => {
+    if (deck.beatgridLocked) { toast("Beatgrid is locked."); return; }
+    deck.setGridDownbeatHere();
+    refreshGridUi();
+  });
+  refs.gridHalf?.addEventListener("click", () => {
+    if (deck.beatgridLocked) { toast("Beatgrid is locked."); return; }
+    deck.scaleGridBpm(0.5);
+    refreshGridUi();
+  });
+  refs.gridDouble?.addEventListener("click", () => {
+    if (deck.beatgridLocked) { toast("Beatgrid is locked."); return; }
+    deck.scaleGridBpm(2);
+    refreshGridUi();
+  });
+  refs.gridTap?.addEventListener("click", () => {
+    if (deck.beatgridLocked) { toast("Beatgrid is locked."); return; }
+    deck.tapGridBpm(performance.now());
+    refreshGridUi();
+  });
+  refs.gridLock?.addEventListener("click", () => {
+    deck.toggleBeatgridLock();
+    refreshGridUi();
   });
 
   refs.keylock.addEventListener("click", () => {
@@ -1313,6 +1488,9 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   if (!hadLocalCues) void applySeratoCues(track, deckId);
   if (track.analyzed) applyTrackToDeck(track, deckId);
   else enqueueAnalysis(track);
+  if (track.file && isVideoFile(track.file)) {
+    loadVideoOntoDeck(deckId, track.file);
+  }
   await mixer.resume();
   setEngineState("audio engine running", true);
   void refreshParts(deckId);
@@ -1479,14 +1657,29 @@ async function applySeratoCues(track: Track, deckId: DeckId): Promise<void> {
     persistLoops(deckId);
     renderSavedLoops(deckId);
   }
+  if (tags.markers?.trackColor && tags.markers.trackColor !== NO_TRACK_COLOR && !track.color) {
+    track.color = tags.markers.trackColor;
+  }
   const tempo = beatgridTempo(tags.beatgrid);
-  if (tempo && !track.analyzed && track.bpm <= 0) {
-    track.bpm = tempo.bpm;
-    track.beatPhase = tempo.phase;
+  const tagBpm = tempo?.bpm || tags.bpm || 0;
+  if (tagBpm > 0 && !track.analyzed && track.bpm <= 0) {
+    track.bpm = tagBpm;
+    track.beatPhase = tempo?.phase ?? 0;
     deck.setBpm(track.bpm, track.beatPhase);
     ui[deckId]!.bpm.textContent = `${track.bpm.toFixed(1)} BPM`;
     zooms[deckId]?.setBpm(track.bpm, track.beatPhase);
   }
+  if (tags.key && (!track.key || track.key === "--")) {
+    track.key = tags.key;
+    ui[deckId]!.key.textContent = track.key;
+  }
+  if (tags.beatgrid?.length) {
+    deck.setBeatGrid(markersToBeatGrid(tags.beatgrid, track.bpm || 120, track.beatPhase || 0, Boolean(tags.markers?.bpmLocked)));
+  } else if (tags.markers?.bpmLocked) {
+    deck.setBeatgridLocked(true);
+  }
+  track.beatgridLocked = deck.beatgridLocked;
+  ui[deckId]?.gridLock?.setAttribute("aria-pressed", String(deck.beatgridLocked));
   const loop = firstSavedLoop(tags.markers?.loops);
   if (loop) deck.setLoopRange(loop.start, loop.end, false);
 }
@@ -1996,8 +2189,61 @@ function refreshLibraryChrome(): void {
 }
 
 $("sortBy").addEventListener("change", (event) =>
-  library.setSort((event.target as HTMLSelectElement).value as "title" | "bpm" | "key" | "duration" | "crate"),
+  library.setSort((event.target as HTMLSelectElement).value as TrackSortKey),
 );
+
+function refreshPlaylistOptions(): void {
+  const select = document.getElementById("playlistFilter") as HTMLSelectElement | null;
+  if (!select) return;
+  const current = select.value;
+  select.replaceChildren();
+  const allOpt = document.createElement("option");
+  allOpt.value = "all";
+  allOpt.textContent = "All tracks";
+  select.append(allOpt);
+  for (const pl of library.playlists.list()) {
+    const opt = document.createElement("option");
+    opt.value = `playlist:${pl.id}`;
+    opt.textContent = `Playlist · ${pl.name} (${pl.trackIds.length})`;
+    select.append(opt);
+  }
+  for (const lp of library.livePlaylists.list()) {
+    const opt = document.createElement("option");
+    opt.value = `live:${lp.id}`;
+    opt.textContent = `Smart · ${lp.name}`;
+    select.append(opt);
+  }
+  select.value = current || "all";
+}
+
+refreshPlaylistOptions();
+
+document.getElementById("playlistFilter")?.addEventListener("change", (event) => {
+  const val = (event.target as HTMLSelectElement).value;
+  library.setActiveView(val || "all");
+});
+
+document.getElementById("newPlaylistBtn")?.addEventListener("click", () => {
+  const name = window.prompt("New playlist name", `Set ${library.playlists.list().length + 1}`);
+  if (!name?.trim()) return;
+  const visible = library.visible();
+  library.createPlaylist(name.trim(), visible.map((t) => t.id));
+  refreshPlaylistOptions();
+  toast(`Created playlist "${name.trim()}" (${visible.length} tracks)`);
+});
+
+document.getElementById("newLivePlaylistBtn")?.addEventListener("click", () => {
+  const name = window.prompt("Smart Crate name", "House 120-130 BPM");
+  if (!name?.trim()) return;
+  const minBpmStr = window.prompt("Minimum BPM (or leave blank)", "120");
+  const maxBpmStr = window.prompt("Maximum BPM (or leave blank)", "130");
+  const rules: LivePlaylistRule[] = [];
+  if (minBpmStr && Number.isFinite(Number(minBpmStr))) rules.push({ field: "bpm", operator: "gte", value: Number(minBpmStr) });
+  if (maxBpmStr && Number.isFinite(Number(maxBpmStr))) rules.push({ field: "bpm", operator: "lte", value: Number(maxBpmStr) });
+  library.createLivePlaylist(name.trim(), rules, "all");
+  refreshPlaylistOptions();
+  toast(`Created Smart Crate "${name.trim()}"`);
+});
 $("sortDir").addEventListener("click", () =>
   library.setSort(library.sortKey, library.sortDirection === "asc" ? "desc" : "asc"),
 );
@@ -2206,6 +2452,11 @@ $("exportBtn").addEventListener("click", async () => {
       bpm: track.bpm,
       key: track.key,
       duration: track.duration,
+      grouping: track.grouping,
+      remixer: track.remixer,
+      color: track.color,
+      playCount: track.playCount,
+      beatgridLocked: track.beatgridLocked,
     }));
   if (tracks.length === 0) {
     setNote("Load or import tracks before exporting.", true);
@@ -2285,11 +2536,23 @@ function writePayload(track: Track): SeratoWritePayload {
       name: loop.name,
       locked: loop.locked,
     }));
+  const activeDeck = ALL_DECKS.map((id) => (meta[id]?.id === track.id ? decks[id] : null)).find(Boolean) ?? null;
+  const gridMarkers = activeDeck
+    ? beatGridToMarkers(activeDeck.beatgrid)
+    : track.bpm > 0
+      ? [{ position: track.beatPhase || 0, bpm: track.bpm }]
+      : null;
+  const locked = activeDeck ? activeDeck.beatgridLocked : Boolean(track.beatgridLocked ?? track.bpm > 0);
   return {
     path: track.file?.webkitRelativePath || track.path,
     name: track.file?.name || track.path.split(/[\\/]/).pop() || track.name,
-    markers: { cues, loops, trackColor: NO_TRACK_COLOR, bpmLocked: track.bpm > 0 },
-    beatgrid: track.bpm > 0 ? [{ position: track.beatPhase || 0, bpm: track.bpm }] : null,
+    markers: { cues, loops, trackColor: track.color || NO_TRACK_COLOR, bpmLocked: locked },
+    beatgrid: gridMarkers,
+    meta: {
+      bpm: track.bpm > 0 ? track.bpm : undefined,
+      key: track.key && track.key !== "--" ? track.key : undefined,
+      title: track.name || undefined,
+    },
   };
 }
 
@@ -2319,6 +2582,33 @@ $("writeTagsBtn").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("applyColumnsBtn")?.addEventListener("click", async () => {
+  if (!desktop?.serato?.applyCrateColumns) {
+    setNote("SQLite column layout sync requires the Electron desktop app.", true);
+    return;
+  }
+  if (await desktop.serato.running()) {
+    setNote("Close Serato DJ Pro before syncing crate columns.", true);
+    return;
+  }
+  try {
+    const res = await desktop.serato.applyCrateColumns({
+      columns: [
+        { name: "song", width: 280 },
+        { name: "artist", width: 200 },
+        { name: "bpm", width: 72 },
+        { name: "key", width: 64 },
+        { name: "length", width: 80 },
+        { name: "playCount", width: 64 },
+      ],
+    });
+    setNote(res.detail, !res.ok);
+    if (res.ok) toast("Serato SQLite crate columns synced");
+  } catch (error) {
+    setNote(`Column sync failed: ${(error as Error).message}`, true);
+  }
+});
+
 $("undoTagsBtn").addEventListener("click", async () => {
   if (!desktop?.serato) {
     setNote("Undo is available in the Electron desktop app.", true);
@@ -2337,6 +2627,10 @@ $("undoTagsBtn").addEventListener("click", async () => {
 /* --------------------------------------------------------------- mixer */
 
 $("crossfader").addEventListener("input", (event) => {
+  videoMixer.setAudioCrossfader(Number((event.target as HTMLInputElement).value), false);
+  const vxf = document.getElementById("videoCrossfader") as HTMLInputElement | null;
+  if (vxf && videoMixer.linkToAudioCrossfader) vxf.value = String(videoMixer.crossfader);
+  renderVideoMixFrame();
   mixer.setCrossfader(Number((event.target as HTMLInputElement).value), $<HTMLSelectElement>("xfCurve").value as CrossfaderCurve);
 });
 $("xfCurve").addEventListener("change", () => {
@@ -2344,6 +2638,14 @@ $("xfCurve").addEventListener("change", () => {
 });
 $("chA").addEventListener("input", (event) => decks.A.setChannelGain(Number((event.target as HTMLInputElement).value)));
 $("chB").addEventListener("input", (event) => decks.B.setChannelGain(Number((event.target as HTMLInputElement).value)));
+document.getElementById("chC")?.addEventListener("input", (event) => decks.C.setChannelGain(Number((event.target as HTMLInputElement).value)));
+document.getElementById("chD")?.addEventListener("input", (event) => decks.D.setChannelGain(Number((event.target as HTMLInputElement).value)));
+document.getElementById("xfReverse")?.addEventListener("click", (event) => {
+  const btn = event.currentTarget as HTMLButtonElement;
+  const next = !mixer.crossfaderReverse;
+  mixer.setCrossfaderReverse(next);
+  btn.setAttribute("aria-pressed", String(next));
+});
 $("master").addEventListener("input", (event) => mixer.setMaster(Number((event.target as HTMLInputElement).value)));
 $("auxGain").addEventListener("input", (event) => mixer.setAuxGain(Number((event.target as HTMLInputElement).value)));
 
@@ -2794,7 +3096,9 @@ for (const tab of Array.from(document.querySelectorAll<HTMLButtonElement>(".tab"
         ? "Sign in and queue music from streaming services"
         : tab.dataset.tab === "broadcast"
           ? "Record the mix, or push it live"
-          : "Local files, Serato crates and streamed sources";
+          : tab.dataset.tab === "video"
+            ? "Deck-locked video mixing, independent crossfader, fit/fill scaling and 2nd output window"
+            : "Local files, Serato crates and streamed sources";
   });
 }
 
@@ -2849,6 +3153,8 @@ function renderDeckFrame(deckId: DeckId): void {
   if (!state) return;
 
   refs.time.textContent = `${formatTime(deck.currentTime)} / ${formatTime(deck.duration)}`;
+  refs.time.classList.toggle("track-end-warn", Boolean(state.trackEndWarning));
+  refs.slipToggle?.setAttribute("aria-pressed", String(Boolean(state.returnMode)));
   refs.bar.textContent = state.bpm ? formatBeatPosition(deck.currentTime, state.bpm, deck.info.beatPhase) : "—";
   refs.tempo.textContent = `${state.tempoPercent >= 0 ? "+" : ""}${state.tempoPercent.toFixed(1)}%`;
   refs.play.textContent = state.playing ? "PAUSE" : "PLAY";
@@ -2870,9 +3176,8 @@ function renderDeckFrame(deckId: DeckId): void {
 
 function frame(): void {
   rafPending = true;
-  decks.A.tick();
-  decks.B.tick();
-  for (const deckId of ["A", "B"] as DeckId[]) {
+  for (const deckId of ALL_DECKS) decks[deckId].tick();
+  for (const deckId of ALL_DECKS) {
     const playing = decks[deckId].playing;
     if (playing && !wasPlaying[deckId]) {
       const track = meta[deckId];
@@ -2885,8 +3190,11 @@ function frame(): void {
     wasPlaying[deckId] = playing;
   }
   updateEngineDiagnostics(performance.now());
-  renderDeckFrame("A");
-  renderDeckFrame("B");
+  for (const deckId of ALL_DECKS) {
+    renderDeckFrame(deckId);
+    syncDeckVideoFrame(deckId);
+  }
+  renderVideoMixFrame();
   drawMeter($<HTMLCanvasElement>("meterA"), decks.A.level, "deck");
   drawMeter($<HTMLCanvasElement>("meterB"), decks.B.level, "deck");
   drawMeter($<HTMLCanvasElement>("meterMaster"), mixer.level(), "master");
@@ -2901,10 +3209,7 @@ function frame(): void {
     $("broadcastRecTime").textContent = formatClock(seconds);
   }
   const active =
-    decks.A.playing ||
-    decks.B.playing ||
-    decks.A.scratchingActive ||
-    decks.B.scratchingActive ||
+    ALL_DECKS.some((id) => decks[id].playing || decks[id].scratchingActive) ||
     mixer.recording;
   rafPending = false;
   if (active) requestFrame();
@@ -2922,11 +3227,13 @@ const MIDI_TARGETS: { id: string; label: string }[] = [
   { id: "mix.crossfader", label: "Crossfader" },
   { id: "mix.chA", label: "Channel A fader" },
   { id: "mix.chB", label: "Channel B fader" },
+  { id: "mix.chC", label: "Channel C fader" },
+  { id: "mix.chD", label: "Channel D fader" },
   { id: "mix.master", label: "Master fader" },
   { id: "mix.aux", label: "System audio (AUX)" },
   { id: "mix.rec", label: "Record start/stop" },
 ];
-for (const deckId of ["A", "B"] as DeckId[]) {
+for (const deckId of ALL_DECKS) {
   MIDI_TARGETS.push(
     { id: `${deckId}.play`, label: `${deckId} Play/Pause` },
     { id: `${deckId}.cue`, label: `${deckId} Cue` },
@@ -2975,6 +3282,8 @@ function midiInputFor(target: string): HTMLInputElement | null {
   if (target === "mix.crossfader") return $<HTMLInputElement>("crossfader");
   if (target === "mix.chA") return $<HTMLInputElement>("chA");
   if (target === "mix.chB") return $<HTMLInputElement>("chB");
+  if (target === "mix.chC") return $<HTMLInputElement>("chC");
+  if (target === "mix.chD") return $<HTMLInputElement>("chD");
   if (target === "mix.master") return $<HTMLInputElement>("master");
   if (target === "mix.aux") return $<HTMLInputElement>("auxGain");
   const [deckId, name] = target.split(".") as [DeckId, string];
@@ -3060,7 +3369,17 @@ function renderMidiDevices(inputs: { name?: string | null; manufacturer?: string
     name.textContent = input.name || "MIDI input";
     const maker = document.createElement("span");
     const profile = profileForDevice(`${input.manufacturer ?? ""} ${input.name ?? ""}`);
-    maker.textContent = [input.manufacturer, profile ? `preset: ${profile.label}` : ""]
+    const badges: string[] = [];
+    if (profile) {
+      if (profile.decks === 4) badges.push("4-Deck");
+      else if (profile.decks === 1) badges.push("1-Deck");
+      if (profile.dvsUpgrade) badges.push("DVS Upgrade");
+      else if (profile.dvsReady) badges.push("DVS Ready");
+    }
+    const presetTag = profile
+      ? `preset: ${profile.label}${badges.length ? ` [${badges.join(" · ")}]` : ""}`
+      : "";
+    maker.textContent = [input.manufacturer, presetTag]
       .filter(Boolean)
       .join(" · ");
     row.append(name, maker);
@@ -3080,12 +3399,19 @@ function refreshMidiInputs(): void {
   renderMidiDevices(inputs);
   $("midiState").textContent = inputs.length ? `${inputs.length} in` : "no device";
   const detected: string[] = [];
+  let hasFourDeckDevice = false;
   for (const input of inputs) {
     const profile = profileForDevice(`${input.manufacturer ?? ""} ${input.name ?? ""}`);
     if (!profile) continue;
+    if (profile.decks === 4) {
+      hasFourDeckDevice = true;
+    }
     if (applyProfile(midiBindings, profile).length) {
       detected.push(profile.label);
     }
+  }
+  if (hasFourDeckDevice && document.getElementById("fourDeckToggle")?.getAttribute("aria-pressed") !== "true") {
+    setFourDeckMode(true);
   }
   if (detected.length) {
     saveBindings(window.localStorage, midiBindings);
@@ -3265,6 +3591,7 @@ function keyHandler(event: KeyboardEvent): void {
     const step = event.shiftKey ? 0.1 : 0.02;
     xf.value = String(Math.max(0, Math.min(1, Number(xf.value) + (key === "arrowright" ? step : -step))));
     mixer.setCrossfader(Number(xf.value), $<HTMLSelectElement>("xfCurve").value as CrossfaderCurve);
+    videoMixer.setAudioCrossfader(Number(xf.value), false);
   } else if (/^[1-8]$/.test(key)) {
     const deckId: DeckId = event.shiftKey ? "B" : "A";
     decks[deckId].jumpHotCue(Number(key) - 1);
@@ -3278,12 +3605,27 @@ function keyHandler(event: KeyboardEvent): void {
 
 /* ------------------------------------------------------------------ init */
 
-buildDeck("A");
-buildDeck("B");
-for (const deckId of ["A", "B"] as const) {
+for (const deckId of ALL_DECKS) {
+  buildDeck(deckId);
   applyTempo(deckId, 0);
   syncLoopButtons(deckId);
 }
+
+function setFourDeckMode(enabled: boolean): void {
+  document.getElementById("deckSlotC")?.classList.toggle("hidden", !enabled);
+  document.getElementById("deckSlotD")?.classList.toggle("hidden", !enabled);
+  document.getElementById("chCWrap")?.classList.toggle("hidden", !enabled);
+  document.getElementById("chDWrap")?.classList.toggle("hidden", !enabled);
+  const btn = document.getElementById("fourDeckToggle");
+  btn?.setAttribute("aria-pressed", String(enabled));
+  library.setFourDeckMode(enabled);
+}
+setFourDeckMode(localStorage.getItem("opendeck.fourDecks") === "1");
+document.getElementById("fourDeckToggle")?.addEventListener("click", () => {
+  const next = document.getElementById("fourDeckToggle")?.getAttribute("aria-pressed") !== "true";
+  localStorage.setItem("opendeck.fourDecks", next ? "1" : "0");
+  setFourDeckMode(next);
+});
 function setWaveMode(vertical: boolean): void {
   document.body.classList.toggle("vertical-waves", vertical);
   const button = $("waveMode");
@@ -3337,7 +3679,309 @@ window.addEventListener("resize", updateImmersive);
 document.addEventListener("fullscreenchange", updateImmersive);
 updateImmersive();
 
+
+const deckVideoElements: Partial<Record<DeckId, HTMLVideoElement>> = {};
+let videoOutputChannel: BroadcastChannel | null = null;
+try {
+  if (typeof BroadcastChannel !== "undefined") {
+    videoOutputChannel = new BroadcastChannel("opendeck-video-output");
+  }
+} catch {
+  videoOutputChannel = null;
+}
+
+function ensureDeckVideoElement(deckId: DeckId): HTMLVideoElement {
+  let el = deckVideoElements[deckId];
+  if (!el) {
+    el = document.createElement("video");
+    el.muted = true;
+    el.playsInline = true;
+    el.preload = "auto";
+    el.addEventListener("loadedmetadata", () => {
+      if (Number.isFinite(el!.duration) && el!.duration > 0) {
+        videoMixer.setDuration(deckId, el!.duration);
+      }
+      renderVideoMixFrame();
+    });
+    deckVideoElements[deckId] = el;
+  }
+  return el;
+}
+
+function attachVideoToDeck(deckId: DeckId, url: string, fileName: string, duration = 0): void {
+  const v = ensureDeckVideoElement(deckId);
+  v.src = url;
+  v.load();
+  videoMixer.loadVideo(deckId, url, fileName, duration);
+  renderVideoMixFrame();
+}
+
+function loadVideoOntoDeck(deckId: DeckId, file: File): void {
+  const url = URL.createObjectURL(file);
+  const v = ensureDeckVideoElement(deckId);
+  v.src = url;
+  v.load();
+  videoMixer.loadVideo(deckId, url, file.name, 0);
+  toast(`Loaded video "${file.name}" onto Deck ${deckId}`);
+  renderVideoMixFrame();
+}
+
+function syncDeckVideoFrame(deckId: DeckId): void {
+  const deck = decks[deckId];
+  const slot = videoMixer.syncDeck(deckId, {
+    currentTime: deck.currentTime,
+    duration: deck.duration,
+    playing: deck.playing,
+    rate: deck.state().rate,
+    reversed: deck.censorActive || deck.state().rate < 0,
+    scratching: deck.scratchingActive || deck.partScratching !== null,
+  });
+  if (!slot.loaded || !slot.url) return;
+  const v = ensureDeckVideoElement(deckId);
+  const decision = shouldResyncVideoElement(
+    v.currentTime || 0,
+    slot.currentTime,
+    slot.playing,
+    slot.rate,
+    slot.reversed,
+    slot.scratching,
+  );
+  if (Math.abs(v.playbackRate - decision.playbackRate) > 0.01) {
+    try { v.playbackRate = decision.playbackRate; } catch {}
+  }
+  if (decision.seek) {
+    try { v.currentTime = decision.target; } catch {}
+  }
+  if (decision.shouldPlay) {
+    if (v.paused) void v.play().catch(() => {});
+  } else if (!v.paused) {
+    v.pause();
+  }
+}
+
+function drawVideoSlotToCanvas(canvas: HTMLCanvasElement | null, deckId: DeckId): void {
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.fillStyle = "#05070b";
+  ctx.fillRect(0, 0, w, h);
+  const slot = videoMixer.decks[deckId];
+  if (!slot.loaded) {
+    ctx.fillStyle = "rgba(180,195,220,0.45)";
+    ctx.font = "12px monospace";
+    ctx.fillText(`Deck ${deckId} · No video`, 14, h * 0.5);
+    return;
+  }
+  const v = deckVideoElements[deckId];
+  if (v && v.readyState >= 2) {
+    ctx.save();
+    ctx.filter = formatVideoCssFilter(slot.fx);
+    const r = computeAspectRect(v.videoWidth || 320, v.videoHeight || 180, w, h, slot.scaleMode);
+    ctx.drawImage(v, r.x, r.y, r.width, r.height);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = "#58a6ff";
+    ctx.font = "12px monospace";
+    ctx.fillText(`Deck ${deckId}: ${slot.fileName} (${slot.currentTime.toFixed(1)}s)`, 12, h * 0.5);
+  }
+}
+
+function renderVideoMixFrame(): void {
+  const leftCanvas = document.getElementById("videoLeftCanvas") as HTMLCanvasElement | null;
+  const rightCanvas = document.getElementById("videoRightCanvas") as HTMLCanvasElement | null;
+  const masterCanvas = document.getElementById("videoMasterCanvas") as HTMLCanvasElement | null;
+  const snap = videoMixer.getSnapshot();
+
+  drawVideoSlotToCanvas(leftCanvas, snap.leftDeck);
+  drawVideoSlotToCanvas(rightCanvas, snap.rightDeck);
+
+  const leftTitle = document.getElementById("videoLeftTitle");
+  const rightTitle = document.getElementById("videoRightTitle");
+  const leftTime = document.getElementById("videoLeftTime");
+  const rightTime = document.getElementById("videoRightTime");
+  const leftSlot = snap.decks[snap.leftDeck];
+  const rightSlot = snap.decks[snap.rightDeck];
+  if (leftTitle) leftTitle.textContent = leftSlot.loaded ? leftSlot.fileName : "No video loaded";
+  if (rightTitle) rightTitle.textContent = rightSlot.loaded ? rightSlot.fileName : "No video loaded";
+  if (leftTime) leftTime.textContent = `${leftSlot.currentTime.toFixed(1)}s${leftSlot.reversed ? " REV" : ""}`;
+  if (rightTime) rightTime.textContent = `${rightSlot.currentTime.toFixed(1)}s${rightSlot.reversed ? " REV" : ""}`;
+
+  if (masterCanvas) {
+    const ctx = masterCanvas.getContext("2d");
+    if (ctx) {
+      const w = masterCanvas.width;
+      const h = masterCanvas.height;
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, w, h);
+
+      const drawMasterDeck = (deckId: DeckId, alpha: number, additive: boolean): void => {
+        const slot = snap.decks[deckId];
+        if (!slot.loaded || alpha <= 0.001) return;
+        const v = deckVideoElements[deckId];
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+        ctx.globalCompositeOperation = additive ? "lighter" : "source-over";
+        ctx.filter = formatVideoCssFilter(slot.fx);
+        if (v && v.readyState >= 2) {
+          const r = computeAspectRect(v.videoWidth || 480, v.videoHeight || 270, w, h, slot.scaleMode);
+          ctx.drawImage(v, r.x, r.y, r.width, r.height);
+        } else {
+          ctx.fillStyle = deckId === snap.leftDeck ? "#1f6feb" : "#d29922";
+          const r = computeAspectRect(16, 9, w, h, slot.scaleMode);
+          ctx.fillRect(r.x, r.y, r.width, r.height);
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "13px monospace";
+          ctx.fillText(`${deckId}: ${slot.fileName} @ ${slot.currentTime.toFixed(2)}s`, r.x + 16, r.y + 32);
+        }
+        ctx.restore();
+      };
+
+      drawMasterDeck(snap.leftDeck, snap.weights.left, false);
+      drawMasterDeck(snap.rightDeck, snap.weights.right, snap.blendMode === "add");
+    }
+  }
+
+  try {
+    videoOutputChannel?.postMessage(snap);
+  } catch {}
+  if (snap.outputOpen && desktop?.video?.syncOutput) {
+    void desktop.video.syncOutput(snap);
+  }
+}
+
+function initVideoUi(): void {
+  const fileInput = document.getElementById("videoFileInput") as HTMLInputElement | null;
+  let targetVideoDeck: DeckId = "A";
+
+  fileInput?.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (file) loadVideoOntoDeck(targetVideoDeck, file);
+    fileInput.value = "";
+  });
+
+  document.getElementById("videoLeftDeck")?.addEventListener("change", (ev) => {
+    const id = (ev.target as HTMLSelectElement).value as DeckId;
+    videoMixer.setLeftDeck(id);
+    const chip = document.getElementById("videoLeftChip");
+    if (chip) chip.textContent = `Left: Deck ${id}`;
+    renderVideoMixFrame();
+  });
+
+  document.getElementById("videoRightDeck")?.addEventListener("change", (ev) => {
+    const id = (ev.target as HTMLSelectElement).value as DeckId;
+    videoMixer.setRightDeck(id);
+    const chip = document.getElementById("videoRightChip");
+    if (chip) chip.textContent = `Right: Deck ${id}`;
+    renderVideoMixFrame();
+  });
+
+  for (const id of ALL_DECKS) {
+    document.getElementById(`videoLoad${id}`)?.addEventListener("click", () => {
+      targetVideoDeck = id;
+      fileInput?.click();
+    });
+  }
+  document.getElementById("videoLoadLeftBtn")?.addEventListener("click", () => {
+    targetVideoDeck = videoMixer.leftDeck;
+    fileInput?.click();
+  });
+
+  document.getElementById("videoLoadRightBtn")?.addEventListener("click", () => {
+    targetVideoDeck = videoMixer.rightDeck;
+    fileInput?.click();
+  });
+
+  document.getElementById("videoEjectLeftBtn")?.addEventListener("click", () => {
+    videoMixer.ejectVideo(videoMixer.leftDeck);
+    renderVideoMixFrame();
+  });
+
+  document.getElementById("videoEjectRightBtn")?.addEventListener("click", () => {
+    videoMixer.ejectVideo(videoMixer.rightDeck);
+    renderVideoMixFrame();
+  });
+
+  const videoXf = document.getElementById("videoCrossfader") as HTMLInputElement | null;
+  videoXf?.addEventListener("input", () => {
+    videoMixer.setCrossfader(Number(videoXf.value));
+    renderVideoMixFrame();
+  });
+
+  const linkXf = document.getElementById("videoLinkXf") as HTMLInputElement | null;
+  linkXf?.addEventListener("change", () => {
+    const audioXf = Number(($<HTMLInputElement>("crossfader")?.value) ?? 0.5);
+    videoMixer.setLinkToAudioCrossfader(linkXf.checked, audioXf);
+    if (videoXf) videoXf.value = String(videoMixer.crossfader);
+    renderVideoMixFrame();
+  });
+
+  document.getElementById("videoBlendMode")?.addEventListener("change", (ev) => {
+    videoMixer.setBlendMode((ev.target as HTMLSelectElement).value as VideoBlendMode);
+    renderVideoMixFrame();
+  });
+
+  document.getElementById("videoScaleMode")?.addEventListener("change", (ev) => {
+    videoMixer.setScaleMode((ev.target as HTMLSelectElement).value as VideoScaleMode);
+    renderVideoMixFrame();
+  });
+
+  const applyFxUi = (): void => {
+    const brightness = Number((document.getElementById("videoFxBright") as HTMLInputElement | null)?.value ?? 1);
+    const contrast = Number((document.getElementById("videoFxContrast") as HTMLInputElement | null)?.value ?? 1);
+    const monochrome = Boolean((document.getElementById("videoFxMono") as HTMLInputElement | null)?.checked);
+    const invert = Boolean((document.getElementById("videoFxInvert") as HTMLInputElement | null)?.checked);
+    for (const id of ALL_DECKS) {
+      videoMixer.setDeckFx(id, { brightness, contrast, monochrome, invert });
+    }
+    renderVideoMixFrame();
+  };
+  document.getElementById("videoFxBright")?.addEventListener("input", applyFxUi);
+  document.getElementById("videoFxContrast")?.addEventListener("input", applyFxUi);
+  document.getElementById("videoFxMono")?.addEventListener("change", applyFxUi);
+  document.getElementById("videoFxInvert")?.addEventListener("change", applyFxUi);
+
+  const updateOutStatus = (open: boolean, fullscreen: boolean): void => {
+    videoMixer.setOutputWindowState(open, fullscreen);
+    const chip = document.getElementById("videoOutputState");
+    if (chip) chip.textContent = open ? (fullscreen ? "Window: fullscreen" : "Window: open") : "Window: closed";
+  };
+
+  document.getElementById("videoOutputBtn")?.addEventListener("click", async () => {
+    if (desktop?.video?.openOutput) {
+      const res = await desktop.video.openOutput({ fullscreen: false });
+      updateOutStatus(res.open, res.fullscreen);
+      renderVideoMixFrame();
+    } else {
+      window.open("video-output.html", "opendeck-video-output", "width=1280,height=720");
+      updateOutStatus(true, false);
+      renderVideoMixFrame();
+    }
+  });
+
+  document.getElementById("videoFullscreenBtn")?.addEventListener("click", async () => {
+    if (desktop?.video?.openOutput && desktop?.video?.fullscreenOutput) {
+      if (!videoMixer.outputOpen) {
+        const res = await desktop.video.openOutput({ fullscreen: true });
+        updateOutStatus(res.open, res.fullscreen);
+      } else {
+        const res = await desktop.video.fullscreenOutput();
+        updateOutStatus(res.open, res.fullscreen);
+      }
+      renderVideoMixFrame();
+    }
+  });
+
+  desktop?.video?.onOutputClosed?.(() => {
+    updateOutStatus(false, false);
+  });
+
+  renderVideoMixFrame();
+}
+
 initSamplerUi();
+initVideoUi();
 initMidiUi();
 document.addEventListener("keydown", keyHandler);
 renderProviders();
@@ -3357,4 +4001,4 @@ if (desktop) {
   });
 }
 
-window.openDeck = { mixer, decks, waves, zooms, library, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream };
+window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream };

@@ -1,12 +1,40 @@
-import { beatSeconds, nearestBeat, snapToBeat, loopSeconds } from "./beatgrid.ts";
+import {
+  beatSeconds,
+  nearestBeat,
+  snapToBeat,
+  loopSeconds,
+  createBeatGrid,
+  setBeatGridLock,
+  toggleBeatGridLock,
+  setBeatGridBpm,
+  shiftBeatGrid,
+  setGridDownbeat,
+  adjustBeatGridBpm,
+  scaleBeatGridBpm,
+  tapBeatGridBpm,
+  type EditableBeatGrid,
+} from "./beatgrid.ts";
 import { defaultStemGains, STEM_CROSSOVERS, type StemId } from "./stems.ts";
 import { PARTS, defaultPartMix, partGains, type PartId, type PartMix } from "./parts.ts";
-import { fxDefault, filterFrequency, filterType, crushCurve, delaySeconds, wetGain, type Division, type FxType } from "./fx.ts";
+import {
+  fxDefault,
+  filterFrequency,
+  filterType,
+  crushCurve,
+  delaySeconds,
+  wetGain,
+  tremoloRateHz,
+  tapeStopRate,
+  type CustomFxSlot,
+  type Division,
+  type FxType,
+} from "./fx.ts";
+import { censorReleasePosition, rollingReleasePosition } from "./pad-modes.ts";
 import { ScratchVoice } from "./scratch-voice.ts";
 import { PcmSource } from "./pcm-source.ts";
 import { Platter } from "./platter.ts";
 
-export type DeckId = "A" | "B";
+export type DeckId = "A" | "B" | "C" | "D";
 
 const sha256Hex = async (data: ArrayBuffer): Promise<string> => {
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -56,6 +84,12 @@ export interface DeckState {
   fxWet: number;
   keylock: boolean;
   title: string;
+  pitchShift?: number;
+  returnMode?: boolean;
+  slipActive?: boolean;
+  censorActive?: boolean;
+  beatgridLocked?: boolean;
+  trackEndWarning?: boolean;
 }
 
 interface FxChain {
@@ -71,6 +105,8 @@ interface FxChain {
   shaper?: WaveShaperNode;
   allpass?: BiquadFilterNode[];
   lfoGains?: GainNode[];
+  lfoOsc?: OscillatorNode;
+  lfoDepth?: GainNode;
   type: FxType;
 }
 
@@ -112,6 +148,33 @@ export class Deck {
   loopEnd = 0;
   loopBeats = 4;
   loopActive = false;
+  returnMode = false;
+  beatgrid: EditableBeatGrid = createBeatGrid(0, 0, false);
+  customFxChain: CustomFxSlot[] = [];
+  loadLock = false;
+  repeatTrack = false;
+  autoplayNext = false;
+  trackGainDb = 0;
+  startTimeMs = 0;
+  stopTimeMs = 0;
+  playbackMode: "INT" | "REL" | "ABS" = "INT";
+  eqKill: Record<"low" | "mid" | "high", boolean> = { low: false, mid: false, high: false };
+  isolatorMode = false;
+
+  private eqValuesDb: Record<"low" | "mid" | "high", number> = { low: 0, mid: 0, high: 0 };
+  private trimLinear = 1;
+  private pitchShiftSemitones = 0;
+  private slipEngaged = false;
+  private slipEntryPos = 0;
+  private slipEntryMs = 0;
+  private slipEntryRate = 1;
+  private censorEngaged = false;
+  private censorEntryPos = 0;
+  private censorEntryMs = 0;
+  private censorForwardRate = 1;
+  private tapHistoryMs: number[] = [];
+  private nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+
   private partLoopStart = 0;
   private partLoopEnd = 0;
   private cueList: (HotCue | null)[] = new Array(8).fill(null);
@@ -133,6 +196,7 @@ export class Deck {
   private destroyed = false;
 
   onUpdate: ((state: DeckState) => void) | null = null;
+  onTrackEnded: ((deck: Deck) => void) | null = null;
 
   constructor(ctx: AudioContext, id: DeckId, destination: AudioNode) {
     this.id = id;
@@ -146,7 +210,7 @@ export class Deck {
     this.deckInput = ctx.createGain();
     this.source.connect(this.deckInput);
     this.pcm = new PcmSource(ctx, this.deckInput, {
-      onEnded: () => this.emit(),
+      onEnded: () => this.handleEnded(),
     });
     this.splitter = ctx.createChannelSplitter(2);
 
@@ -254,10 +318,20 @@ export class Deck {
     this.cross.connect(destination);
     void this.splitter;
 
-    this.el.addEventListener("ended", () => this.emit());
+    this.el.addEventListener("ended", () => this.handleEnded());
     this.el.addEventListener("play", () => this.emit());
     this.el.addEventListener("pause", () => this.emit());
     this.setFx("off");
+  }
+
+  private handleEnded(): void {
+    if (this.repeatTrack && this.duration > 0) {
+      this.seek(0);
+      void this.play();
+      return;
+    }
+    this.emit();
+    this.onTrackEnded?.(this);
   }
 
   get hotCues(): (HotCue | null)[] {
@@ -299,6 +373,13 @@ export class Deck {
     }
     this.fxChain.nodes = [];
     this.fxChain.lfos = [];
+    this.fxChain.delay = undefined;
+    this.fxChain.feedback = undefined;
+    this.fxChain.filter = undefined;
+    this.fxChain.shaper = undefined;
+    this.fxChain.allpass = undefined;
+    this.fxChain.lfoOsc = undefined;
+    this.fxChain.lfoDepth = undefined;
     this.fxChain.input.connect(this.fxChain.dry);
     this.fxChain.dry.connect(this.fxChain.output);
     this.fxChain.input.connect(this.fxChain.wet);
@@ -348,6 +429,30 @@ export class Deck {
         feedback.connect(delay);
         delay.connect(chain.wet);
       }
+      chain.delay = delay;
+      chain.feedback = feedback;
+      return;
+    }
+
+    if (type === "combo-filter-echo") {
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 8000;
+      filter.Q.value = 2.2;
+      const delay = ctx.createDelay(4);
+      const feedback = ctx.createGain();
+      const tone = ctx.createBiquadFilter();
+      tone.type = "lowpass";
+      tone.frequency.value = 3800;
+      chain.nodes.push(filter, delay, feedback, tone);
+      chain.input.connect(filter);
+      filter.connect(chain.wet);
+      filter.connect(delay);
+      delay.connect(tone);
+      tone.connect(feedback);
+      feedback.connect(delay);
+      delay.connect(chain.wet);
+      chain.filter = filter;
       chain.delay = delay;
       chain.feedback = feedback;
       return;
@@ -434,6 +539,39 @@ export class Deck {
       return;
     }
 
+    if (type === "tremolo" || type === "gate") {
+      const modGain = ctx.createGain();
+      modGain.gain.value = 0.5;
+      const lfo = ctx.createOscillator();
+      lfo.type = type === "gate" ? "square" : "sine";
+      lfo.frequency.value = tremoloRateHz(this.fxDivision, this.info.bpm || 120);
+      const depth = ctx.createGain();
+      depth.gain.value = 0.45;
+      lfo.connect(depth);
+      depth.connect(modGain.gain);
+      lfo.start();
+      chain.nodes.push(modGain, depth);
+      chain.lfos.push(lfo);
+      chain.input.connect(modGain);
+      modGain.connect(chain.wet);
+      chain.lfoOsc = lfo;
+      chain.lfoDepth = depth;
+      chain.dry.gain.value = 0.15;
+      return;
+    }
+
+    if (type === "tape-stop" || type === "brake") {
+      const filter = ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 14000;
+      chain.nodes.push(filter);
+      chain.input.connect(filter);
+      filter.connect(chain.wet);
+      chain.filter = filter;
+      chain.dry.gain.value = 0;
+      return;
+    }
+
     chain.dry.gain.value = 1;
     chain.wet.gain.value = 0;
   }
@@ -458,6 +596,9 @@ export class Deck {
   }
 
   async load(source: File | string, info: Partial<DeckTrackInfo> = {}): Promise<void> {
+    if (this.loadLock && this.playing) {
+      return;
+    }
     this.pause();
     this.clearStems();
     this.pcm.clear();
@@ -510,6 +651,8 @@ export class Deck {
     this.hotCues = new Array(8).fill(null);
     this.setRate(1);
     this.tempoPercent = 0;
+    this.pitchShiftSemitones = 0;
+    this.pcm.setPitchShift(0);
     Object.assign(this.info, {
       id: info.id ?? (typeof source === "string" ? source : source.name),
       title: info.title ?? (typeof source === "string" ? source : source.name.replace(/\.[^.]+$/, "")),
@@ -518,11 +661,88 @@ export class Deck {
       key: info.key ?? "--",
       camelot: info.camelot ?? "--",
     });
+    this.beatgrid = createBeatGrid(this.info.bpm, this.info.beatPhase, false);
+    this.emit();
+  }
+
+  eject(): void {
+    if (this.loadLock && this.playing) return;
+    this.pause();
+    this.clearStems();
+    this.pcm.clear();
+    this.pcmBuffer = null;
+    this.pcmHash = "";
+    this.pcmActive = false;
+    this.scratch.stop();
+    this.scratching = false;
+    this.scratch.clear();
+    this.el.removeAttribute("src");
+    this.el.load();
+    this.cuePoint = 0;
+    this.loopActive = false;
+    this.loopStart = 0;
+    this.loopEnd = 0;
+    this.hotCues = new Array(8).fill(null);
+    this.pitchShiftSemitones = 0;
+    Object.assign(this.info, { id: "", title: "No track", bpm: 0, beatPhase: 0, key: "--", camelot: "--" });
+    this.beatgrid = createBeatGrid(0, 0, false);
+    this.emit();
+  }
+
+  async cloneFrom(other: Deck): Promise<void> {
+    if (this.loadLock && this.playing) return;
+    this.pause();
+    this.clearStems();
+    this.pcm.clear();
+    this.pcmBuffer = other.pcmBuffer;
+    this.pcmHash = other.pcmHash;
+    Object.assign(this.info, { ...other.info });
+    this.beatgrid = {
+      ...other.beatgrid,
+      markers: other.beatgrid.markers.map((m) => ({ ...m })),
+    };
+    this.cuePoint = other.cuePoint;
+    this.hotCues = other.hotCues.map((cue) => (cue ? { ...cue } : null));
+    this.loopStart = other.loopStart;
+    this.loopEnd = other.loopEnd;
+    this.loopBeats = other.loopBeats;
+    this.loopActive = other.loopActive;
+    this.keylock = other.keylock;
+    this.pitchShiftSemitones = other.pitchShiftSemitones;
+    this.tempoPercent = other.tempoPercent;
+    this.rate = other.rate;
+
+    const targetTime = other.currentTime;
+    if (this.pcmBuffer) {
+      this.scratch.setBuffer(this.pcmBuffer);
+      const startSample = Math.round(targetTime * this.pcmBuffer.sampleRate);
+      await this.pcm.load(this.pcmBuffer, startSample);
+      this.pcmActive = true;
+      this.pcm.setKeylock(this.keylock);
+      this.pcm.setPitchShift(this.pitchShiftSemitones);
+      this.pcm.setRate(this.rate);
+      this.applyPcmLoop();
+      if (other.playing) {
+        await this.pcm.play(startSample);
+      }
+    } else if (other.stemActive) {
+      await this.loadStems(other.stemBuffers);
+      this.seek(targetTime);
+      if (other.playing) {
+        await this.play();
+      }
+    } else if (other.el.src) {
+      this.el.src = other.el.src;
+      this.el.currentTime = targetTime;
+      this.el.preservesPitch = this.keylock;
+      if (this.rate > 0) this.el.playbackRate = this.rate;
+      if (other.playing) void this.play();
+    }
     this.emit();
   }
 
   get scratchReady(): boolean {
-    return this.scratch.hasBuffer;
+    return this.scratch.hasBuffer || (this.stemActive && PARTS.some((p) => Boolean(this.partScratches[p.id]?.hasBuffer)));
   }
 
   get audioBuffer(): AudioBuffer | null {
@@ -583,6 +803,7 @@ export class Deck {
       this.stemVoices[id] = voice;
       voice.setRate(this.rate);
       voice.setKeylock(this.keylock);
+      voice.setPitchShift(this.pitchShiftSemitones);
       await voice.load(buffer, 0);
     }
     this.stemActive = true;
@@ -709,33 +930,180 @@ export class Deck {
 
   beginScratch(): void {
     if (this.scratching) return;
+    if (this.returnMode && !this.slipEngaged) {
+      this.beginSlip(this.currentTime);
+    }
     this.scratching = true;
     this.platter.reset();
+    const nowPos = this.currentTime;
+    if (this.stemActive) {
+      for (const part of PARTS) {
+        const ps = this.partScratches[part.id];
+        if (ps?.hasBuffer) {
+          ps.stop();
+          void ps.start(nowPos);
+        }
+      }
+    }
     this.scratch.stop();
-    void this.scratch.start(this.currentTime);
+    void this.scratch.start(nowPos);
   }
 
   scratchDrive(deltaDegrees: number, dt: number): void {
     if (!this.scratching) return;
     this.platter.drive((deltaDegrees * Math.PI) / 180, dt);
     this.scratch.setRate(this.platter.rate);
+    if (this.stemActive) {
+      for (const part of PARTS) this.partScratches[part.id]?.setRate(this.platter.rate);
+    }
   }
 
   scratchCoast(dt: number): void {
     if (!this.scratching) return;
     this.platter.coast(dt);
     this.scratch.setRate(this.platter.rate);
+    if (this.stemActive) {
+      for (const part of PARTS) this.partScratches[part.id]?.setRate(this.platter.rate);
+    }
   }
 
   scratchRate(rate: number): void {
     if (!this.scratching) return;
     this.scratch.setRate(rate);
+    if (this.stemActive) {
+      for (const part of PARTS) this.partScratches[part.id]?.setRate(rate);
+    }
   }
 
   endScratch(): void {
     this.scratching = false;
     this.platter.reset();
     this.scratch.stop();
+    if (this.stemActive) {
+      for (const part of PARTS) this.partScratches[part.id]?.stop();
+    }
+    if (this.returnMode && this.slipEngaged) {
+      this.endSlip();
+    }
+  }
+
+  setReturnMode(enabled: boolean): void {
+    this.returnMode = Boolean(enabled);
+    if (!this.returnMode) {
+      this.slipEngaged = false;
+    }
+    this.emit();
+  }
+
+  toggleReturnMode(): boolean {
+    this.setReturnMode(!this.returnMode);
+    return this.returnMode;
+  }
+
+  get slip(): boolean {
+    return this.returnMode;
+  }
+
+  setSlip(enabled: boolean): void {
+    this.setReturnMode(enabled);
+  }
+
+  get slipActive(): boolean {
+    return this.slipEngaged;
+  }
+
+  get slipPositionSeconds(): number {
+    if (!this.slipEngaged) return this.currentTime;
+    return rollingReleasePosition(
+      this.slipEntryPos,
+      this.slipEntryMs,
+      performance.now(),
+      this.slipEntryRate,
+      this.duration,
+    );
+  }
+
+  beginSlip(atPosition = this.currentTime, nowMs = performance.now()): void {
+    this.slipEngaged = true;
+    this.slipEntryPos = atPosition;
+    this.slipEntryMs = nowMs;
+    this.slipEntryRate = this.rate;
+    this.emit();
+  }
+
+  endSlip(nowMs = performance.now()): number {
+    if (!this.slipEngaged) return this.currentTime;
+    const target = rollingReleasePosition(
+      this.slipEntryPos,
+      this.slipEntryMs,
+      nowMs,
+      this.slipEntryRate,
+      this.duration,
+    );
+    this.slipEngaged = false;
+    this.seek(target);
+    return target;
+  }
+
+  beginReturnAction(atPosition = this.currentTime, nowMs = performance.now()): void {
+    if (!this.returnMode) return;
+    this.beginSlip(atPosition, nowMs);
+  }
+
+  endReturnAction(nowMs = performance.now()): number {
+    if (!this.returnMode || !this.slipEngaged) return this.currentTime;
+    return this.endSlip(nowMs);
+  }
+
+  get censorActive(): boolean {
+    return this.censorEngaged;
+  }
+
+  get censor(): boolean {
+    return this.censorEngaged;
+  }
+
+  get reverseOnHoldActive(): boolean {
+    return this.censorEngaged;
+  }
+
+  beginReverseOnHold(nowMs = performance.now()): void {
+    if (this.censorEngaged) return;
+    this.censorEngaged = true;
+    this.censorEntryPos = this.currentTime;
+    this.censorEntryMs = nowMs;
+    this.censorForwardRate = Math.abs(this.rate) || 1;
+    this.setRate(-this.censorForwardRate);
+    this.emit();
+  }
+
+  endReverseOnHold(nowMs = performance.now()): number {
+    if (!this.censorEngaged) return this.currentTime;
+    const target = censorReleasePosition(
+      this.censorEntryPos,
+      this.censorEntryMs,
+      nowMs,
+      this.censorForwardRate,
+      this.duration,
+    );
+    this.censorEngaged = false;
+    this.setRate(this.censorForwardRate);
+    this.seek(target);
+    this.emit();
+    return target;
+  }
+
+  beginCensor(nowMs = performance.now()): void {
+    this.beginReverseOnHold(nowMs);
+  }
+
+  endCensor(nowMs = performance.now()): number {
+    return this.endReverseOnHold(nowMs);
+  }
+
+  setCensor(active: boolean, nowMs = performance.now()): void {
+    if (active) this.beginReverseOnHold(nowMs);
+    else this.endReverseOnHold(nowMs);
   }
 
   get duration(): number {
@@ -819,6 +1187,12 @@ export class Deck {
 
   get hasTrack(): boolean {
     return this.duration > 0 && (this.pcmBuffer !== null || Boolean(this.el.src));
+  }
+
+  get trackEndWarning(): boolean {
+    if (!this.playing || this.duration <= 0) return false;
+    const remaining = this.duration - this.currentTime;
+    return remaining > 0 && remaining <= 30;
   }
 
   get level(): number {
@@ -917,6 +1291,15 @@ export class Deck {
 
   setPitchRange(percent: number): void {
     this.pitchRange = percent;
+    this.emit();
+  }
+
+  cyclePitchRange(): number {
+    const ranges = [8, 16, 50];
+    const idx = ranges.indexOf(this.pitchRange);
+    this.pitchRange = ranges[(idx + 1) % ranges.length]!;
+    this.emit();
+    return this.pitchRange;
   }
 
   get pitchRangePercent(): number {
@@ -932,13 +1315,93 @@ export class Deck {
     this.emit();
   }
 
+  get pitchShift(): number {
+    return this.pitchShiftSemitones;
+  }
+
+  setPitchShift(semitones: number): void {
+    const clamped = Number.isFinite(semitones) ? Math.max(-12, Math.min(12, semitones)) : 0;
+    this.pitchShiftSemitones = clamped;
+    this.pcm.setPitchShift(clamped);
+    for (const part of PARTS) this.stemVoices[part.id]?.setPitchShift(clamped);
+    this.emit();
+  }
+
+  shiftKeySemitones(delta: number): number {
+    this.setPitchShift(this.pitchShiftSemitones + delta);
+    return this.pitchShiftSemitones;
+  }
+
+  resetKeyShift(): void {
+    this.setPitchShift(0);
+  }
+
   setReverse(enabled: boolean): void {
     this.setRate(enabled ? -Math.abs(this.rate) : Math.abs(this.rate));
+  }
+
+  nudge(deltaRate: number, durationMs = 180): void {
+    if (this.nudgeTimer) {
+      clearTimeout(this.nudgeTimer);
+      this.nudgeTimer = null;
+    }
+    const baseRate = 1 + this.tempoPercent / 100;
+    this.setRate(baseRate + deltaRate);
+    this.nudgeTimer = setTimeout(() => {
+      this.nudgeTimer = null;
+      this.setRate(1 + this.tempoPercent / 100);
+    }, Math.max(20, durationMs));
+  }
+
+  setLoadLock(locked: boolean): void {
+    this.loadLock = Boolean(locked);
+    this.emit();
+  }
+
+  setRepeat(enabled: boolean): void {
+    this.repeatTrack = Boolean(enabled);
+    this.el.loop = this.repeatTrack;
+    this.emit();
+  }
+
+  get repeat(): boolean {
+    return this.repeatTrack;
+  }
+
+  setAutoplay(enabled: boolean): void {
+    this.autoplayNext = Boolean(enabled);
+    this.emit();
+  }
+
+  setStartStopRamp(startMs: number, stopMs: number): void {
+    this.startTimeMs = Math.max(0, Math.min(4000, startMs));
+    this.stopTimeMs = Math.max(0, Math.min(4000, stopMs));
+  }
+
+  setPlaybackMode(mode: "INT" | "REL" | "ABS"): void {
+    this.playbackMode = mode;
+    this.emit();
   }
 
   driveTimecode(rate: number, positionSeconds: number | null): void {
     const clamped = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 0));
     const active = Math.abs(clamped) > 0.02;
+    if (this.stemActive) {
+      this.rate = clamped;
+      this.el.preservesPitch = this.keylock;
+      if (clamped > 0) this.el.playbackRate = clamped;
+      for (const part of PARTS) {
+        const voice = this.stemVoices[part.id];
+        const buffer = this.stemBuffers[part.id];
+        if (!voice || !buffer) continue;
+        const pos = positionSeconds === null
+          ? null
+          : Math.round(positionSeconds * buffer.sampleRate);
+        voice.drive(clamped, pos, active);
+      }
+      this.emit();
+      return;
+    }
     if (!this.pcmBuffer) {
       this.setRate(Math.max(0.02, clamped));
       if (positionSeconds !== null) this.seek(positionSeconds);
@@ -976,12 +1439,66 @@ export class Deck {
     return this.keylock;
   }
 
-  setEq(band: "low" | "mid" | "high", db: number): void {
+  private applyEqBand(band: "low" | "mid" | "high"): void {
+    const killed = this.eqKill[band];
+    const db = this.eqValuesDb[band];
+    if (killed) {
+      this.eq[band].gain.value = -60;
+      return;
+    }
+    if (this.isolatorMode && db <= -17.5) {
+      this.eq[band].gain.value = -60;
+      return;
+    }
     this.eq[band].gain.value = db;
   }
 
+  setEq(band: "low" | "mid" | "high", db: number): void {
+    this.eqValuesDb[band] = db;
+    this.applyEqBand(band);
+  }
+
+  setEqKill(band: "low" | "mid" | "high", killed: boolean): void {
+    this.eqKill[band] = Boolean(killed);
+    this.applyEqBand(band);
+    this.emit();
+  }
+
+  toggleEqKill(band: "low" | "mid" | "high"): boolean {
+    this.setEqKill(band, !this.eqKill[band]);
+    return this.eqKill[band];
+  }
+
+  setIsolatorMode(enabled: boolean): void {
+    this.isolatorMode = Boolean(enabled);
+    this.applyEqBand("low");
+    this.applyEqBand("mid");
+    this.applyEqBand("high");
+    this.emit();
+  }
+
+  get eqIsolator(): boolean {
+    return this.isolatorMode;
+  }
+
+  setEqIsolator(enabled: boolean): void {
+    this.setIsolatorMode(enabled);
+  }
+
+  private applyTrimGain(): void {
+    const dbFactor = Math.pow(10, this.trackGainDb / 20);
+    this.trim.gain.value = this.trimLinear * dbFactor;
+  }
+
   setTrim(value: number): void {
-    this.trim.gain.value = value;
+    this.trimLinear = value;
+    this.applyTrimGain();
+  }
+
+  setTrackGainDb(db: number): void {
+    this.trackGainDb = Number.isFinite(db) ? Math.max(-24, Math.min(24, db)) : 0;
+    this.applyTrimGain();
+    this.emit();
   }
 
   setChannelGain(value: number): void {
@@ -1024,9 +1541,101 @@ export class Deck {
   }
 
   setBpm(bpm: number, beatPhase = 0): void {
+    if (this.beatgrid.locked) return;
     this.info.bpm = bpm;
     this.info.beatPhase = beatPhase;
+    this.beatgrid = createBeatGrid(bpm, beatPhase, false, this.beatgrid.markers);
     this.tickFx();
+    this.emit();
+  }
+
+  setBeatGrid(grid: EditableBeatGrid): void {
+    this.beatgrid = {
+      ...grid,
+      markers: grid.markers.map((m) => ({ ...m })),
+    };
+    this.info.bpm = this.beatgrid.bpm;
+    this.info.beatPhase = this.beatgrid.firstBeatSeconds;
+    this.tickFx();
+    this.emit();
+  }
+
+  get beatgridLocked(): boolean {
+    return this.beatgrid.locked;
+  }
+
+  setBeatgridLocked(locked: boolean): void {
+    this.beatgrid = setBeatGridLock(this.beatgrid, locked);
+    this.emit();
+  }
+
+  toggleBeatgridLock(): boolean {
+    this.beatgrid = toggleBeatGridLock(this.beatgrid);
+    this.emit();
+    return this.beatgrid.locked;
+  }
+
+  shiftGrid(deltaSeconds: number): void {
+    if (this.beatgrid.locked) return;
+    this.beatgrid = shiftBeatGrid(this.beatgrid, deltaSeconds);
+    this.info.beatPhase = this.beatgrid.firstBeatSeconds;
+    this.emit();
+  }
+
+  setGridDownbeatHere(): void {
+    if (this.beatgrid.locked) return;
+    this.beatgrid = setGridDownbeat(this.beatgrid, this.currentTime);
+    this.info.beatPhase = this.beatgrid.firstBeatSeconds;
+    this.emit();
+  }
+
+  adjustGridBpm(deltaBpm: number): void {
+    if (this.beatgrid.locked) return;
+    this.beatgrid = adjustBeatGridBpm(this.beatgrid, deltaBpm);
+    this.info.bpm = this.beatgrid.bpm;
+    this.tickFx();
+    this.emit();
+  }
+
+  scaleGridBpm(factor: number): void {
+    if (this.beatgrid.locked) return;
+    this.beatgrid = scaleBeatGridBpm(this.beatgrid, factor);
+    this.info.bpm = this.beatgrid.bpm;
+    this.tickFx();
+    this.emit();
+  }
+
+  tapGridBpm(nowMs = performance.now()): number {
+    if (this.beatgrid.locked) return this.info.bpm;
+    if (this.tapHistoryMs.length > 0 && nowMs - this.tapHistoryMs[this.tapHistoryMs.length - 1]! > 2500) {
+      this.tapHistoryMs = [];
+    }
+    this.tapHistoryMs.push(nowMs);
+    if (this.tapHistoryMs.length > 8) this.tapHistoryMs.shift();
+    if (this.tapHistoryMs.length >= 2) {
+      const tapped = tapBeatGridBpm(this.tapHistoryMs);
+      if (tapped !== null) this.beatgrid = setBeatGridBpm(this.beatgrid, tapped);
+      this.info.bpm = this.beatgrid.bpm;
+      this.tickFx();
+      this.emit();
+    }
+    return this.info.bpm;
+  }
+
+  tapBpm(nowMs = performance.now()): number {
+    return this.tapGridBpm(nowMs);
+  }
+
+  setCustomFxChain(slots: CustomFxSlot[]): void {
+    this.customFxChain = slots.slice(0, 3).map((s) => ({ ...s }));
+    const activeSlot = this.customFxChain.find((s) => s.enabled && s.type !== "off");
+    if (activeSlot) {
+      this.fxDivision = activeSlot.division;
+      this.fxAmount = activeSlot.amount;
+      this.fxWet = activeSlot.wet;
+      this.setFx(activeSlot.type);
+    }
+    this.emit();
   }
 
   setFx(type: FxType): void {
@@ -1061,18 +1670,18 @@ export class Deck {
     const chain = this.fxChain;
     const type = chain.type;
     chain.wet.gain.setTargetAtTime(this.fxWet, this.ctx.currentTime, 0.02);
-    if (type === "filter" || type === "crush") {
+    if (type === "filter" || type === "crush" || type === "tape-stop" || type === "brake") {
       chain.dry.gain.setTargetAtTime(type === "crush" ? 0.25 : 0, this.ctx.currentTime, 0.02);
     } else {
       chain.dry.gain.setTargetAtTime(1 - this.fxWet * 0.35, this.ctx.currentTime, 0.02);
     }
-    if (type === "filter" && chain.filter) {
+    if ((type === "filter" || type === "combo-filter-echo") && chain.filter) {
       const bipolar = this.fxAmount * 2 - 1;
       chain.filter.type = filterType(bipolar) as BiquadFilterType;
       chain.filter.frequency.setTargetAtTime(filterFrequency(bipolar), this.ctx.currentTime, 0.02);
       chain.filter.Q.value = 1 + this.fxAmount * 8;
     }
-    if ((type === "echo" || type === "delay") && chain.delay && chain.feedback) {
+    if ((type === "echo" || type === "delay" || type === "combo-filter-echo") && chain.delay && chain.feedback) {
       const seconds = this.info.bpm > 0 ? delaySeconds(this.fxDivision, this.info.bpm) : 0.35;
       chain.delay.delayTime.setTargetAtTime(Math.min(3.8, seconds), this.ctx.currentTime, 0.05);
       chain.feedback.gain.setTargetAtTime(0.2 + this.fxAmount * 0.62, this.ctx.currentTime, 0.02);
@@ -1082,10 +1691,30 @@ export class Deck {
     if (type === "phaser" && chain.allpass) {
       chain.allpass.forEach((stage, i) => stage.frequency.setTargetAtTime(180 + this.fxAmount * (300 + i * 500), this.ctx.currentTime, 0.03));
     }
+    if ((type === "tremolo" || type === "gate") && chain.lfoOsc && chain.lfoDepth) {
+      chain.lfoOsc.frequency.setTargetAtTime(
+        tremoloRateHz(this.fxDivision, this.info.bpm || 120),
+        this.ctx.currentTime,
+        0.02,
+      );
+      chain.lfoDepth.gain.setTargetAtTime(0.15 + this.fxAmount * 0.35, this.ctx.currentTime, 0.02);
+    }
+    if ((type === "tape-stop" || type === "brake") && chain.filter) {
+      const sweepRate = tapeStopRate(this.fxAmount * this.fxWet);
+      chain.filter.frequency.setTargetAtTime(Math.max(120, 16000 * sweepRate), this.ctx.currentTime, 0.03);
+    }
   }
 
   private tickFx(): void {
-    if (this.fxType === "echo" || this.fxType === "delay") this.applyFxParams();
+    if (
+      this.fxType === "echo" ||
+      this.fxType === "delay" ||
+      this.fxType === "combo-filter-echo" ||
+      this.fxType === "tremolo" ||
+      this.fxType === "gate"
+    ) {
+      this.applyFxParams();
+    }
   }
 
   setCue(time: number): void {
@@ -1127,7 +1756,16 @@ export class Deck {
       this.setHotCue(index);
       return;
     }
+    if (this.returnMode && !this.slipEngaged) {
+      this.beginSlip(this.currentTime);
+    }
     this.seek(cue.time);
+  }
+
+  releaseHotCue(): void {
+    if (this.returnMode && this.slipEngaged) {
+      this.endSlip();
+    }
   }
 
   setLoop(start: number, beats: number, active = true): void {
@@ -1255,6 +1893,12 @@ export class Deck {
     state.fxWet = this.fxWet;
     state.keylock = this.keylock;
     state.title = this.info.title;
+    state.pitchShift = this.pitchShiftSemitones;
+    state.returnMode = this.returnMode;
+    state.slipActive = this.slipEngaged;
+    state.censorActive = this.censorEngaged;
+    state.beatgridLocked = this.beatgrid.locked;
+    state.trackEndWarning = this.trackEndWarning;
     return state;
   }
 
@@ -1264,6 +1908,10 @@ export class Deck {
 
   destroy(): void {
     this.destroyed = true;
+    if (this.nudgeTimer) {
+      clearTimeout(this.nudgeTimer);
+      this.nudgeTimer = null;
+    }
     this.el.pause();
     this.el.src = "";
     this.scratch.dispose();

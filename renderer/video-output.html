@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenDeck Video Output</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        color: #cbd5e1;
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+        user-select: none;
+      }
+      #stage {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #hud {
+        position: fixed;
+        left: 14px;
+        bottom: 12px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background: rgba(8, 12, 22, 0.72);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        pointer-events: none;
+        transition: opacity 0.25s ease;
+      }
+      body.fullscreen #hud {
+        opacity: 0.25;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage" title="Double-click or press F11 to toggle fullscreen">
+      <canvas id="outputCanvas" width="1280" height="720"></canvas>
+      <div id="hud">OpenDeck Video Output · Double-click / F11 for Fullscreen</div>
+    </div>
+    <script>
+      (() => {
+        const canvas = document.getElementById("outputCanvas");
+        const hud = document.getElementById("hud");
+        const ctx = canvas.getContext("2d");
+        const videos = {};
+        let latestState = null;
+
+        function ensureVideo(deckId, slot) {
+          if (!slot || !slot.loaded || !slot.url) return null;
+          let el = videos[deckId];
+          if (!el) {
+            el = document.createElement("video");
+            el.muted = true;
+            el.playsInline = true;
+            el.loop = true;
+            el.crossOrigin = "anonymous";
+            videos[deckId] = el;
+          }
+          if (el.dataset.srcUrl !== slot.url) {
+            el.dataset.srcUrl = slot.url;
+            el.src = slot.url;
+          }
+          const target = Number(slot.currentTime) || 0;
+          const rate = Math.max(0.0625, Math.min(4, Math.abs(Number(slot.rate) || 1)));
+          const shouldPlay = Boolean(slot.playing && !slot.reversed && Number(slot.rate) > 0 && !slot.scratching);
+          if (Math.abs((el.currentTime || 0) - target) > (shouldPlay ? 0.06 : 0.002)) {
+            try {
+              el.currentTime = target;
+            } catch {}
+          }
+          if (el.playbackRate !== rate) {
+            try {
+              el.playbackRate = rate;
+            } catch {}
+          }
+          if (shouldPlay && el.paused) {
+            el.play().catch(() => {});
+          } else if (!shouldPlay && !el.paused) {
+            el.pause();
+          }
+          return el;
+        }
+
+        function computeRect(sw, sh, dw, dh, scaleMode) {
+          const sW = Math.max(1, sw || 16);
+          const sH = Math.max(1, sh || 9);
+          const scale = scaleMode === "fill" ? Math.max(dw / sW, dh / sH) : Math.min(dw / sW, dh / sH);
+          const width = sW * scale;
+          const height = sH * scale;
+          return { x: (dw - width) * 0.5, y: (dh - height) * 0.5, width, height };
+        }
+
+        function formatFilter(fx = {}) {
+          const b = Number.isFinite(fx.brightness) ? fx.brightness : 1;
+          const c = Number.isFinite(fx.contrast) ? fx.contrast : 1;
+          const s = Number.isFinite(fx.saturation) ? fx.saturation : 1;
+          const g = fx.monochrome ? 1 : 0;
+          const i = fx.invert ? 1 : 0;
+          return `brightness(${b.toFixed(2)}) contrast(${c.toFixed(2)}) saturate(${s.toFixed(2)}) grayscale(${g}) invert(${i})`;
+        }
+
+        function drawSide(deckId, weight, op) {
+          if (!latestState || weight <= 0.001) return;
+          const slot = latestState.decks?.[deckId];
+          if (!slot) return;
+          const el = ensureVideo(deckId, slot);
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, Math.min(1, weight));
+          ctx.globalCompositeOperation = op;
+          ctx.filter = formatFilter(slot.fx);
+          const scaleMode = slot.scaleMode || latestState.scaleMode || "fit";
+          if (el && el.readyState >= 2) {
+            const rect = computeRect(el.videoWidth || 1280, el.videoHeight || 720, canvas.width, canvas.height, scaleMode);
+            try {
+              ctx.drawImage(el, rect.x, rect.y, rect.width, rect.height);
+            } catch {}
+          } else if (slot.loaded) {
+            const rect = computeRect(16, 9, canvas.width, canvas.height, scaleMode);
+            const hue = deckId === "A" ? 215 : deckId === "B" ? 340 : deckId === "C" ? 160 : 42;
+            const phase = ((Number(slot.currentTime) || 0) % 4) / 4;
+            ctx.fillStyle = `hsl(${hue} 70% ${22 + Math.round(phase * 18)}%)`;
+            ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+            ctx.fillStyle = "#e2e8f0";
+            ctx.font = "600 22px Inter, system-ui, sans-serif";
+            ctx.fillText(`DECK ${deckId} · ${slot.fileName || "VIDEO"}`, rect.x + 28, rect.y + 48);
+          }
+          ctx.restore();
+        }
+
+        function render() {
+          if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+            canvas.width = Math.max(320, window.innerWidth);
+            canvas.height = Math.max(180, window.innerHeight);
+          }
+          ctx.fillStyle = "#000";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          if (latestState) {
+            const weights = latestState.weights || { left: 0.5, right: 0.5 };
+            const mode = latestState.blendMode || "fade";
+            const rightOp = mode === "add" ? "lighter" : mode === "luma" ? "screen" : "source-over";
+            drawSide(latestState.leftDeck || "A", weights.left ?? 0.5, "source-over");
+            drawSide(latestState.rightDeck || "B", weights.right ?? 0.5, rightOp);
+            hud.textContent = `OpenDeck Video · ${latestState.leftDeck || "A"} vs ${latestState.rightDeck || "B"} · XF ${Number(latestState.crossfader || 0).toFixed(2)} (${mode.toUpperCase()} / ${(latestState.scaleMode || "fit").toUpperCase()})`;
+          }
+          requestAnimationFrame(render);
+        }
+
+        function applyState(state) {
+          if (!state || typeof state !== "object") return;
+          latestState = state;
+          document.body.classList.toggle("fullscreen", Boolean(state.outputFullscreen));
+        }
+
+        try {
+          const bc = new BroadcastChannel("opendeck-video-output");
+          bc.onmessage = (ev) => applyState(ev.data);
+        } catch {}
+
+        const api = window.opendeck || window.opendeckDesktop;
+        if (api && typeof api.onVideoOutputState === "function") {
+          api.onVideoOutputState((state) => applyState(state));
+        }
+
+        function toggleFullscreen() {
+          if (api && typeof api.videoFullscreenOutput === "function") {
+            api.videoFullscreenOutput();
+            return;
+          }
+          if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+          } else {
+            document.exitFullscreen?.().catch(() => {});
+          }
+        }
+
+        window.addEventListener("dblclick", toggleFullscreen);
+        window.addEventListener("keydown", (ev) => {
+          if (ev.key === "F11" || (ev.key === "f" && !ev.ctrlKey && !ev.metaKey)) {
+            ev.preventDefault();
+            toggleFullscreen();
+          }
+        });
+
+        requestAnimationFrame(render);
+      })();
+    </script>
+  </body>
+</html>

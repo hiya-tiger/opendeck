@@ -3,6 +3,11 @@ export interface SeratoColumn {
   width: string;
 }
 
+export interface SeratoChunk {
+  tag: string;
+  payload: Uint8Array;
+}
+
 export interface SeratoDbTrack {
   path: string;
   type: string;
@@ -11,6 +16,8 @@ export interface SeratoDbTrack {
   album?: string;
   genre?: string;
   comment?: string;
+  grouping?: string;
+  remixer?: string;
   length?: string;
   size?: string;
   bitrate?: string;
@@ -21,22 +28,29 @@ export interface SeratoDbTrack {
   label?: string;
   added?: string;
   key?: string;
+  color?: string;
   uadd?: number;
   utkn?: number;
   utme?: number;
   ufsb?: number;
   udsc?: number;
   utpc?: number;
+  ulbl?: number;
+  playCount?: number;
   played?: boolean;
   beatgridLocked?: boolean;
+  flags?: Record<string, boolean>;
+  extraChunks?: SeratoChunk[];
 }
 
 export const CRATE_VERSION = "1.0/Serato ScratchLive Crate";
 export const DATABASE_VERSION = "2.0/Serato Scratch LIVE Database";
+export const SQLITE_COLUMN_TABLE = "container_asset_list_columns";
+export const SQLITE_COLUMN_SEPARATOR = "\x1e";
 
 const TEXT_TAGS = new Set([
-  "tsng", "tart", "talb", "tgen", "tcom", "tlen", "tsiz", "tbit", "tsmp", "tbpm",
-  "tcmp", "ttyr", "tlbl", "tadd", "tkey",
+  "tsng", "tart", "talb", "tgen", "tcom", "tgrp", "trmx", "tlen", "tsiz", "tbit", "tsmp", "tbpm",
+  "tcmp", "ttyr", "tlbl", "tadd", "tkey", "tcor",
 ]);
 
 export const DEFAULT_COLUMNS: SeratoColumn[] = [
@@ -49,6 +63,18 @@ export const DEFAULT_COLUMNS: SeratoColumn[] = [
   { name: "length", width: "250" },
   { name: "comment", width: "250" },
 ];
+
+export function encodeSqliteColumnList(columns: readonly (string | { name: string })[]): string {
+  return columns
+    .map((col) => (typeof col === "string" ? col.trim() : String(col?.name ?? "").trim()))
+    .filter(Boolean)
+    .join(SQLITE_COLUMN_SEPARATOR);
+}
+
+export function decodeSqliteColumnList(raw: string): string[] {
+  if (!raw) return [];
+  return raw.split(SQLITE_COLUMN_SEPARATOR).map((col) => col.trim()).filter(Boolean);
+}
 
 const TYPE_BY_EXT: Record<string, string> = {
   ".mp3": "mp3",
@@ -68,11 +94,6 @@ export function seratoType(path: string): string {
   const dot = path.lastIndexOf(".");
   if (dot < 0) return "mp3";
   return TYPE_BY_EXT[path.slice(dot).toLowerCase()] ?? "mp3";
-}
-
-export interface SeratoChunk {
-  tag: string;
-  payload: Uint8Array;
 }
 
 function encodeUtf16be(value: string): Uint8Array {
@@ -183,14 +204,29 @@ export function encodeCrate(paths: string[], columns: SeratoColumn[] | null = DE
   return concatBytes(parts);
 }
 
+export function colorHexToU32(color?: string): number | undefined {
+  if (!color) return undefined;
+  const m = /^#?([0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return undefined;
+  return parseInt(m[1], 16) >>> 0;
+}
+
+export function colorU32ToHex(value?: number): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const rgb = value & 0xffffff;
+  return `#${rgb.toString(16).padStart(6, "0").toUpperCase()}`;
+}
+
 export function encodeTrack(track: SeratoDbTrack): Uint8Array {
-  const parts: Uint8Array[] = [writeText("ttyp", track.type), writeText("pfil", track.path)];
+  const parts: Uint8Array[] = [writeText("ttyp", track.type || seratoType(track.path)), writeText("pfil", track.path)];
   const fields: Array<[string, string | undefined]> = [
     ["tsng", track.title],
     ["tart", track.artist],
     ["talb", track.album],
     ["tgen", track.genre],
     ["tcom", track.comment],
+    ["tgrp", track.grouping],
+    ["trmx", track.remixer],
     ["tlen", track.length],
     ["tsiz", track.size],
     ["tbit", track.bitrate],
@@ -210,29 +246,47 @@ export function encodeTrack(track: SeratoDbTrack): Uint8Array {
   parts.push(writeU32("utme", track.utme ?? 0));
   parts.push(writeU32("ufsb", track.ufsb ?? 0));
   if (track.udsc) parts.push(writeU32("udsc", track.udsc));
-  parts.push(writeU32("utpc", track.utpc ?? 0));
+  const playCount = track.utpc ?? track.playCount ?? 0;
+  parts.push(writeU32("utpc", playCount));
+  const labelColor = track.ulbl ?? colorHexToU32(track.color);
+  if (typeof labelColor === "number") {
+    parts.push(writeU32("ulbl", labelColor));
+  }
+  const customFlags = track.flags ?? {};
   const flags: Array<[string, boolean]> = [
-    ["bhrt", false],
-    ["bmis", false],
-    ["bply", track.played ?? false],
-    ["blop", false],
-    ["bitu", false],
-    ["bovc", true],
-    ["bcrt", false],
-    ["biro", false],
-    ["bwlb", false],
-    ["bwll", false],
-    ["buns", false],
-    ["bbgl", track.beatgridLocked ?? false],
-    ["bkrk", false],
+    ["bhrt", customFlags.bhrt ?? false],
+    ["bmis", customFlags.bmis ?? false],
+    ["bply", track.played ?? customFlags.bply ?? playCount > 0],
+    ["blop", customFlags.blop ?? false],
+    ["bitu", customFlags.bitu ?? false],
+    ["bovc", customFlags.bovc ?? true],
+    ["bcrt", customFlags.bcrt ?? false],
+    ["biro", customFlags.biro ?? false],
+    ["bwlb", customFlags.bwlb ?? false],
+    ["bwll", customFlags.bwll ?? false],
+    ["buns", customFlags.buns ?? false],
+    ["bbgl", track.beatgridLocked ?? customFlags.bbgl ?? false],
+    ["bkrk", customFlags.bkrk ?? false],
   ];
   for (const [tag, value] of flags) parts.push(writeBool(tag, value));
+  if (track.extraChunks) {
+    for (const extra of track.extraChunks) {
+      parts.push(writeChunk(extra.tag, extra.payload));
+    }
+  }
   return writeChunk("otrk", concatBytes(parts));
 }
 
 export function encodeDatabase(tracks: SeratoDbTrack[]): Uint8Array {
   return concatBytes([writeText("vrsn", DATABASE_VERSION), ...tracks.map(encodeTrack)]);
 }
+
+const KNOWN_TRACK_TAGS = new Set([
+  "ttyp", "pfil", "tsng", "tart", "talb", "tgen", "tcom", "tgrp", "trmx", "tlen", "tsiz", "tbit",
+  "tsmp", "tbpm", "tcmp", "ttyr", "tlbl", "tadd", "tkey", "uadd", "utkn", "utme", "ufsb", "udsc",
+  "utpc", "ulbl", "bhrt", "bmis", "bply", "blop", "bitu", "bovc", "bcrt", "biro", "bwlb", "bwll",
+  "buns", "bbgl", "bkrk",
+]);
 
 export function decodeDatabase(input: Uint8Array): { version: string; tracks: Array<Record<string, string | number | boolean>> } {
   const chunks = readChunks(input);
@@ -244,7 +298,7 @@ export function decodeDatabase(input: Uint8Array): { version: string; tracks: Ar
     } else if (chunk.tag === "otrk") {
       const track: Record<string, string | number | boolean> = {};
       for (const field of readChunks(chunk.payload)) {
-        if (TEXT_TAGS.has(field.tag) || field.tag === "ttyp" || field.tag === "pfil") {
+        if (TEXT_TAGS.has(field.tag) || field.tag === "ttyp" || field.tag === "pfil" || field.tag[0] === "t" || field.tag[0] === "p") {
           track[field.tag] = readText(field.payload);
         } else if (field.tag[0] === "u" && field.payload.length === 4) {
           track[field.tag] = readU32(field.payload);
@@ -253,6 +307,77 @@ export function decodeDatabase(input: Uint8Array): { version: string; tracks: Ar
         }
       }
       tracks.push(track);
+    }
+  }
+  return { version, tracks };
+}
+
+export function decodeDatabaseTracks(input: Uint8Array): { version: string; tracks: SeratoDbTrack[] } {
+  const chunks = readChunks(input);
+  let version = "";
+  const tracks: SeratoDbTrack[] = [];
+  for (const chunk of chunks) {
+    if (chunk.tag === "vrsn") {
+      version = readText(chunk.payload);
+    } else if (chunk.tag === "otrk") {
+      const fields = readChunks(chunk.payload);
+      const raw: Record<string, string | number | boolean> = {};
+      const flags: Record<string, boolean> = {};
+      const extraChunks: SeratoChunk[] = [];
+      for (const field of fields) {
+        if (!KNOWN_TRACK_TAGS.has(field.tag)) {
+          extraChunks.push({ tag: field.tag, payload: new Uint8Array(field.payload) });
+          continue;
+        }
+        if (TEXT_TAGS.has(field.tag) || field.tag === "ttyp" || field.tag === "pfil") {
+          raw[field.tag] = readText(field.payload);
+        } else if (field.tag[0] === "u" && field.payload.length === 4) {
+          raw[field.tag] = readU32(field.payload);
+        } else if (field.tag[0] === "b" && field.payload.length === 1) {
+          const val = field.payload[0] !== 0;
+          raw[field.tag] = val;
+          flags[field.tag] = val;
+        } else {
+          extraChunks.push({ tag: field.tag, payload: new Uint8Array(field.payload) });
+        }
+      }
+      const ulbl = typeof raw.ulbl === "number" ? raw.ulbl : undefined;
+      const utpc = typeof raw.utpc === "number" ? raw.utpc : undefined;
+      const path = typeof raw.pfil === "string" ? raw.pfil : "";
+      tracks.push({
+        path,
+        type: typeof raw.ttyp === "string" ? raw.ttyp : seratoType(path),
+        title: typeof raw.tsng === "string" ? raw.tsng : undefined,
+        artist: typeof raw.tart === "string" ? raw.tart : undefined,
+        album: typeof raw.talb === "string" ? raw.talb : undefined,
+        genre: typeof raw.tgen === "string" ? raw.tgen : undefined,
+        comment: typeof raw.tcom === "string" ? raw.tcom : undefined,
+        grouping: typeof raw.tgrp === "string" ? raw.tgrp : undefined,
+        remixer: typeof raw.trmx === "string" ? raw.trmx : undefined,
+        length: typeof raw.tlen === "string" ? raw.tlen : undefined,
+        size: typeof raw.tsiz === "string" ? raw.tsiz : undefined,
+        bitrate: typeof raw.tbit === "string" ? raw.tbit : undefined,
+        sampleRate: typeof raw.tsmp === "string" ? raw.tsmp : undefined,
+        bpm: typeof raw.tbpm === "string" ? raw.tbpm : undefined,
+        composer: typeof raw.tcmp === "string" ? raw.tcmp : undefined,
+        year: typeof raw.ttyr === "string" ? raw.ttyr : undefined,
+        label: typeof raw.tlbl === "string" ? raw.tlbl : undefined,
+        added: typeof raw.tadd === "string" ? raw.tadd : undefined,
+        key: typeof raw.tkey === "string" ? raw.tkey : undefined,
+        uadd: typeof raw.uadd === "number" ? raw.uadd : undefined,
+        utkn: typeof raw.utkn === "number" ? raw.utkn : undefined,
+        utme: typeof raw.utme === "number" ? raw.utme : undefined,
+        ufsb: typeof raw.ufsb === "number" ? raw.ufsb : undefined,
+        udsc: typeof raw.udsc === "number" ? raw.udsc : undefined,
+        utpc,
+        playCount: utpc,
+        ulbl,
+        color: colorU32ToHex(ulbl),
+        played: typeof raw.bply === "boolean" ? raw.bply : undefined,
+        beatgridLocked: typeof raw.bbgl === "boolean" ? raw.bbgl : undefined,
+        flags,
+        extraChunks: extraChunks.length > 0 ? extraChunks : undefined,
+      });
     }
   }
   return { version, tracks };
@@ -270,3 +395,7 @@ export function decodeNeworder(input: Uint8Array): string[] {
     .filter((line) => line.startsWith("[crate]"))
     .map((line) => line.slice(7));
 }
+
+export const encodeDatabaseTracks = encodeDatabase;
+export const encodeDatabaseV2 = encodeDatabase;
+export const decodeDatabaseV2 = decodeDatabaseTracks;

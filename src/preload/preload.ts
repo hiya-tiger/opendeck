@@ -6,7 +6,17 @@ const on = (channel: string, handler: (payload: unknown) => void): (() => void) 
   return () => ipcRenderer.removeListener(channel, listener);
 };
 
-contextBridge.exposeInMainWorld("opendeckDesktop", {
+const videoApi = {
+  openOutput: (opts?: { fullscreen?: boolean } | boolean) => ipcRenderer.invoke("video:open-output", typeof opts === "boolean" ? { fullscreen: opts } : opts),
+  closeOutput: () => ipcRenderer.invoke("video:close-output"),
+  fullscreenOutput: (fullscreen?: boolean) => ipcRenderer.invoke("video:fullscreen-output", fullscreen),
+  statusOutput: () => ipcRenderer.invoke("video:status-output"),
+  syncOutput: (state: unknown) => ipcRenderer.invoke("video:sync-output", state),
+  onOutputState: (handler: (payload: unknown) => void) => on("video:output-state", handler),
+  onOutputClosed: (handler: (payload: unknown) => void) => on("video:output-closed", handler),
+};
+
+const api = {
   platform: process.platform,
   versions: { electron: process.versions.electron, chrome: process.versions.chrome },
   streaming: {
@@ -32,6 +42,10 @@ contextBridge.exposeInMainWorld("opendeckDesktop", {
   serato: {
     running: () => ipcRenderer.invoke("serato:running"),
     writeTags: (request: unknown) => ipcRenderer.invoke("serato:write-tags", request),
+    writeLibrary: (request: unknown) => ipcRenderer.invoke("serato:export-library", request),
+    exportLibrary: (request: unknown) => ipcRenderer.invoke("serato:export-library", request),
+    applyCrateColumns: (request: unknown) => ipcRenderer.invoke("serato:apply-crate-columns", request),
+    sqliteColumns: (request: unknown) => ipcRenderer.invoke("serato:apply-crate-columns", request),
     undo: () => ipcRenderer.invoke("serato:undo"),
   },
   recording: {
@@ -45,4 +59,13 @@ contextBridge.exposeInMainWorld("opendeckDesktop", {
     onLog: (handler: (payload: unknown) => void) => on("rtmp:log", handler),
     onExit: (handler: (payload: unknown) => void) => on("rtmp:exit", handler),
   },
-});
+  video: videoApi,
+  videoOpenOutput: videoApi.openOutput,
+  videoCloseOutput: videoApi.closeOutput,
+  videoFullscreenOutput: videoApi.fullscreenOutput,
+  videoSyncOutput: videoApi.syncOutput,
+  onVideoOutputState: videoApi.onOutputState,
+};
+
+contextBridge.exposeInMainWorld("opendeckDesktop", api);
+contextBridge.exposeInMainWorld("opendeck", api);
