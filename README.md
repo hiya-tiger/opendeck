@@ -15,7 +15,7 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 ### Phase 7 Video Mixing (Deck-Locked Transport, Video Crossfader & 2nd Fullscreen Output)
 ![OpenDeck Phase 7 Video Mixer](screenshots/opendeck-p7-video-mixer.png)
 
-### Vertical Waveforms & Serato Library Management
+### Vertical Waveforms & Serato-style Library Management
 ![OpenDeck Vertical Waveforms & Library](screenshots/opendeck-p7-vertical-library.png)
 
 ---
