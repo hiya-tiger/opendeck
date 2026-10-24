@@ -1237,7 +1237,7 @@ async function analyseTrack(track: Track): Promise<void> {
   }
   track.analyzed = true;
   library.setMeta(track, {});
-  for (const deckId of ["A", "B"] as const) {
+  for (const deckId of ALL_DECKS) {
     if (meta[deckId] === track) {
       applyTrackToDeck(track, deckId);
       setVinylArt(deckId, track.artwork);
@@ -1417,7 +1417,7 @@ const installStemModel = async (): Promise<void> => {
     const status = await api.status();
     if (status.ready) return;
     await api.install();
-    for (const deckId of ["A", "B"] as DeckId[]) {
+    for (const deckId of ALL_DECKS) {
       const refs = ui[deckId];
       if (!refs) continue;
       refs.installModel.classList.add("hidden");
@@ -1434,7 +1434,7 @@ const installStemModel = async (): Promise<void> => {
 
 desktop?.separation?.onProgress((payload) => {
   const progress = payload as SeparationProgress;
-  for (const deckId of ["A", "B"] as DeckId[]) {
+  for (const deckId of ALL_DECKS) {
     if (!separating[deckId]) continue;
     const hashMatches = !progress.hash || decks[deckId].audioHash === progress.hash;
     if (!hashMatches) continue;
@@ -2483,7 +2483,7 @@ $("exportBtn").addEventListener("click", async () => {
 });
 
 function cueRecordsFor(track: Track): (CueRecord | null)[] {
-  for (const deckId of ["A", "B"] as DeckId[]) {
+  for (const deckId of ALL_DECKS) {
     if (meta[deckId]?.id === track.id) {
       return decks[deckId].hotCues.map((cue) =>
         cue ? { time: cue.time, color: cue.color, name: cue.name ?? "" } : null,
@@ -2500,7 +2500,7 @@ function cueRecordsFor(track: Track): (CueRecord | null)[] {
 }
 
 function savedLoopsFor(track: Track): SavedLoop[] {
-  for (const deckId of ["A", "B"] as DeckId[]) {
+  for (const deckId of ALL_DECKS) {
     if (meta[deckId]?.id === track.id) return savedLoops[deckId];
   }
   try {
