@@ -110,7 +110,7 @@ export function fxDefault(type: FxType): { division: Division; amount: number; w
     case "phaser":
       return { division: "1/4", amount: 0.5, wet: 0.6 };
     case "crush":
-      return { division: "1/16", amount: 0.35, wet: 0.7 };
+      return { division: "1/16", amount: 0.35, wet: 0.25 };
     case "tremolo":
       return { division: "1/8", amount: 0.65, wet: 0.8 };
     case "gate":

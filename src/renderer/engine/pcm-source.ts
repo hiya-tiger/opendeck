@@ -107,7 +107,7 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
         this.position = this.loopStart + ((this.position - this.loopStart) % length);
       }
     } else if (this.position < this.loopStart) {
-      this.position = this.loopEnd - ((this.position - this.position) % length);
+      this.position = this.loopEnd - ((this.loopEnd - this.position) % length);
     }
   }
 }
