@@ -28,6 +28,8 @@ import type { PlayedEntry, TrackSortKey, LivePlaylistRule } from "./media/librar
 import { zipSync } from "fflate";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
+import { mediaCrates, promptView, tracksFromMedia } from "./media/cdj.ts";
+import type { CdjFetchProgress, CdjMediaLibrary, LoadedCue, LoadedTrack, MediaPrompt, ProlinkSettings, ProlinkSnapshot } from "../main/prolink/types.ts";
 import { PROVIDERS, findProvider } from "./streaming/providers.ts";
 import { parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "./streaming/youtube.ts";
 import { DrmSessionManager, probeKeySystems, providerEmbedUrl, type DrmScheme } from "./streaming/drm.ts";
@@ -181,6 +183,19 @@ interface DesktopApi {
     syncOutput: (state: unknown) => Promise<{ ok: boolean }>;
     onOutputState: (handler: (payload: unknown) => void) => () => void;
     onOutputClosed: (handler: (payload: unknown) => void) => () => void;
+  };
+  djmedia?: {
+    state: () => Promise<{ snapshot: ProlinkSnapshot; libraries: CdjMediaLibrary[] }>;
+    settings: (patch: Partial<ProlinkSettings>) => Promise<ProlinkSnapshot>;
+    forget: (mediaKey?: string) => Promise<ProlinkSnapshot>;
+    respond: (sourceId: string, action: "add" | "ignore", always: boolean) => Promise<{ ok: boolean; error?: string }>;
+    loadTrack: (sourceId: string, trackId: string) => Promise<LoadedTrack>;
+    onStatus: (handler: (payload: unknown) => void) => () => void;
+    onPrompt: (handler: (payload: unknown) => void) => () => void;
+    onPromptCleared: (handler: (payload: unknown) => void) => () => void;
+    onLibrary: (handler: (payload: unknown) => void) => () => void;
+    onRemoved: (handler: (payload: unknown) => void) => () => void;
+    onProgress: (handler: (payload: unknown) => void) => () => void;
   };
   link?: {
     status: () => Promise<LinkStatusPayload>;
@@ -1495,7 +1510,55 @@ desktop?.separation?.onProgress((payload) => {
 
 /* -------------------------------------------------------------- loading */
 
+const mediaCues = new Map<string, LoadedCue[]>();
+
+async function ensureMediaFile(track: Track, deckId: DeckId): Promise<boolean> {
+  if (!track.media || track.file) return true;
+  const api = desktop?.djmedia;
+  if (!api) return false;
+  const refs = ui[deckId];
+  if (refs) {
+    refs.title.textContent = track.name;
+    refs.sub.textContent = track.media.origin === "cdj" ? "fetching from CDJ…" : "reading from USB drive…";
+  }
+  const result = await api.loadTrack(track.media.sourceId, track.media.trackId);
+  if (!result.ok || !result.bytes) {
+    toast(`Could not load ${track.name}: ${result.error ?? "no data"}`);
+    if (refs) refs.sub.textContent = result.error ?? "load failed";
+    return false;
+  }
+  const name = result.name || `${track.name}.mp3`;
+  track.file = new File([result.bytes as BlobPart], name, { type: mimeFor(name) });
+  if (result.cues?.length) mediaCues.set(track.id, result.cues);
+  return true;
+}
+
+function mimeFor(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return (
+    { mp3: "audio/mpeg", wav: "audio/wav", aif: "audio/aiff", aiff: "audio/aiff", flac: "audio/flac", m4a: "audio/mp4", aac: "audio/aac" } as Record<string, string>
+  )[ext] ?? "application/octet-stream";
+}
+
+function applyMediaCues(track: Track, deckId: DeckId): boolean {
+  const cues = mediaCues.get(track.id);
+  if (!cues?.length || meta[deckId] !== track) return false;
+  const deck = decks[deckId];
+  let any = false;
+  for (const cue of cues) {
+    if (cue.index < 0 || cue.index >= 8) continue;
+    deck.hotCues[cue.index] = { time: cue.timeMs / 1000, color: cue.color ?? HOT_CUE_COLORS[cue.index % HOT_CUE_COLORS.length], name: cue.name };
+    any = true;
+  }
+  if (any) {
+    updatePads(deckId, true);
+    persistCues(deckId);
+  }
+  return any;
+}
+
 async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
+  if (!(await ensureMediaFile(track, deckId))) return;
   const source = track.file ?? track.url;
   if (!source) {
     toast("This crate entry has no linked file yet.");
@@ -1536,7 +1599,7 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   syncLoopButtons(deckId);
   const hadLocalCues = loadCues(deckId, track.id);
   loadLoops(deckId, track.id);
-  if (!hadLocalCues) void applySeratoCues(track, deckId);
+  if (!hadLocalCues && !applyMediaCues(track, deckId)) void applySeratoCues(track, deckId);
   if (track.analyzed) applyTrackToDeck(track, deckId);
   else enqueueAnalysis(track);
   if (track.file && isVideoFile(track.file)) {
@@ -2264,7 +2327,13 @@ function refreshPlaylistOptions(): void {
     opt.textContent = `Smart · ${lp.name}`;
     select.append(opt);
   }
-  select.value = current || "all";
+  for (const crate of library.crates()) {
+    const opt = document.createElement("option");
+    opt.value = `crate:${crate}`;
+    opt.textContent = `Crate · ${crate}`;
+    select.append(opt);
+  }
+  select.value = [...select.options].some((o) => o.value === current) ? current : "all";
 }
 
 refreshPlaylistOptions();
@@ -2350,6 +2419,194 @@ async function importCrate(name: string, bytes: Uint8Array): Promise<void> {
       (library.missingCount ? " Link the music folder to load them." : ""),
     library.missingCount > 0,
   );
+}
+
+
+/* ------------------------------------------- detected media (CDJ / USB) */
+
+const mediaApi = desktop?.djmedia;
+const mediaSources = new Map<string, CdjMediaLibrary>();
+let mediaSnapshot: ProlinkSnapshot | null = null;
+const mediaPrompts = new Map<string, MediaPrompt>();
+
+function addMediaLibrary(lib: CdjMediaLibrary): void {
+  mediaSources.set(lib.sourceId, lib);
+  const tracks = library.addMediaSource(lib.sourceId, tracksFromMedia(lib));
+  refreshPlaylistOptions();
+  const crates = mediaCrates(lib).length - 1;
+  toast(`Added ${lib.sourceName}: ${tracks.length} track${tracks.length === 1 ? "" : "s"}${crates ? `, ${crates} playlist${crates === 1 ? "" : "s"}` : ""}`);
+  renderMediaStatus();
+}
+
+function removeMediaLibrary(sourceId: string): void {
+  const lib = mediaSources.get(sourceId);
+  mediaSources.delete(sourceId);
+  const removed = library.removeMediaSource(sourceId);
+  for (const id of [...mediaCues.keys()]) if (id.startsWith(`media:${sourceId}:`)) mediaCues.delete(id);
+  refreshPlaylistOptions();
+  if (lib) toast(`${lib.sourceName} disconnected (${removed} track${removed === 1 ? "" : "s"} removed)`);
+  renderMediaStatus();
+}
+
+function renderMediaPrompts(): void {
+  const host = document.getElementById("mediaPrompts");
+  if (!host) return;
+  host.replaceChildren();
+  host.classList.toggle("hidden", mediaPrompts.size === 0);
+  for (const prompt of mediaPrompts.values()) {
+    const view = promptView(prompt);
+    const row = document.createElement("div");
+    row.className = "media-prompt";
+    row.dataset.sourceId = prompt.sourceId;
+    const text = document.createElement("span");
+    text.className = "media-prompt-text";
+    text.textContent = view.text;
+    const always = document.createElement("label");
+    always.className = "media-prompt-always micro";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    always.append(check, document.createTextNode(` ${view.rememberLabel}`));
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "pill-btn media-prompt-add";
+    add.textContent = view.addLabel;
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "ghost media-prompt-dismiss";
+    dismiss.textContent = view.dismissLabel;
+    const answer = async (action: "add" | "ignore"): Promise<void> => {
+      add.disabled = true;
+      dismiss.disabled = true;
+      mediaPrompts.delete(prompt.sourceId);
+      renderMediaPrompts();
+      const result = await mediaApi?.respond(prompt.sourceId, action, check.checked);
+      if (result && !result.ok && result.error) toast(result.error);
+    };
+    add.addEventListener("click", () => void answer("add"));
+    dismiss.addEventListener("click", () => void answer("ignore"));
+    row.append(text, always, add, dismiss);
+    host.append(row);
+  }
+}
+
+function renderMediaStatus(): void {
+  const chip = document.getElementById("cdjStatus");
+  if (!chip) return;
+  const snap = mediaSnapshot;
+  if (!snap) {
+    chip.classList.add("hidden");
+    return;
+  }
+  chip.classList.remove("hidden");
+  const players = snap.players.filter((p) => p.kind === "player");
+  const ready = snap.media.filter((m) => m.state === "ready");
+  const parts: string[] = [];
+  if (snap.enabled) parts.push(snap.running ? `${players.length} CDJ${players.length === 1 ? "" : "s"}` : "DJ Link off");
+  if (ready.length) parts.push(`${ready.length} drive${ready.length === 1 ? "" : "s"}`);
+  chip.textContent = parts.length ? `Link: ${parts.join(" · ")}` : "Link";
+  chip.classList.toggle("live", players.length > 0 || ready.length > 0);
+  chip.title = snap.error ?? (snap.address ? `Pro DJ Link on ${snap.interfaceName} (${snap.address}) as player ${snap.deviceNumber ?? "-"}` : "Pro DJ Link: waiting for players");
+  const panel = document.getElementById("cdjPanel");
+  if (!panel || panel.classList.contains("hidden")) return;
+  const enabled = panel.querySelector<HTMLInputElement>("#cdjEnabled");
+  const localDrives = panel.querySelector<HTMLInputElement>("#cdjLocalDrives");
+  const iface = panel.querySelector<HTMLSelectElement>("#cdjInterface");
+  if (enabled) enabled.checked = snap.settings.enabled;
+  if (localDrives) localDrives.checked = snap.settings.localDrives;
+  if (iface) {
+    iface.replaceChildren();
+    const auto = document.createElement("option");
+    auto.value = "auto";
+    auto.textContent = "Automatic (follow the CDJs)";
+    iface.append(auto);
+    for (const i of snap.interfaces) {
+      const opt = document.createElement("option");
+      opt.value = i.name;
+      opt.textContent = `${i.name} · ${i.address}`;
+      iface.append(opt);
+    }
+    iface.value = snap.settings.interface;
+  }
+  const list = panel.querySelector("#cdjList");
+  if (list) {
+    list.replaceChildren();
+    const line = (text: string, cls = ""): void => {
+      const el = document.createElement("div");
+      el.className = `cdj-line ${cls}`.trim();
+      el.textContent = text;
+      list.append(el);
+    };
+    if (snap.error) line(snap.error, "warn");
+    else if (snap.enabled) line(snap.address ? `Linked on ${snap.interfaceName} (${snap.address}) as player ${snap.deviceNumber ?? "-"}` : "Waiting for CDJs on the network…");
+    for (const p of snap.players) line(`${p.kind === "mixer" ? "Mixer" : p.kind === "player" ? "CDJ" : "Device"} ${p.deviceNumber} · ${p.name} · ${p.ip}${p.kind === "player" ? ` · USB ${p.usb} · SD ${p.sd}` : ""}`);
+    for (const m of snap.media) {
+      const name = m.sourceName || (m.origin === "cdj" ? `CDJ ${m.deviceNumber} · ${m.slot.toUpperCase()}` : "USB drive");
+      const state = m.state === "ready" ? `${m.trackCount} tracks` : m.state === "error" ? `error: ${m.error ?? ""}` : m.state;
+      line(`${name} — ${state}`, m.state === "error" ? "warn" : "");
+    }
+    const remembered = Object.keys(snap.settings.remembered).length;
+    const forget = panel.querySelector<HTMLButtonElement>("#cdjForget");
+    if (forget) {
+      forget.disabled = remembered === 0;
+      forget.textContent = remembered ? `Forget ${remembered} remembered drive${remembered === 1 ? "" : "s"}` : "No remembered drives";
+    }
+  }
+}
+
+function applyMediaStatus(snap: ProlinkSnapshot): void {
+  mediaSnapshot = snap;
+  const live = new Set(snap.prompts.map((p) => p.sourceId));
+  for (const id of [...mediaPrompts.keys()]) if (!live.has(id)) mediaPrompts.delete(id);
+  for (const p of snap.prompts) mediaPrompts.set(p.sourceId, p);
+  renderMediaPrompts();
+  renderMediaStatus();
+}
+
+if (mediaApi) {
+  mediaApi.onStatus((payload) => applyMediaStatus(payload as ProlinkSnapshot));
+  mediaApi.onPrompt((payload) => {
+    const prompt = payload as MediaPrompt;
+    mediaPrompts.set(prompt.sourceId, prompt);
+    renderMediaPrompts();
+  });
+  mediaApi.onPromptCleared((payload) => {
+    mediaPrompts.delete(String(payload));
+    renderMediaPrompts();
+  });
+  mediaApi.onLibrary((payload) => addMediaLibrary(payload as CdjMediaLibrary));
+  mediaApi.onRemoved((payload) => removeMediaLibrary(String(payload)));
+  mediaApi.onProgress((payload) => {
+    const p = payload as CdjFetchProgress;
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+    for (const deckId of ALL_DECKS) {
+      const refs = ui[deckId];
+      const pending = refs && refs.sub.textContent?.startsWith("fetching from CDJ");
+      if (pending) refs.sub.textContent = `fetching from CDJ… ${pct}%`;
+    }
+  });
+  mediaApi
+    .state()
+    .then(({ snapshot, libraries }) => {
+      for (const lib of libraries) if (!mediaSources.has(lib.sourceId)) addMediaLibrary(lib);
+      applyMediaStatus(snapshot);
+    })
+    .catch(() => undefined);
+  document.getElementById("cdjStatus")?.addEventListener("click", () => {
+    const panel = document.getElementById("cdjPanel");
+    panel?.classList.toggle("hidden");
+    renderMediaStatus();
+  });
+  const update = async (patch: Partial<ProlinkSettings>): Promise<void> => {
+    try {
+      applyMediaStatus(await mediaApi.settings(patch));
+    } catch (error) {
+      toast(`Could not change Link settings: ${(error as Error).message}`);
+    }
+  };
+  document.getElementById("cdjEnabled")?.addEventListener("change", (e) => void update({ enabled: (e.target as HTMLInputElement).checked }));
+  document.getElementById("cdjLocalDrives")?.addEventListener("change", (e) => void update({ localDrives: (e.target as HTMLInputElement).checked }));
+  document.getElementById("cdjInterface")?.addEventListener("change", (e) => void update({ interface: (e.target as HTMLSelectElement).value }));
+  document.getElementById("cdjForget")?.addEventListener("click", async () => applyMediaStatus(await mediaApi.forget()));
 }
 
 $("crateBtn").addEventListener("click", () => $<HTMLInputElement>("crateInput").click());
