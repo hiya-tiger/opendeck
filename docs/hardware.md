@@ -1,6 +1,6 @@
 # Hardware controllers and samplers
 
-OpenDeck uses Web MIDI, so any class-compliant USB-MIDI device works without a driver install on Windows 10/11, macOS and Linux. The Tauri/WebView2 build grants the MIDI permission in the host; the Electron build uses Chromium's own permission handling.
+OpenDecks uses Web MIDI, so any class-compliant USB-MIDI device works without a driver install on Windows 10/11, macOS and Linux. The Tauri/WebView2 build grants the MIDI permission in the host; the Electron build uses Chromium's own permission handling.
 
 ## What is supported
 
@@ -9,10 +9,10 @@ OpenDeck uses Web MIDI, so any class-compliant USB-MIDI device works without a d
 | Built-in presets | Hercules DJControl T10, Numark Party Mix III | Transport, pads, tempo and mixer controls are mapped automatically when the device name matches |
 | Drum / sampler pads | Roland SP-404MKII, Akai MPC pads, Novation Launchpad | Notes 36-43 play sampler pads 1-8 with velocity; other notes and CCs can be learned |
 | Keyboard controllers | Akai MPK Mini, Arturia MiniLab, Novation Launchkey | Pads and keys send notes; knobs send CCs; use Learn to bind transport, EQ, faders or pads |
-| MIDI interfaces / routers | CME U6MIDI Pro, iConnectivity mio | Routes any connected keyboard or pad bank into OpenDeck; OpenDeck sees the interface's input port |
+| MIDI interfaces / routers | CME U6MIDI Pro, iConnectivity mio | Routes any connected keyboard or pad bank into OpenDecks; OpenDecks sees the interface's input port |
 | Generic USB-MIDI keyboard | Any class-compliant device | Same as above; no vendor driver needed |
 
-OpenDeck does not require or use SysEx. It lists all connected inputs and re-scans on hot-plug.
+OpenDecks does not require or use SysEx. It lists all connected inputs and re-scans on hot-plug.
 
 ## Quick start
 
@@ -40,22 +40,22 @@ Mappings are stored per browser profile in `localStorage` under `opendeck.midi.m
 ### Hercules DJControl T10
 
 - The preset follows Hercules' DJUCED MIDI map: deck buttons on channels 2 and 3, hot-cue pads on channels 7 and 8, channel faders on CC0, crossfader on channel 1 CC0, tempo on CC8, EQ on CC2-4 and trim on CC5.
-- Hot cues 1-8 are the first pad page (notes 0-7). Deck A's sampler page (notes 48-55) is mapped to OpenDeck's sampler; switch the pad page on the controller to use it.
+- Hot cues 1-8 are the first pad page (notes 0-7). Deck A's sampler page (notes 48-55) is mapped to OpenDecks's sampler; switch the pad page on the controller to use it.
 - The T10 has no software master fader or headphone-mix CC in DJUCED's map, so those targets stay unbound. Use Learn if your firmware sends different controls.
-- Motorised platters and LED feedback are not driven by OpenDeck; the platters still send MIDI and can be learned.
+- Motorised platters and LED feedback are not driven by OpenDecks; the platters still send MIDI and can be learned.
 
 ### Numark Party Mix III
 
 - The preset follows the community Mixxx mapping: play/cue/sync on notes 0-2, tempo on CC0, pads 1-4 on notes 20-23, and channel faders on CC22.
-- Crossfader and master are on MIDI channel 16 (CC8 and CC10). The cue-mix knob and filter knobs are not mapped because OpenDeck has no matching targets.
+- Crossfader and master are on MIDI channel 16 (CC8 and CC10). The cue-mix knob and filter knobs are not mapped because OpenDecks has no matching targets.
 - Only four hot cues per deck are exposed by the controller. Pads 5-8 remain available through Learn with another controller.
 
 ### Roland SP-404MKII
 
-- Acts as a USB audio interface and a USB-MIDI device. OpenDeck uses the MIDI port; audio can be routed separately through the OS or an audio interface.
+- Acts as a USB audio interface and a USB-MIDI device. OpenDecks uses the MIDI port; audio can be routed separately through the OS or an audio interface.
 - Install the Roland driver if Windows does not expose a MIDI port. Set the device's USB mode to **Vendor** when using the Roland driver, or **Generic** for class-compliant operation.
-- Pads send notes; bank A defaults to 36-43, which triggers OpenDeck's sampler immediately. Use Learn if your bank starts elsewhere.
-- The SP-404MKII's own effects and sequencer remain on the device; OpenDeck only receives MIDI.
+- Pads send notes; bank A defaults to 36-43, which triggers OpenDecks's sampler immediately. Use Learn if your bank starts elsewhere.
+- The SP-404MKII's own effects and sequencer remain on the device; OpenDecks only receives MIDI.
 
 ### Akai MPK Mini
 
@@ -66,8 +66,8 @@ Mappings are stored per browser profile in `localStorage` under `opendeck.midi.m
 ### CME U6MIDI Pro
 
 - A router/interface rather than a controller. Connect the keyboard or pad device to its MIDI input (or USB host port) and route that port to USB.
-- OpenDeck sees the U6MIDI Pro input; all upstream channels and notes arrive unchanged. Channel numbers are preserved, so a binding learned on channel 3 stays on channel 3.
-- Use the CME app to merge or filter ports if you want one OpenDeck input for several devices.
+- OpenDecks sees the U6MIDI Pro input; all upstream channels and notes arrive unchanged. Channel numbers are preserved, so a binding learned on channel 3 stays on channel 3.
+- Use the CME app to merge or filter ports if you want one OpenDecks input for several devices.
 
 ### Generic plug-in keyboards
 
@@ -87,7 +87,7 @@ Physical-device testing is still pending for the DJControl T10, Party Mix III, S
 
 ## Supported Hardware Catalogue (195 Devices)
 
-OpenDeck includes built-in presets and USB MIDI / USB Audio auto-detection for **195** DJ controllers, all-in-one systems, battle/club mixers, DVS interfaces, media players, motorized turntables, and pad/rhythm accessories (plus the legacy Hercules DJControl T10 and Numark Party Mix III presets). Connecting a 4-deck controller automatically enables the 4-deck workspace, and connecting a DVS mixer or audio interface badges it as `[DVS Ready]` or `[DVS Upgrade]` in the DVS input selector.
+OpenDecks includes built-in presets and USB MIDI / USB Audio auto-detection for **195** DJ controllers, all-in-one systems, battle/club mixers, DVS interfaces, media players, motorized turntables, and pad/rhythm accessories (plus the legacy Hercules DJControl T10 and Numark Party Mix III presets). Connecting a 4-deck controller automatically enables the 4-deck workspace, and connecting a DVS mixer or audio interface badges it as `[DVS Ready]` or `[DVS Upgrade]` in the DVS input selector.
 
 ### 2-Deck Controllers (66)
 

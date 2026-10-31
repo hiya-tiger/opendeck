@@ -42,7 +42,9 @@ app.whenReady().then(async () => {
     console.error("SMOKE_ERROR", error);
     process.exitCode = 1;
   }
-  app.quit();
+  // app.quit() can leave the offscreen window (and the process) alive, which
+  // made the wrapper report a timeout and exit 1 even after a clean result.
+  app.exit(process.exitCode ?? 0);
 });
 `;
 const mainPath = path.join(outDir, "main.cjs");

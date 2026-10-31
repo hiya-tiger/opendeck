@@ -17,7 +17,7 @@ pub use live::LiveEngine;
 pub use render::{LoopRegion, PcmVoice, StereoSamples, Transport, VoiceOptions};
 pub use ring::{AudioRing, Consumer, Producer};
 pub use transport::{LiveVoice, TransportState};
-pub use cpal_out::{interleave_stereo, OutputError};
+pub use cpal_out::{interleave_stereo, probe_gate, probe_gate_from_env, OutputError, ProbeGate, PROBE_ENV};
 #[cfg(feature = "native-output")]
 pub use cpal_out::NativeOutput;
 #[cfg(feature = "decode")]

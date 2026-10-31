@@ -126,7 +126,7 @@ async fn analyze_bytes_raw(request: Request<'_>) -> Result<AnalysisPayload, Stri
 async fn media_fetch_raw(url: String) -> Result<Response, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let response = ureq::get(&url)
-            .set("User-Agent", "OpenDeck/0.1 (open source DJ app)")
+            .set("User-Agent", "OpenDecks/0.1 (open source DJ app)")
             .call()
             .map_err(|error| error.to_string())?;
         let mut bytes = Vec::new();
@@ -144,7 +144,7 @@ async fn media_fetch_raw(url: String) -> Result<Response, String> {
 async fn media_fetch(url: String) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let response = ureq::get(&url)
-            .set("User-Agent", "OpenDeck/0.1 (open source DJ app)")
+            .set("User-Agent", "OpenDecks/0.1 (open source DJ app)")
             .call()
             .map_err(|error| error.to_string())?;
         let content_type = response
@@ -171,7 +171,7 @@ async fn media_fetch(url: String) -> Result<serde_json::Value, String> {
 async fn recording_save(name: String, bytes: Vec<u8>) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let chosen = rfd::FileDialog::new()
-            .set_title("Save OpenDeck mix")
+            .set_title("Save OpenDecks mix")
             .set_file_name(&name)
             .save_file();
         match chosen {
@@ -195,7 +195,7 @@ async fn recording_save_raw(request: Request<'_>) -> Result<serde_json::Value, S
     };
     tauri::async_runtime::spawn_blocking(move || {
         let chosen = rfd::FileDialog::new()
-            .set_title("Save OpenDeck mix")
+            .set_title("Save OpenDecks mix")
             .set_file_name("opendeck-mix.webm")
             .save_file();
         match chosen {
@@ -224,7 +224,7 @@ async fn open_provider_window(
         return Ok(());
     }
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
-        .title(format!("OpenDeck - {provider}"))
+        .title(format!("OpenDecks - {provider}"))
         .inner_size(1180.0, 800.0)
         .build()
         .map_err(|error| error.to_string())?;
@@ -838,7 +838,7 @@ fn main() {
             rtmp_stop
         ])
         .run(tauri::generate_context!())
-        .expect("error while running OpenDeck");
+        .expect("error while running OpenDecks");
 }
 
 

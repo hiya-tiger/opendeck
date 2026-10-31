@@ -413,6 +413,170 @@ mod tests {
         .is_err());
     }
 
+    // ---- M2 characterisation: exact frame counts, exact wrap, exact reverse --
+
+    /// Block sizes worth pinning: prime, power-of-two, one less and one more
+    /// than a power-of-two, and the 128-frame default the worklet uses.
+    const BLOCK_SIZES: [usize; 13] = [1, 2, 3, 5, 7, 16, 63, 64, 127, 128, 129, 256, 1024];
+
+    fn transport_with_source(frames: usize) -> Transport {
+        let mut transport = Transport::new(48_000);
+        transport.add_voice(PcmVoice::new(vec![ramp(frames)], VoiceOptions::new()).unwrap());
+        transport
+    }
+
+    /// `render_offline` must return exactly `frames` samples for every block
+    /// size, including sizes that do not divide `frames`, and the tail block
+    /// must be short rather than padded or dropped.
+    #[test]
+    fn render_offline_returns_exactly_the_requested_frame_count() {
+        for frames in [0usize, 1, 2, 3, 7, 16, 17, 63, 64, 65, 127, 128, 129, 255, 256, 257, 999, 1000, 1024] {
+            for block_size in BLOCK_SIZES {
+                let mut transport = transport_with_source(4096);
+                let out = transport.render_offline(frames, block_size);
+                assert_eq!(
+                    out.left.len(),
+                    frames,
+                    "left length for {frames} frames in blocks of {block_size}"
+                );
+                assert_eq!(
+                    out.right.len(),
+                    frames,
+                    "right length for {frames} frames in blocks of {block_size}"
+                );
+                assert_eq!(
+                    out.left,
+                    ramp(frames),
+                    "sample content for {frames} frames in blocks of {block_size}"
+                );
+            }
+        }
+    }
+
+    /// A short final block must zero-fill to the requested length and must not
+    /// shorten the output when the voice runs out mid-block.
+    #[test]
+    fn a_voice_that_ends_mid_block_keeps_the_exact_output_length() {
+        for block_size in BLOCK_SIZES {
+            let mut transport = transport_with_source(5);
+            let out = transport.render_offline(13, block_size);
+            assert_eq!(out.left.len(), 13, "block {block_size}");
+            assert_eq!(&out.left[..5], &[0.0, 1.0, 2.0, 3.0, 4.0], "block {block_size}");
+            assert!(
+                out.left[5..].iter().all(|sample| *sample == 0.0),
+                "tail must be silence for block {block_size}, got {:?}",
+                &out.left[5..]
+            );
+        }
+    }
+
+    /// Forward loop wrap is sample-exact: with a 4-frame loop the output period
+    /// is exactly 4 frames regardless of how blocks cut across the wrap.
+    #[test]
+    fn forward_loop_wrap_is_sample_exact_across_block_sizes() {
+        let region = LoopRegion::new(8.0, 12.0);
+        let expected: Vec<f32> = (0..64).map(|index| 8.0 + (index % 4) as f32).collect();
+        for block_size in BLOCK_SIZES {
+            let out = render(64, block_size, 1.0, 8.0, Some(region));
+            assert_eq!(out, expected, "forward loop wrap in blocks of {block_size}");
+        }
+    }
+
+    /// Reverse loop wrap is sample-exact in the other direction: from frame 11
+    /// the cursor steps 11, 10, 9, 8, 11, ... with no off-by-one at the seam.
+    #[test]
+    fn reverse_loop_wrap_is_sample_exact_across_block_sizes() {
+        let region = LoopRegion::new(8.0, 12.0);
+        let expected: Vec<f32> = (0..64).map(|index| 11.0 - (index % 4) as f32).collect();
+        for block_size in BLOCK_SIZES {
+            let out = render(64, block_size, -1.0, 11.0, Some(region));
+            assert_eq!(out, expected, "reverse loop wrap in blocks of {block_size}");
+        }
+    }
+
+    /// Render `out_frames` from a `source_frames`-long voice.
+    fn render_from(
+        source_frames: usize,
+        out_frames: usize,
+        block_size: usize,
+        rate: f64,
+        position: f64,
+        loop_region: Option<LoopRegion>,
+    ) -> Vec<f32> {
+        let options = VoiceOptions {
+            position,
+            rate,
+            gain: 1.0,
+            loop_region,
+        };
+        let mut transport = Transport::new(48_000);
+        transport.add_voice(PcmVoice::new(vec![ramp(source_frames)], options).unwrap());
+        transport.render_offline(out_frames, block_size).left
+    }
+
+    /// A block that straddles the loop seam must wrap between samples, not
+    /// between blocks: 8, 9, 10, 11, 8 for a 4-frame loop.
+    #[test]
+    fn a_block_straddling_the_loop_seam_wraps_between_samples() {
+        let region = Some(LoopRegion::new(8.0, 12.0));
+        assert_eq!(
+            render_from(64, 5, 5, 1.0, 8.0, region),
+            vec![8.0, 9.0, 10.0, 11.0, 8.0]
+        );
+        assert_eq!(
+            render_from(64, 5, 5, -1.0, 9.0, region),
+            vec![9.0, 8.0, 11.0, 10.0, 9.0]
+        );
+    }
+
+    /// Reverse playback advances by exactly one source frame per output frame,
+    /// so the cursor position after N frames is `start - N` with no drift.
+    #[test]
+    fn reverse_position_is_exact_after_every_block() {
+        let mut voice = PcmVoice::new(
+            vec![ramp(1024)],
+            VoiceOptions {
+                position: 1000.0,
+                rate: -1.0,
+                ..VoiceOptions::new()
+            },
+        )
+        .unwrap();
+        let mut left = vec![0.0f32; 37];
+        let mut right = vec![0.0f32; 37];
+        for step in 1..=20 {
+            voice.render_add(&mut left, &mut right);
+            assert_eq!(voice.position(), 1000.0 - 37.0 * step as f64, "after {step} blocks");
+            left.fill(0.0);
+            right.fill(0.0);
+        }
+    }
+
+    /// Fractional rates accumulate exactly: half speed moves the cursor half a
+    /// frame per frame, and the loop period doubles to exactly 8 frames.
+    #[test]
+    fn fractional_rate_keeps_exact_position_and_loop_period() {
+        let mut voice = PcmVoice::new(
+            vec![ramp(64)],
+            VoiceOptions {
+                position: 8.0,
+                rate: 0.5,
+                loop_region: Some(LoopRegion::new(8.0, 12.0)),
+                ..VoiceOptions::new()
+            },
+        )
+        .unwrap();
+        let mut left = vec![0.0f32; 16];
+        let mut right = vec![0.0f32; 16];
+        for step in 1..=6 {
+            voice.render_add(&mut left, &mut right);
+            // 16 frames at half speed is 8 source frames, i.e. two 4-frame loops.
+            assert_eq!(voice.position(), 8.0 + (8.0 * step as f64) % 4.0, "after {step} blocks");
+            left.fill(0.0);
+            right.fill(0.0);
+        }
+    }
+
     #[test]
     fn ten_minutes_of_looping_stays_on_the_exact_sample() {
         let frames = 48_000usize * 600;

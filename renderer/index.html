@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenDeck — open-source DJ</title>
+<title>OpenDecks — open-source DJ</title>
 <meta name="description" content="Open-source DJ app with DVS, stems, beat FX and streaming queue. MIT licensed.">
 <link rel="stylesheet" href="styles.css">
 </head>
@@ -14,13 +14,14 @@
       <span class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="8" cy="12" r="5.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16" cy="12" r="5.2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/></svg>
       </span>
-      <span class="brand-name">OpenDeck</span>
+      <span class="brand-name">OpenDecks</span>
       <span class="pill">MIT · open source</span>
     </div>
     <div class="topbar-mid">
       <span class="status-dot" id="engineDot"></span>
       <span id="engineState" class="muted mono">audio engine idle</span>
       <span id="engineDiag" class="muted mono"></span>
+      <span id="linkStatus" class="muted mono hidden"></span>
     </div>
     <div class="topbar-right">
       <span class="muted mono" id="clock">--:--</span>
@@ -69,7 +70,7 @@
       </div>
       <div class="aux-card">
         <div class="aux-head"><span class="eyebrow">System audio</span><span class="chip" id="auxState">off</span></div>
-        <p class="micro">Mix Spotify, YouTube Music or any player through OpenDeck's master.</p>
+        <p class="micro">Mix Spotify, YouTube Music or any player through OpenDecks's master.</p>
         <input id="auxGain" type="range" min="0" max="1" step="0.01" value="0.8" aria-label="System audio level">
         <button id="auxBtn" type="button" class="ghost small">Capture output</button>
       </div>

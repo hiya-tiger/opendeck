@@ -38,6 +38,43 @@ impl fmt::Display for OutputError {
 
 impl std::error::Error for OutputError {}
 
+/// Environment variable that must be exactly `1` before the native-output probe
+/// will open a device.
+///
+/// The probe exists to answer one question — can this machine render through
+/// cpal at all — and it deliberately bypasses the Web Audio graph. Two
+/// independent locks keep it off the product path: the `native-output` feature
+/// is absent from `default` and no shell enables it, and this runtime gate
+/// refuses unless the variable is set to `1` by hand. Nothing in the
+/// application sets it.
+pub const PROBE_ENV: &str = "OPENDECK_NATIVE_OUTPUT_PROBE";
+
+/// Result of the runtime probe gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeGate {
+    /// [`PROBE_ENV`] was exactly `1`.
+    Enabled,
+    /// Unset, or set to anything else. The payload says which.
+    Disabled(&'static str),
+}
+
+/// Evaluate the gate for an already-read environment value.
+///
+/// Split from [`probe_gate_from_env`] so the rule is testable without mutating
+/// process state.
+pub fn probe_gate(value: Option<&str>) -> ProbeGate {
+    match value {
+        Some("1") => ProbeGate::Enabled,
+        Some(_) => ProbeGate::Disabled("OPENDECK_NATIVE_OUTPUT_PROBE is set but is not \"1\""),
+        None => ProbeGate::Disabled("OPENDECK_NATIVE_OUTPUT_PROBE is not set"),
+    }
+}
+
+/// Read [`PROBE_ENV`] and evaluate the gate.
+pub fn probe_gate_from_env() -> ProbeGate {
+    probe_gate(std::env::var(PROBE_ENV).ok().as_deref())
+}
+
 /// Interleave planar stereo into `channels`-wide f32 frames.
 /// A mono destination receives the average of the left and right channels.
 /// Frames beyond the end of the planar buffers become silence.
@@ -127,6 +164,22 @@ mod native {
             for sample in &mut out[end..] {
                 *sample = T::from_sample(0.0);
             }
+        }
+    }
+
+    /// Prefer the widest lossless format the device offers.
+    ///
+    /// cpal returns supported configs in device order, and WASAPI shared mode
+    /// lists U8 first. Taking the first eligible config would therefore play
+    /// 8-bit audio on a device that also offers f32, which is audible and is
+    /// not what "the device supports the source rate" should mean.
+    pub(super) fn format_rank(format: SampleFormat) -> u8 {
+        match format {
+            SampleFormat::F32 => 0,
+            SampleFormat::I32 => 1,
+            SampleFormat::I16 => 2,
+            SampleFormat::U8 => 3,
+            _ => u8::MAX,
         }
     }
 
@@ -220,7 +273,8 @@ mod native {
             let supported = device
                 .supported_output_configs()
                 .map_err(|error| OutputError::Failed(format!("config query failed: {error}")))?
-                .find(eligible)
+                .filter(eligible)
+                .min_by_key(|value| format_rank(value.sample_format()))
                 .ok_or_else(|| {
                     OutputError::UnsupportedConfig(format!(
                         "the default output device offers no mono/stereo f32/i16/i32/u8 config at {sample_rate} Hz"
@@ -359,6 +413,35 @@ mod tests {
         let mut mono = vec![0.0; 2];
         interleave_stereo(&[-1.0, 1.0], &[1.0, -1.0], &mut mono, 1).unwrap();
         assert_eq!(mono, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_probe_gate_is_closed_unless_the_variable_is_exactly_one() {
+        assert_eq!(probe_gate(Some("1")), ProbeGate::Enabled);
+        assert_eq!(
+            probe_gate(None),
+            ProbeGate::Disabled("OPENDECK_NATIVE_OUTPUT_PROBE is not set")
+        );
+        for value in ["", "0", "true", "yes", " 1", "1 ", "2"] {
+            assert_eq!(
+                probe_gate(Some(value)),
+                ProbeGate::Disabled("OPENDECK_NATIVE_OUTPUT_PROBE is set but is not \"1\""),
+                "value {value:?} must not open the gate"
+            );
+        }
+    }
+
+    #[cfg(feature = "native-output")]
+    #[test]
+    fn format_rank_prefers_f32_then_widest_integer() {
+        use cpal::SampleFormat;
+        let mut formats = [SampleFormat::U8, SampleFormat::I16, SampleFormat::I32, SampleFormat::F32];
+        formats.sort_by_key(|format| native::format_rank(*format));
+        assert_eq!(
+            formats,
+            [SampleFormat::F32, SampleFormat::I32, SampleFormat::I16, SampleFormat::U8]
+        );
+        assert_eq!(native::format_rank(SampleFormat::F64), u8::MAX);
     }
 
     #[cfg(feature = "native-output")]

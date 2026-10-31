@@ -1,5 +1,5 @@
 ﻿const WORKLET_SOURCE = `
-class OpenDeckScratchProcessor extends AudioWorkletProcessor {
+class OpenDecksScratchProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.left = null;
@@ -66,8 +66,32 @@ class OpenDeckScratchProcessor extends AudioWorkletProcessor {
     return true;
   }
 }
-registerProcessor("opendeck-scratch", OpenDeckScratchProcessor);
+registerProcessor("opendeck-scratch", OpenDecksScratchProcessor);
 `;
+
+const scratchModules = new WeakMap<BaseAudioContext, Promise<void>>();
+
+/**
+ * Adds the scratch processor once per context. A deck builds five scratch
+ * voices (platter plus one per part), and every repeat registerProcessor threw
+ * inside the worklet scope.
+ */
+function addScratchModule(ctx: BaseAudioContext): Promise<void> {
+  let pending = scratchModules.get(ctx);
+  if (!pending) {
+    pending = (async () => {
+      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));
+      try {
+        await ctx.audioWorklet.addModule(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    })();
+    pending.catch(() => scratchModules.delete(ctx));
+    scratchModules.set(ctx, pending);
+  }
+  return pending;
+}
 
 export const MAX_SCRATCH_RATE = 6;
 
@@ -125,12 +149,7 @@ export class ScratchVoice {
     if (this.ready) return this.ready;
     this.ready = (async () => {
       if (!this.ctx.audioWorklet) throw new Error("AudioWorklet is not available");
-      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));
-      try {
-        await this.ctx.audioWorklet.addModule(url);
-      } finally {
-        URL.revokeObjectURL(url);
-      }
+      await addScratchModule(this.ctx);
       const node = new AudioWorkletNode(this.ctx, "opendeck-scratch", {
         numberOfInputs: 0,
         numberOfOutputs: 1,

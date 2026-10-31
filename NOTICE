@@ -54,6 +54,23 @@ MPL-2.0 is file-level copyleft: modifications to Symphonia's own files must be
 published under MPL-2.0, while OpenDeck's files can remain MIT. We do not
 modify Symphonia; if that changes, the modified files will be called out here.
 
+## Session tempo transport (opendeck-link/1)
+
+`src/main/link.ts` implements an original session tempo/beat/phase transport
+published under OpenDeck's MIT licence. It is **not** Ableton Link and does not
+interoperate with Ableton Live: it uses its own multicast group
+(`239.255.77.88:29876`) and its own message format (`opendeck-link/1`), both
+documented in `docs/mobile/ADR-D34.md`.
+
+No Ableton Link code, crate, package, model or asset is included, vendored,
+linked or downloaded. Ableton's reference implementation is dual-licensed
+GPLv2+/proprietary, and every implementation of its wire protocol found during
+this run is GPL; the licence decision and its consequences are recorded in
+`docs/mobile/ADR-D34.md`.
+
+"Ableton" and "Link" are trademarks of Ableton AG, used here only to state what
+this software is not compatible with. No endorsement or affiliation is implied.
+
 ## Development and verification tools
 
 `node:test`, the TypeScript compiler, Cargo and the browser/CDP tooling used in

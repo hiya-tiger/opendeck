@@ -1,7 +1,7 @@
-import type { StretchNode } from "signalsmith-stretch";
+import type { StretchNode, StretchSchedule } from "signalsmith-stretch";
 
 export const WORKLET_SOURCE = `
-class OpenDeckPcmProcessor extends AudioWorkletProcessor {
+class OpenDecksPcmProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.left = null;
@@ -13,8 +13,10 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
     this.loopStart = -1;
     this.loopEnd = -1;
     this.frames = 0;
+    this.seq = 0;
     this.port.onmessage = (event) => {
       const data = event.data;
+      if (typeof data.seq === "number") this.seq = data.seq;
       if (data.type === "buffer") {
         this.left = data.left;
         this.right = data.right;
@@ -25,10 +27,10 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
         this.playing = true;
       } else if (data.type === "pause") {
         this.playing = false;
-        this.port.postMessage({ type: "position", position: this.position });
+        this.port.postMessage({ type: "position", position: this.position, seq: this.seq });
       } else if (data.type === "seek") {
         this.position = data.position;
-        this.port.postMessage({ type: "position", position: this.position });
+        this.port.postMessage({ type: "position", position: this.position, seq: this.seq });
       } else if (data.type === "rate") {
         this.rate = data.rate;
       } else if (data.type === "gain") {
@@ -90,7 +92,7 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
     }
     this.position = position;
     if ((this.frames++ & 15) === 0 || !this.playing) {
-      this.port.postMessage({ type: "position", position });
+      this.port.postMessage({ type: "position", position, seq: this.seq });
     }
     if (this.loopStart < 0 && (position < 0 || position > last)) {
       if (this.playing) this.port.postMessage({ type: "ended" });
@@ -111,13 +113,37 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
     }
   }
 }
-registerProcessor("opendeck-pcm", OpenDeckPcmProcessor);
+registerProcessor("opendeck-pcm", OpenDecksPcmProcessor);
 `;
 
 export interface PcmSourceOptions {
   gain?: number;
   onEnded?: () => void;
   onPosition?: (samples: number) => void;
+}
+
+const pcmModules = new WeakMap<BaseAudioContext, Promise<void>>();
+
+/**
+ * Adds the PCM processor module once per context. Every voice used to add its
+ * own copy, and each repeat `registerProcessor("opendeck-pcm")` threw inside the
+ * worklet scope (the "Uncaught @69 blob:" lines in the smoke log).
+ */
+function addPcmModule(ctx: BaseAudioContext): Promise<void> {
+  let pending = pcmModules.get(ctx);
+  if (!pending) {
+    pending = (async () => {
+      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));
+      try {
+        await ctx.audioWorklet.addModule(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    })();
+    pending.catch(() => pcmModules.delete(ctx));
+    pcmModules.set(ctx, pending);
+  }
+  return pending;
 }
 
 class WorkletPcmSource {
@@ -133,6 +159,14 @@ class WorkletPcmSource {
   private rate = 1;
   private loop: { start: number; end: number } | null = null;
   private options: PcmSourceOptions;
+  private frames = 0;
+  private positionAt = 0;
+  /**
+   * Bumped on every command that sets the position. The processor echoes the
+   * last one it applied, so a position report already in flight when the main
+   * thread seeks cannot drag the playhead back to where it was.
+   */
+  private seq = 0;
 
   constructor(ctx: AudioContext, destination: AudioNode, options: PcmSourceOptions = {}) {
     this.ctx = ctx;
@@ -150,8 +184,22 @@ class WorkletPcmSource {
     return this.gainNode;
   }
 
+  /**
+   * The processor reports its position every 16 render quanta (~46 ms at
+   * 44.1 kHz). Drawing the waveform straight from that value steps visibly at
+   * 60 fps, so extrapolate from the last report at the current rate.
+   */
   get positionSamples(): number {
-    return this.position;
+    if (!this.playing || !this.positionAt) return this.position;
+    const elapsed = Math.min(0.1, Math.max(0, (performance.now() - this.positionAt) / 1000));
+    let next = this.position + elapsed * this.ctx.sampleRate * this.rate;
+    const loop = this.loop;
+    if (loop && loop.end > loop.start) {
+      const length = loop.end - loop.start;
+      if (this.rate >= 0 && next >= loop.end) next = loop.start + ((next - loop.start) % length);
+      else if (this.rate < 0 && next < loop.start) next = loop.end - ((loop.end - next) % length);
+    }
+    return Math.max(0, Math.min(next, this.frames > 0 ? this.frames - 1 : next));
   }
 
   get isPlaying(): boolean {
@@ -163,6 +211,8 @@ class WorkletPcmSource {
   }
 
   load(buffer: AudioBuffer, position = 0): void {
+    this.frames = buffer.length;
+    this.positionAt = 0;
     const left = buffer.getChannelData(0).slice();
     const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1).slice() : left.slice();
     this.left = left;
@@ -176,7 +226,7 @@ class WorkletPcmSource {
   private sendBuffer(position: number): void {
     if (!this.node || !this.left || !this.right) return;
     this.node.port.postMessage(
-      { type: "buffer", left: this.left, right: this.right, position },
+      { type: "buffer", left: this.left, right: this.right, position, seq: ++this.seq },
       [this.left.buffer, this.right.buffer],
     );
     this.left = null;
@@ -186,6 +236,8 @@ class WorkletPcmSource {
   clear(): void {
     this.left = null;
     this.right = null;
+    this.frames = 0;
+    this.positionAt = 0;
     this.loaded = false;
     this.playing = false;
     this.position = 0;
@@ -196,12 +248,7 @@ class WorkletPcmSource {
     if (this.ready) return this.ready;
     this.ready = (async () => {
       if (!this.ctx.audioWorklet) throw new Error("AudioWorklet is not available");
-      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "application/javascript" }));
-      try {
-        await this.ctx.audioWorklet.addModule(url);
-      } finally {
-        URL.revokeObjectURL(url);
-      }
+      await addPcmModule(this.ctx);
       const node = new AudioWorkletNode(this.ctx, "opendeck-pcm", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
@@ -209,7 +256,9 @@ class WorkletPcmSource {
       });
       node.port.onmessage = (event) => {
         if (event.data?.type === "position") {
+          if (typeof event.data.seq === "number" && event.data.seq !== this.seq) return;
           this.position = event.data.position;
+          this.positionAt = performance.now();
           this.options.onPosition?.(this.position);
         } else if (event.data?.type === "ended") {
           this.playing = false;
@@ -235,20 +284,25 @@ class WorkletPcmSource {
     if (!this.node) return;
     if (position !== undefined) this.position = position;
     this.playing = true;
-    this.node.port.postMessage({ type: "play", position: this.position });
+    this.positionAt = performance.now();
+    this.node.port.postMessage({ type: "play", position: this.position, seq: ++this.seq });
   }
 
   pause(): void {
+    this.position = this.positionSamples;
     this.playing = false;
     this.node?.port.postMessage({ type: "pause" });
   }
 
   seek(position: number): void {
     this.position = position;
-    this.node?.port.postMessage({ type: "seek", position });
+    this.positionAt = performance.now();
+    this.node?.port.postMessage({ type: "seek", position, seq: ++this.seq });
   }
 
   setRate(rate: number): void {
+    this.position = this.positionSamples;
+    this.positionAt = performance.now();
     this.rate = rate;
     this.node?.port.postMessage({ type: "rate", rate });
   }
@@ -267,12 +321,35 @@ class WorkletPcmSource {
   }
 }
 
+/** Signalsmith block/interval. See D18: 8 ms blocks measured +4..+11 dB THD+N. */
+export const STRETCH_CONFIG = { blockMs: 120, intervalMs: 30, splitComputation: false } as const;
+
+/** Rate within this distance of 1.0 counts as unity and plays bit-transparent. */
+const UNITY_EPSILON = 1e-6;
+
+/**
+ * Deck PCM transport with two engines behind one interface:
+ *
+ *  - `direct`: the plain interpolating AudioWorklet. Bit-transparent at 1.0x,
+ *    vinyl-style (pitch follows tempo) at any other rate. Used whenever pitch
+ *    does not need to be held: unity rate, or key lock off with no key shift.
+ *  - `stretch`: Signalsmith Stretch, built lazily the first time key lock at a
+ *    non-unity rate or a key shift is asked for.
+ *
+ * Every track used to play through Signalsmith, configured with 8 ms blocks,
+ * even at 1.0x. That measured +4.3 dB THD+N on a 55/110 Hz pair and +9.7 dB on
+ * an 80/440/2500 Hz mix (noise louder than the music), against -59/-57 dB for
+ * direct playback, and each idle node kept running an FFT every 2 ms.
+ */
 export class PcmSource {
   private readonly ctx: AudioContext;
   private readonly gainNode: GainNode;
   private readonly destination: AudioNode;
+  private readonly direct: WorkletPcmSource;
   private stretch: StretchNode | null = null;
-  private fallback: WorkletPcmSource | null = null;
+  private stretchFailed = false;
+  private stretchLoaded = false;
+  private useStretch = false;
   private ready: Promise<void> | null = null;
   private chain: Promise<void> = Promise.resolve();
   private buffer: AudioBuffer | null = null;
@@ -290,6 +367,7 @@ export class PcmSource {
   private lastTickAt = 0;
   private lastTickPosition = 0;
   private lastLoopWrapAt = 0;
+  private switchToken = 0;
   private options: PcmSourceOptions;
 
   constructor(ctx: AudioContext, destination: AudioNode, options: PcmSourceOptions = {}) {
@@ -299,6 +377,13 @@ export class PcmSource {
     this.gainNode = ctx.createGain();
     this.gainNode.gain.value = options.gain ?? 1;
     this.gainNode.connect(destination);
+    this.direct = new WorkletPcmSource(ctx, this.gainNode, {
+      onEnded: () => {
+        if (this.useStretch) return;
+        this.playing = false;
+        this.options.onEnded?.();
+      },
+    });
   }
 
   get hasBuffer(): boolean {
@@ -309,18 +394,23 @@ export class PcmSource {
     return this.gainNode;
   }
 
+  /** Which engine is rendering right now. */
+  get engineMode(): "direct" | "stretch" {
+    return this.useStretch ? "stretch" : "direct";
+  }
+
   get positionSamples(): number {
-    if (this.fallback) return this.fallback.positionSamples;
-    return Math.round(this.positionSeconds() * (this.buffer?.sampleRate ?? this.ctx.sampleRate));
+    if (!this.useStretch) return this.direct.positionSamples;
+    return Math.round(this.positionSeconds() * this.sampleRate());
   }
 
   get isPlaying(): boolean {
-    if (this.fallback) return this.fallback.isPlaying;
     return this.playing;
   }
 
+  /** Engine latency of the active path: one render quantum direct, the stretch block otherwise. */
   get latencySeconds(): number {
-    if (this.fallback) return this.ctx.baseLatency;
+    if (!this.useStretch) return 128 / this.ctx.sampleRate;
     return this.latency;
   }
 
@@ -328,8 +418,9 @@ export class PcmSource {
     return this.underrunCount;
   }
 
+  /** True when pitch hold is available (the stretch engine loaded, or can still load). */
   get pitchPreserved(): boolean {
-    return this.stretch !== null;
+    return !this.stretchFailed;
   }
 
   get pitchShift(): number {
@@ -340,10 +431,43 @@ export class PcmSource {
     this.gainNode.gain.setTargetAtTime(gain, this.ctx.currentTime, 0.01);
   }
 
+  private sampleRate(): number {
+    return this.buffer?.sampleRate ?? this.ctx.sampleRate;
+  }
+
+  private wantsStretch(): boolean {
+    if (this.stretchFailed) return false;
+    if (this.pitchShiftSemitones !== 0) return true;
+    return this.keylock && Math.abs(this.rate - 1) > UNITY_EPSILON;
+  }
+
+  private directRate(): number {
+    // Only reached with no key shift, or when the stretch engine failed to load.
+    if (this.pitchShiftSemitones === 0) return this.rate;
+    return this.rate * Math.pow(2, this.pitchShiftSemitones / 12);
+  }
+
   private setTarget(seconds: number): void {
-    this.targetPosition = Math.max(0, Math.min(seconds, this.durationSeconds()));
+    const safe = Number.isFinite(seconds) ? seconds : this.reportedPosition;
+    this.targetPosition = Math.max(0, Math.min(safe, this.durationSeconds()));
     this.commandAt = performance.now();
     this.reportedPosition = this.targetPosition;
+  }
+
+  /**
+   * `StretchNode#schedule` merges the object it is given over the previous
+   * segment, so an explicitly-undefined `input` overwrites the segment's real
+   * input with `undefined` and every later `inputTime` becomes NaN. Drop any
+   * non-finite field instead of forwarding it.
+   */
+  private async scheduleStretch(options: StretchSchedule): Promise<void> {
+    const node = this.stretch;
+    if (!node) return;
+    const safe: StretchSchedule = { ...options };
+    if (typeof safe.input !== "number" || !Number.isFinite(safe.input)) delete safe.input;
+    if (typeof safe.rate !== "number" || !Number.isFinite(safe.rate)) safe.rate = this.rate;
+    if (typeof safe.output !== "number" || !Number.isFinite(safe.output)) delete safe.output;
+    await node.schedule(safe);
   }
 
   private durationSeconds(): number {
@@ -351,6 +475,7 @@ export class PcmSource {
   }
 
   private positionSeconds(): number {
+    if (!this.useStretch) return this.direct.positionSamples / this.sampleRate();
     if (this.targetPosition !== null && performance.now() - this.commandAt < 140) {
       return this.targetPosition;
     }
@@ -369,11 +494,6 @@ export class PcmSource {
     return Math.max(-24, Math.min(24, base + this.pitchShiftSemitones));
   }
 
-  private fallbackEffectiveRate(): number {
-    if (this.pitchShiftSemitones === 0) return this.rate;
-    return this.rate * Math.pow(2, this.pitchShiftSemitones / 12);
-  }
-
   private enqueue(work: () => Promise<void>): Promise<void> {
     const next = this.chain.then(work, work).catch(() => undefined);
     this.chain = next;
@@ -390,7 +510,7 @@ export class PcmSource {
           numberOfOutputs: 1,
           outputChannelCount: [2],
         });
-        await node.configure({ blockMs: 8, intervalMs: 2 });
+        await node.configure({ ...STRETCH_CONFIG });
         await node.setUpdateInterval(0.02, (time) => {
           if (!Number.isFinite(time)) return;
           this.reportedPosition = Math.max(0, time);
@@ -401,67 +521,136 @@ export class PcmSource {
         node.connect(this.gainNode);
         this.latency = await node.latency();
         this.stretch = node;
+        await node.schedule({ active: false, input: 0, rate: 1, semitones: 0, output: this.ctx.currentTime });
       } catch {
-        this.fallback = new WorkletPcmSource(this.ctx, this.gainNode);
+        this.stretchFailed = true;
+        this.stretch = null;
       }
     })();
     return this.ready;
   }
 
-  async load(buffer: AudioBuffer, position = 0): Promise<void> {
-    this.loaded = true;
-    this.buffer = buffer;
-    this.playing = false;
-    this.setTarget(position / buffer.sampleRate);
+  /** Gives the current buffer to the stretch node if it does not have it yet. */
+  private async ensureStretchBuffer(): Promise<boolean> {
     await this.ensure();
-    this.setTarget(position / buffer.sampleRate);
-    if (this.fallback) {
-      this.fallback.load(buffer, position);
-      this.fallback.setRate(this.fallbackEffectiveRate());
-      return;
-    }
+    if (!this.stretch || !this.buffer) return false;
+    if (this.stretchLoaded) return true;
+    const buffer = this.buffer;
     const left = buffer.getChannelData(0);
     const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
     await this.enqueue(async () => {
-      const node = this.stretch;
-      if (!node) return;
-      await node.schedule({ active: false, input: position / buffer.sampleRate, rate: this.rate, semitones: this.semitones() });
-      await node.dropBuffers();
-      await node.addBuffers([left, right]);
-      await this.applyLoop();
+      if (!this.stretch) return;
+      await this.scheduleStretch({ active: false, input: 0, rate: this.rate, semitones: this.semitones() });
+      await this.stretch.dropBuffers();
+      await this.stretch.addBuffers([left, right]);
     });
+    // `addBuffers` resolves before the processor applies the buffers; a time
+    // map scheduled in the same task is clamped against an empty range.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (this.buffer !== buffer) return false;
+    this.stretchLoaded = true;
+    return true;
+  }
+
+  /**
+   * Builds the stretch node ahead of the first tempo change so key lock engages
+   * without a cold start. Optional: the direct engine needs no warm-up.
+   */
+  prewarm(): void {
+    if (this.stretchFailed) return;
+    void this.ensureStretchBuffer();
+  }
+
+  /** Moves playback to whichever engine the current rate, key lock and key shift want. */
+  private updateEngine(): void {
+    const want = this.wantsStretch();
+    if (want === this.useStretch) return;
+    const token = ++this.switchToken;
+    if (!want) {
+      const samples = this.positionSamples;
+      this.useStretch = false;
+      void this.enqueue(async () => {
+        await this.scheduleStretch({ active: false, rate: this.rate });
+      });
+      this.direct.setRate(this.directRate());
+      this.direct.seek(samples);
+      // No position argument: play() awaits the worklet, and a seek issued in
+      // the meantime must win over the position captured here.
+      if (this.playing) void this.direct.play();
+      return;
+    }
+    void (async () => {
+      const ok = await this.ensureStretchBuffer();
+      if (!ok || token !== this.switchToken || !this.wantsStretch()) {
+        if (!ok) this.direct.setRate(this.directRate());
+        return;
+      }
+      const samples = this.direct.positionSamples;
+      const seconds = samples / this.sampleRate();
+      this.useStretch = true;
+      this.setTarget(seconds);
+      this.direct.pause();
+      await this.enqueue(async () => {
+        await this.scheduleStretch({
+          active: this.playing,
+          input: seconds,
+          rate: this.rate,
+          semitones: this.semitones(),
+          output: this.ctx.currentTime,
+        });
+        await this.applyLoop();
+      });
+    })();
+  }
+
+  async load(buffer: AudioBuffer, position = 0): Promise<void> {
+    this.switchToken += 1;
+    this.loaded = true;
+    this.buffer = buffer;
+    this.stretchLoaded = false;
+    this.playing = false;
+    this.useStretch = false;
+    this.setTarget(position / buffer.sampleRate);
+    if (this.stretch) {
+      void this.enqueue(async () => {
+        await this.scheduleStretch({ active: false, input: 0 });
+      });
+    }
+    this.direct.load(buffer, position);
+    this.direct.setRate(this.directRate());
+    if (this.loop) this.direct.setLoop(this.loop.start, this.loop.end);
+    if (this.wantsStretch()) this.updateEngine();
   }
 
   clear(): void {
+    this.switchToken += 1;
     this.loaded = false;
     this.playing = false;
     this.buffer = null;
+    this.stretchLoaded = false;
+    this.useStretch = false;
     this.targetPosition = 0;
     this.reportedPosition = 0;
-    if (this.fallback) {
-      this.fallback.clear();
-      return;
-    }
-    this.enqueue(async () => {
-      await this.stretch?.schedule({ active: false, input: 0 });
+    this.direct.clear();
+    if (!this.stretch) return;
+    void this.enqueue(async () => {
+      await this.scheduleStretch({ active: false, input: 0 });
       await this.stretch?.dropBuffers();
     });
   }
 
   async play(position?: number): Promise<void> {
     if (!this.loaded) return;
-    await this.ensure();
-    if (position !== undefined) this.setTarget(position / (this.buffer?.sampleRate ?? this.ctx.sampleRate));
-    if (this.fallback) {
-      await this.fallback.play(position ?? this.positionSamples);
+    this.playing = true;
+    if (!this.useStretch) {
+      await this.direct.play(position);
       return;
     }
-    this.playing = true;
+    if (position !== undefined) this.setTarget(position / this.sampleRate());
     this.setTarget(this.positionSeconds());
     await this.enqueue(async () => {
-      const node = this.stretch;
-      if (!node) return;
-      await node.schedule({
+      if (!this.stretch) return;
+      await this.scheduleStretch({
         active: true,
         input: this.targetPosition ?? this.reportedPosition,
         rate: this.rate,
@@ -474,13 +663,13 @@ export class PcmSource {
 
   pause(): void {
     this.playing = false;
-    this.setTarget(this.positionSeconds());
-    if (this.fallback) {
-      this.fallback.pause();
+    if (!this.useStretch) {
+      this.direct.pause();
       return;
     }
-    this.enqueue(async () => {
-      await this.stretch?.schedule({
+    this.setTarget(this.positionSeconds());
+    void this.enqueue(async () => {
+      await this.scheduleStretch({
         active: false,
         input: this.targetPosition ?? this.reportedPosition,
         rate: this.rate,
@@ -489,40 +678,39 @@ export class PcmSource {
   }
 
   seek(position: number): void {
-    const seconds = position / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
+    const seconds = position / this.sampleRate();
     this.setTarget(seconds);
-    if (this.fallback) {
-      this.fallback.seek(position);
-      return;
-    }
-    if (!this.stretch) return;
-    this.enqueue(async () => {
-      await this.stretch?.schedule({
+    this.direct.seek(position);
+    if (!this.useStretch || !this.stretch) return;
+    void this.enqueue(async () => {
+      await this.scheduleStretch({
         active: this.playing,
         input: seconds,
         rate: this.rate,
         semitones: this.semitones(),
       });
-      this.applyLoop();
+      await this.applyLoop();
     });
   }
 
   drive(rate: number, position: number | null, active = true): void {
     this.rate = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 1));
+    const wasPlaying = this.playing;
     this.playing = active;
-    if (position !== null) this.setTarget(position / (this.buffer?.sampleRate ?? this.ctx.sampleRate));
-    if (this.fallback) {
-      this.fallback.setRate(this.fallbackEffectiveRate());
-      if (active) void this.fallback.play(position ?? this.positionSamples);
-      else this.fallback.pause();
+    if (position !== null) this.setTarget(position / this.sampleRate());
+    this.updateEngine();
+    if (!this.useStretch) {
+      this.direct.setRate(this.directRate());
+      if (position !== null) this.direct.seek(position);
+      if (active && (!wasPlaying || !this.direct.isPlaying)) void this.direct.play();
+      else if (!active) this.direct.pause();
       return;
     }
     if (!this.stretch) return;
-    const seconds = position === null ? undefined : position / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
-    this.enqueue(async () => {
-      const node = this.stretch;
-      if (!node) return;
-      await node.schedule({
+    const seconds = position === null ? undefined : position / this.sampleRate();
+    void this.enqueue(async () => {
+      if (!this.stretch) return;
+      await this.scheduleStretch({
         active,
         input: seconds,
         rate: this.rate,
@@ -535,20 +723,21 @@ export class PcmSource {
 
   setRate(rate: number): void {
     this.rate = Math.max(-4, Math.min(4, Number.isFinite(rate) ? rate : 1));
-    if (this.fallback) {
-      this.fallback.setRate(this.fallbackEffectiveRate());
+    this.updateEngine();
+    if (!this.useStretch) {
+      this.direct.setRate(this.directRate());
       return;
     }
     if (!this.stretch) return;
     this.setTarget(this.positionSeconds());
-    this.enqueue(async () => {
-      await this.stretch?.schedule({
+    void this.enqueue(async () => {
+      await this.scheduleStretch({
         active: this.playing,
         input: this.targetPosition ?? this.reportedPosition,
         rate: this.rate,
         semitones: this.semitones(),
       });
-      this.applyLoop();
+      await this.applyLoop();
     });
   }
 
@@ -565,29 +754,25 @@ export class PcmSource {
 
   setLoop(start: number | null, end: number | null): void {
     this.loop = start === null || end === null || end <= start ? null : { start, end };
-    if (this.fallback) {
-      this.fallback.setLoop(start, end);
-      return;
-    }
+    this.direct.setLoop(start, end);
     if (!this.stretch) return;
-    this.enqueue(async () => {
-      this.applyLoop();
+    void this.enqueue(async () => {
+      await this.applyLoop();
     });
   }
 
   private async applyLoop(): Promise<void> {
-    const node = this.stretch;
-    if (!node) return;
-    const sampleRate = this.buffer?.sampleRate ?? this.ctx.sampleRate;
+    if (!this.stretch) return;
+    const sampleRate = this.sampleRate();
     const loop = this.loop;
-    await node.schedule({
+    await this.scheduleStretch({
       loopStart: loop ? loop.start / sampleRate : 0,
       loopEnd: loop ? loop.end / sampleRate : 0,
     });
   }
 
   tick(): void {
-    if (this.fallback) return;
+    if (!this.useStretch) return;
     if (!this.playing || !this.stretch) return;
     const now = performance.now();
     const position = this.positionSeconds();
@@ -602,11 +787,11 @@ export class PcmSource {
       return;
     }
     if (this.loop && this.rate < 0) {
-      const start = this.loop.start / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
-      const end = this.loop.end / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
+      const start = this.loop.start / this.sampleRate();
       if (position <= start + 0.003 && now - this.lastLoopWrapAt > 250) {
         this.lastLoopWrapAt = now;
-        this.seek(end);
+        // seek() takes samples: this used to pass seconds and jump to ~0.
+        this.seek(this.loop.end);
         return;
       }
     }
@@ -624,10 +809,9 @@ export class PcmSource {
   dispose(): void {
     this.pause();
     this.stretch?.disconnect();
-    this.fallback?.dispose();
+    this.direct.dispose();
     this.gainNode.disconnect();
     this.stretch = null;
-    this.fallback = null;
     void this.destination;
   }
 }

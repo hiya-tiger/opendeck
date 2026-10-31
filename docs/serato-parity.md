@@ -3,7 +3,7 @@
 This is the plan of record for reaching feature parity with a commercial,
 closed-source professional DJ application, its paid tier and all paid
 expansions. It is referred to below as "the target". The target for this work is
-Serato DJ Suite. OpenDeck is independent and not affiliated with it. Features are
+Serato DJ Suite. OpenDecks is independent and not affiliated with it. Features are
 matched by observable behaviour; layout, assets and wording are original.
 
 ## Scope
@@ -188,8 +188,8 @@ Importer rules that fail silently if missed:
 - Beat grids have a lock flag; set it or the analyser replaces the grid. Put the
   first marker on a downbeat.
 
-Exit: write a library from OpenDeck, import into the target on a disposable
-library, edit cues there, re-import into OpenDeck, zero loss both ways. A second
+Exit: write a library from OpenDecks, import into the target on a disposable
+library, edit cues there, re-import into OpenDecks, zero loss both ways. A second
 identical run produces zero byte changes. Golden fixtures come from real target
 output and record the version that produced them.
 

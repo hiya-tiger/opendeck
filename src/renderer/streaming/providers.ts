@@ -146,4 +146,4 @@ export function findProvider(id: string): MusicProvider | undefined {
 }
 
 export const DIRECT_STREAM_NOTE =
-  "Direct URL, EME DRM-licensed streams, and radio sources play inside OpenDeck across Decks A–D.";
+  "Direct URL, EME DRM-licensed streams, and radio sources play inside OpenDecks across Decks A–D.";

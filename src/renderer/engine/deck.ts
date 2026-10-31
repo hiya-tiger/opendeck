@@ -14,7 +14,9 @@ import {
   tapBeatGridBpm,
   type EditableBeatGrid,
 } from "./beatgrid.ts";
-import { defaultStemGains, STEM_CROSSOVERS, type StemId } from "./stems.ts";
+import { defaultStemGains, type StemId } from "./stems.ts";
+import { buildStemBands } from "./stem-bands.ts";
+import { createFxShell } from "./fx-shell.ts";
 import { PARTS, defaultPartMix, partGains, type PartId, type PartMix } from "./parts.ts";
 import {
   fxDefault,
@@ -217,57 +219,7 @@ export class Deck {
     this.stemBus = ctx.createGain();
     this.bands = {} as Record<StemId, { nodes: AudioNode[]; gain: GainNode; fx: BiquadFilterNode }>;
 
-    const makeBand = (nodes: AudioNode[]): { nodes: AudioNode[]; gain: GainNode; fx: BiquadFilterNode } => {
-      const gain = ctx.createGain();
-      const fx = ctx.createBiquadFilter();
-      fx.type = "lowpass";
-      fx.frequency.value = 20000;
-      fx.Q.value = 0.7;
-      let last: AudioNode = this.deckInput;
-      const chain: AudioNode[] = [];
-      for (const node of nodes) {
-        last.connect(node);
-        chain.push(node);
-        last = node;
-      }
-      last.connect(fx);
-      fx.connect(gain);
-      gain.connect(this.stemBus);
-      return { nodes: chain, gain, fx };
-    };
-
-    const low = ctx.createBiquadFilter();
-    low.type = "lowpass";
-    low.frequency.value = STEM_CROSSOVERS.low;
-    low.Q.value = 0.7;
-
-    const lowmidHp = ctx.createBiquadFilter();
-    lowmidHp.type = "highpass";
-    lowmidHp.frequency.value = STEM_CROSSOVERS.low;
-    lowmidHp.Q.value = 0.7;
-    const lowmidLp = ctx.createBiquadFilter();
-    lowmidLp.type = "lowpass";
-    lowmidLp.frequency.value = STEM_CROSSOVERS.lowmid;
-    lowmidLp.Q.value = 0.7;
-
-    const highmidHp = ctx.createBiquadFilter();
-    highmidHp.type = "highpass";
-    highmidHp.frequency.value = STEM_CROSSOVERS.lowmid;
-    highmidHp.Q.value = 0.7;
-    const highmidLp = ctx.createBiquadFilter();
-    highmidLp.type = "lowpass";
-    highmidLp.frequency.value = STEM_CROSSOVERS.highmid;
-    highmidLp.Q.value = 0.7;
-
-    const high = ctx.createBiquadFilter();
-    high.type = "highpass";
-    high.frequency.value = STEM_CROSSOVERS.highmid;
-    high.Q.value = 0.7;
-
-    this.bands.low = makeBand([low]);
-    this.bands.lowmid = makeBand([lowmidHp, lowmidLp]);
-    this.bands.highmid = makeBand([highmidHp, highmidLp]);
-    this.bands.high = makeBand([high]);
+    this.bands = buildStemBands(ctx, this.deckInput, this.stemBus);
 
     for (const part of PARTS) {
       const filter = ctx.createBiquadFilter();
@@ -348,16 +300,8 @@ export class Deck {
   }
 
   private buildFx(): FxChain {
-    const ctx = this.ctx;
-    const input = ctx.createGain();
-    const output = ctx.createGain();
-    const dry = ctx.createGain();
-    const wet = ctx.createGain();
-    input.connect(dry);
-    dry.connect(output);
-    input.connect(wet);
-    wet.connect(output);
-    return { input, output, dry, wet, nodes: [], lfos: [], type: "off" };
+    const shell = createFxShell(this.ctx);
+    return { ...shell, nodes: [], lfos: [], type: "off" };
   }
 
   private teardownFx(): void {
@@ -620,6 +564,9 @@ export class Deck {
       this.pcmBuffer = buffer;
       this.scratch.setBuffer(buffer);
       await this.pcm.load(buffer, 0);
+      // Build the key-lock engine in the background so the first tempo move
+      // does not wait on a cold Signalsmith start. Playback does not need it.
+      this.pcm.prewarm();
       this.pcmActive = true;
       this.el.removeAttribute("src");
       this.el.load();
@@ -1224,6 +1171,9 @@ export class Deck {
     if (this.pcmActive) {
       if (this.currentTime >= this.duration - 0.05) this.seek(0);
       await this.pcm.play();
+      // The PCM path fires no media-element "play" event, so nothing woke the
+      // UI loop and the waveform stood still until a scratch emitted.
+      this.emit();
       return;
     }
     try {
@@ -1241,6 +1191,7 @@ export class Deck {
       this.partScratches[this.partScratchId]?.stop();
       this.partScratchId = null;
     }
+    this.emit();
   }
 
   toggle(): void {
@@ -1528,8 +1479,8 @@ export class Deck {
     const cutoff: Record<StemId, number> = { low: 90, lowmid: 350, highmid: 2000, high: 7000 };
     const fx = this.bands[id].fx;
     fx.type = "lowpass";
-    fx.frequency.setTargetAtTime(enabled ? cutoff[id] : 20000, this.ctx.currentTime, 0.015);
-    fx.Q.setTargetAtTime(enabled ? 7 : 0.7, this.ctx.currentTime, 0.015);
+    fx.frequency.setTargetAtTime(enabled ? cutoff[id] : 24000, this.ctx.currentTime, 0.015);
+    fx.Q.setTargetAtTime(enabled ? 7 : 0.5, this.ctx.currentTime, 0.015);
   }
 
   private applyStemGains(): void {
@@ -1669,6 +1620,13 @@ export class Deck {
   private applyFxParams(): void {
     const chain = this.fxChain;
     const type = chain.type;
+    if (type === "off") {
+      // "off" is input -> dry/wet -> output with no effect between, so any wet
+      // gain is a second copy of the dry signal (up to +4 dB into the limiter).
+      chain.wet.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
+      chain.dry.gain.setTargetAtTime(1, this.ctx.currentTime, 0.02);
+      return;
+    }
     chain.wet.gain.setTargetAtTime(this.fxWet, this.ctx.currentTime, 0.02);
     if (type === "filter" || type === "crush" || type === "tape-stop" || type === "brake") {
       chain.dry.gain.setTargetAtTime(type === "crush" ? 0.25 : 0, this.ctx.currentTime, 0.02);

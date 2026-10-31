@@ -1,29 +1,31 @@
-# OpenDeck (Desktop)
+# OpenDecks (Desktop)
 
-Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS timecode control, 4-part htDemucs stem separation, 10 performance pad modes, a 32-slot sampler, 15 built-in FX with savable custom chains, a 195-device MIDI/HID/DVS hardware catalogue, zero-loss Serato library interoperability, and Phase 7 deck-locked Video Mixing. Built with a TypeScript UI running inside an Electron shell or a native Rust/Tauri shell (`OpenDeck.exe` / `bin/opendeck-app.exe`), MIT licensed, with zero telemetry.
+Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS timecode control, 4-part htDemucs stem separation, 10 performance pad modes, a 32-slot sampler, 15 built-in FX with savable custom chains, a 195-device MIDI/HID/DVS hardware catalogue, zero-loss Serato library interoperability, and Phase 7 deck-locked Video Mixing. Built with a TypeScript UI running inside an Electron shell or a native Rust/Tauri shell (`OpenDecks.exe` / `bin/opendeck-app.exe`), MIT licensed, with zero telemetry.
 
 ---
 
 ## Screenshots
 
 ### 2-Deck Performance, DVS Timecode & Library / Smart Crates
-![OpenDeck 2-Deck Performance, Stems, DVS & Library](screenshots/opendeck-p7-performance.png)
+![OpenDecks 2-Deck Performance, Stems, DVS & Library](screenshots/opendeck-p7-performance.png)
 
 ### 4-Deck Performance Mode (Decks A, B, C & D + 4-Channel Mixer)
-![OpenDeck 4-Deck Performance Mode](screenshots/opendeck-p7-four-decks.png)
+![OpenDecks 4-Deck Performance Mode](screenshots/opendeck-p7-four-decks.png)
 
 ### Phase 7 Video Mixing (Deck-Locked Transport, Video Crossfader & 2nd Fullscreen Output)
-![OpenDeck Phase 7 Video Mixer](screenshots/opendeck-p7-video-mixer.png)
+![OpenDecks Phase 7 Video Mixer](screenshots/opendeck-p7-video-mixer.png)
 
 ### Vertical Waveforms & Serato-style Library Management
-![OpenDeck Vertical Waveforms & Library](screenshots/opendeck-p7-vertical-library.png)
+![OpenDecks Vertical Waveforms & Library](screenshots/opendeck-p7-vertical-library.png)
 
 ---
 
 ## Features (Phases P0–P7 Complete)
 
 ### P0 & P1 — Sample-Accurate PCM Audio Engine, 4 Decks & Transport
-- **Sample-Accurate PCM AudioWorklet & Rust Engine:** Decodes tracks into linear PCM (`PcmSource` / `opendeck-audio`) with `<10 ms` input-to-output latency at a 128-frame buffer (`48 kHz`), `<1 sample` loop wrap across 10+ minute loops, true reverse playback, and key-lock pitch-time stretching (`signalsmith-stretch` + tempo-independent semitone pitch shift `±12 st`).
+- **PCM AudioWorklet & Rust Engine:** Decodes tracks into linear PCM (`PcmSource` / `opendeck-audio`), with true reverse playback and key-lock pitch-time stretching (`signalsmith-stretch` + tempo-independent semitone pitch shift `±12 st`).
+  Latency, measured on Windows 10 / Intel i7-4720HQ / 48 kHz with `npm run smoke:audio`: **8 ms** engine block latency (`signalsmith` `latency()`, the D18 figure), **10 ms** `AudioContext.baseLatency`, **39 ms** `outputLatency` — so roughly **57 ms** from `play()` to the speaker on that machine, not 10 ms. The 8 ms figure is engine-only and deliberately excludes device latency.
+  Loop wrap is handled inside the stretch node's schedule; reverse-loop correction runs in `tick()` and is **coarse, about one UI frame**, not sample-accurate. A `<1 sample` claim is not supported and has been removed.
 - **4 Decks (`A`, `B`, `C`, `D`) & Instant Doubles:** Switch between 2-deck (`A/B`) and 4-deck (`A/B/C/D`) layouts (`1/3` and `2/4` deck switching), 4-channel mixer (`C`, `A`, `MASTER`, `B`, `D`), crossfader curve selector (`Smooth`, `Fast`, `Cut`) with Hamster reverse (`HAM`), and one-click **Instant Doubles (`2×`)** cloning track, playhead, BPM, loop, and hot cues across decks.
 - **Editable Beatgrids & Slip / Censor Modes:** Slide beatgrid markers (`◀` / `▶`), set downbeat at playhead (`SET 1`), halve/double BPM (`÷2` / `×2`), tap BPM (`TAP`), lock beatgrids (`LOCK`), **Return-Mode (`SLIP`)** (underlying timeline continues while scratching, looping, or triggering hot cues), and **Reverse-on-Hold (`CENSOR`)** (plays backward while held and snaps back to the forward timeline on release).
 - **Frequency-Coloured Waveforms & Vinyl Platter Scratch:** Scrolling overview and zoom waveforms coloured by bass/mid/high energy bands (or active 4-part stems), spinning vinyl artwork (`ID3v2 APIC`, MP4 `covr`, or automatic iTunes cover lookup), and pointer-drag vinyl scratching.
@@ -69,16 +71,21 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 ## Quick Start & Windows `.exe` Executable
 
 ### Run the Prebuilt Windows Executable
-- Download and extract **[`OpenDeck-win64.zip`](OpenDeck-win64.zip)** (contains standalone **`OpenDeck.exe`**, `README.md`, `LICENSE`, and `NOTICE`), or double-click **`OpenDeck.exe`** directly in the repository root (or **`bin/opendeck-app.exe`** / **`release/OpenDeck-win32-x64/OpenDeck.exe`** after running `npm run package:win`).
+- Release artifact: **`OpenDecks.exe`** (standalone, no installer).
+- From this tree: `npm run package:win` produces **`release/OpenDecks-win32-x64/OpenDecks.exe`** (Electron bundle) plus a small **`OpenDecks.exe`** launcher at the repo root.
+- **`bin/opendeck-app.exe`** is the Rust/Tauri build. It is a development and probe harness, not the product shell — see `docs/mobile/ADR-D38.md`.
+- The file still checked in at the repo root as `OpenDeck-win64.zip` → `OpenDeck.exe` is the **previous** build (pre-rename, 0.1.6 era) and is kept only so existing links do not break. Prefer a release asset over the in-tree copy.
 
 ### Build & Run from Source
 ```bash
 npm install
-npm start          # builds dist/ + renderer/ bundles and launches OpenDeck Desktop
+npm start          # builds dist/ + renderer/ bundles and launches OpenDecks Desktop
 npm run build      # builds dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js
 npm test           # runs all 19 TypeScript unit & integration test suites (190 tests)
-npm run smoke:audio # runs headless Electron audio + stems + video transport smoke test
-npm run package:win # builds standalone Windows bundle + OpenDeck.exe launcher
+npm run smoke:audio # headless Electron: PCM playback, stems, video transport, and the deck graph transfer function
+npm run smoke:link  # headless: two Link nodes converge on tempo/beat/phase over multicast UDP
+npm run smoke:ui    # headless: boots the real renderer and fails on any renderer error
+npm run package:win # builds standalone Windows bundle + OpenDecks.exe launcher
 ```
 
 ### Rust / Tauri Workspace (`rust/`)
@@ -115,4 +122,4 @@ cargo build --release -p opendeck-app
 
 ## Legal
 
-OpenDeck is licensed under the MIT License. It is an independent project and is not affiliated with, sponsored by, or endorsed by Serato, AlphaTheta (rekordbox), Native Instruments (Traktor), or any other DJ vendor. Product names are used solely to describe file-format and hardware compatibility. Third-party dependencies and their licenses are listed in [NOTICE](NOTICE).
+OpenDecks is licensed under the MIT License. It is an independent project and is not affiliated with, sponsored by, or endorsed by Serato, AlphaTheta (rekordbox), Native Instruments (Traktor), or any other DJ vendor. Product names are used solely to describe file-format and hardware compatibility. Third-party dependencies and their licenses are listed in [NOTICE](NOTICE).

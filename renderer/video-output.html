@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenDeck Video Output</title>
+    <title>OpenDecks Video Output</title>
     <style>
       html,
       body {
@@ -52,7 +52,7 @@
   <body>
     <div id="stage" title="Double-click or press F11 to toggle fullscreen">
       <canvas id="outputCanvas" width="1280" height="720"></canvas>
-      <div id="hud">OpenDeck Video Output · Double-click / F11 for Fullscreen</div>
+      <div id="hud">OpenDecks Video Output · Double-click / F11 for Fullscreen</div>
     </div>
     <script>
       (() => {
@@ -158,7 +158,7 @@
             const rightOp = mode === "add" ? "lighter" : mode === "luma" ? "screen" : "source-over";
             drawSide(latestState.leftDeck || "A", weights.left ?? 0.5, "source-over");
             drawSide(latestState.rightDeck || "B", weights.right ?? 0.5, rightOp);
-            hud.textContent = `OpenDeck Video · ${latestState.leftDeck || "A"} vs ${latestState.rightDeck || "B"} · XF ${Number(latestState.crossfader || 0).toFixed(2)} (${mode.toUpperCase()} / ${(latestState.scaleMode || "fit").toUpperCase()})`;
+            hud.textContent = `OpenDecks Video · ${latestState.leftDeck || "A"} vs ${latestState.rightDeck || "B"} · XF ${Number(latestState.crossfader || 0).toFixed(2)} (${mode.toUpperCase()} / ${(latestState.scaleMode || "fit").toUpperCase()})`;
           }
           requestAnimationFrame(render);
         }
