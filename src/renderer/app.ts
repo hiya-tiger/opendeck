@@ -1,6 +1,7 @@
 import { Mixer, type CrossfaderCurve } from "./engine/mixer.ts";
 import { Deck, HOT_CUE_COLORS, type DeckState, type DeckId } from "./engine/deck.ts";
 import { analyzeBuffer, formatTime, formatClock, type AnalysisResult } from "./engine/analyze.ts";
+import { AnalysisScheduler, WorkerPool, defaultPoolSize, type AnalysisPriority } from "./engine/analysis-pool.ts";
 import { beatSeconds, formatBeatPosition, LOOP_BEATS, beatGridToMarkers, markersToBeatGrid } from "./engine/beatgrid.ts";
 import { syncDeck } from "./engine/sync.ts";
 import { TempoAuthority, type LinkTempoStatus } from "./engine/tempo-authority.ts";
@@ -306,14 +307,6 @@ const partFxFiltered: Record<DeckId, Record<PartId, boolean>> = {
 };
 let samplerBank: SamplerBank = "A";
 
-const analysisQueue: Track[] = [];
-let analysing = false;
-let analysisWorker: Worker | null = null;
-let analysisRequestId = 0;
-const analysisRequests = new Map<
-  number,
-  { resolve: (result: AnalysisResult) => void; reject: (error: Error) => void }
->();
 const desktop = window.opendeckDesktop;
 
 // D35: the single owner of session BPM/beat/phase. Link is an input to it, never
@@ -321,40 +314,6 @@ const desktop = window.opendeckDesktop;
 const tempoAuthority = new TempoAuthority({
   onPushLink: (bpm) => void desktop?.link?.setLocalTempo(bpm),
 });
-
-function workerAnalysis(buffer: AudioBuffer): Promise<AnalysisResult> {
-  if (!analysisWorker) {
-    analysisWorker = new Worker("analysis-worker.js");
-    analysisWorker.addEventListener("message", (event: MessageEvent<{ id: number; result: AnalysisResult }>) => {
-      const request = analysisRequests.get(event.data.id);
-      request?.resolve(event.data.result);
-      analysisRequests.delete(event.data.id);
-    });
-    analysisWorker.addEventListener("error", () => {
-      for (const request of analysisRequests.values()) request.reject(new Error("Analysis worker failed"));
-      analysisRequests.clear();
-      analysisWorker?.terminate();
-      analysisWorker = null;
-    });
-  }
-  const id = (analysisRequestId += 1);
-  const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) =>
-    buffer.getChannelData(channel).slice(),
-  );
-  return new Promise((resolve, reject) => {
-    analysisRequests.set(id, { resolve, reject });
-    analysisWorker!.postMessage(
-      {
-        id,
-        sampleRate: buffer.sampleRate,
-        length: buffer.length,
-        duration: buffer.duration,
-        channels,
-      },
-      channels.map((channel) => channel.buffer),
-    );
-  });
-}
 
 function toast(message: string, ms = 3200): void {
   const el = $("toast");
@@ -1289,11 +1248,61 @@ async function extractArtwork(track: Track, data: ArrayBuffer | null): Promise<v
   }
 }
 
-async function analyseTrack(track: Track): Promise<void> {
+/* Analysis runs on a pool of workers (D41): one per spare core, up to 8.
+ * Tracks just loaded onto a deck jump ahead of library batches, at most
+ * pool-size tracks are read/decoded at once, and a worker that fails takes
+ * only its own track down (that track is retried on the main thread). */
+const nativeResults = new Map<string, NativeAnalysis>();
+
+const decodeForAnalysis = async (track: Track): Promise<AudioBuffer | null> => {
   const data = track.file ? await track.file.arrayBuffer() : null;
   await extractArtwork(track, data);
   const native = await nativeAnalysis(track, data);
   if (native) {
+    nativeResults.set(track.id, native);
+    return null;
+  }
+  if (!data) return null;
+  return mixer.ctx.decodeAudioData(data);
+};
+
+const analysisPool = new WorkerPool<AnalysisResult>({
+  size: defaultPoolSize(navigator.hardwareConcurrency),
+  create: () => new Worker("analysis-worker.js"),
+});
+
+const analysisScheduler = new AnalysisScheduler<Track, AudioBuffer, AnalysisResult>(analysisPool, {
+  key: (track) => track.id,
+  decode: decodeForAnalysis,
+  toMessage: (buffer) => {
+    // Copies (an AudioBuffer's own storage cannot be transferred), then the
+    // copies are transferred and the AudioBuffer is dropped.
+    const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) => buffer.getChannelData(channel).slice());
+    return {
+      payload: { sampleRate: buffer.sampleRate, length: buffer.length, duration: buffer.duration, channels },
+      transfer: channels.map((channel) => channel.buffer),
+    };
+  },
+  fallback: async (track) => {
+    const data = track.file ? await track.file.arrayBuffer() : null;
+    if (!data) throw new Error("no audio to analyse");
+    return analyzeBuffer(await mixer.ctx.decodeAudioData(data), 2000);
+  },
+});
+
+async function analyseTrack(track: Track, priority: AnalysisPriority): Promise<void> {
+  const result = await analysisScheduler.analyse(track, priority);
+  const native = nativeResults.get(track.id);
+  nativeResults.delete(track.id);
+  if (result) {
+    track.bpm = result.bpm;
+    track.beatPhase = result.beatPhase;
+    track.key = result.key.key;
+    track.camelot = result.key.camelot;
+    track.duration = result.duration;
+    track.peaks = result.peaks;
+    track.bands = result.bands;
+  } else if (native) {
     track.bpm = native.bpm;
     track.beatPhase = native.beatPhase;
     track.key = native.key;
@@ -1306,21 +1315,7 @@ async function analyseTrack(track: Track): Promise<void> {
       high: Float32Array.from(native.bands.high),
     };
   } else {
-    if (!data) return;
-    const buffer = await mixer.ctx.decodeAudioData(data);
-    let result: AnalysisResult;
-    try {
-      result = await workerAnalysis(buffer);
-    } catch {
-      result = analyzeBuffer(buffer, 2000);
-    }
-    track.bpm = result.bpm;
-    track.beatPhase = result.beatPhase;
-    track.key = result.key.key;
-    track.camelot = result.key.camelot;
-    track.duration = result.duration;
-    track.peaks = result.peaks;
-    track.bands = result.bands;
+    return;
   }
   track.analyzed = true;
   library.setMeta(track, {});
@@ -1332,34 +1327,25 @@ async function analyseTrack(track: Track): Promise<void> {
   }
 }
 
-function enqueueAnalysis(track: Track): void {
-  if (track.analyzed || track.queued || (!track.file && !desktop?.analysis)) return;
-  track.queued = true;
-  analysisQueue.push(track);
-  void pumpAnalysis();
-}
-
-async function pumpAnalysis(): Promise<void> {
-  if (analysing) return;
-  analysing = true;
-  const track = analysisQueue.shift();
-  if (!track) {
-    analysing = false;
+function enqueueAnalysis(track: Track, priority: AnalysisPriority = "background"): void {
+  if (track.analyzed || (!track.file && !desktop?.analysis)) return;
+  if (track.queued) {
+    // Already waiting: a deck load moves it to the front.
+    if (priority === "deck") void analysisScheduler.analyse(track, "deck").catch(() => undefined);
     return;
   }
-  try {
-    await new Promise((resolve) => window.setTimeout(resolve, 30));
-    await analyseTrack(track);
-  } catch (error) {
-    console.warn("analysis failed", track.name, error);
-    track.bpm = 0;
-    track.key = "--";
-    track.analyzed = true;
-    library.setMeta(track, {});
-  } finally {
-    analysing = false;
-    if (analysisQueue.length) await pumpAnalysis();
-  }
+  track.queued = true;
+  void analyseTrack(track, priority)
+    .catch((error) => {
+      console.warn("analysis failed", track.name, error);
+      track.bpm = 0;
+      track.key = "--";
+      track.analyzed = true;
+      library.setMeta(track, {});
+    })
+    .finally(() => {
+      track.queued = false;
+    });
 }
 
 /* -------------------------------------------------------------- stems */
@@ -1738,7 +1724,7 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   loadLoops(deckId, track.id);
   if (!hadLocalCues && !applyMediaCues(track, deckId)) void applySeratoCues(track, deckId);
   if (track.analyzed) applyTrackToDeck(track, deckId);
-  else enqueueAnalysis(track);
+  else enqueueAnalysis(track, "deck");
   if (track.file && isVideoFile(track.file)) {
     loadVideoOntoDeck(deckId, track.file);
   }
