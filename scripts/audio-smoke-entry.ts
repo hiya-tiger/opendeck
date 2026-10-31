@@ -28,6 +28,11 @@ interface SmokeResult {
   stemPlatterScratch: boolean;
   stemPlaying: boolean;
   stemEngine: string;
+  progressiveStillPlaying: boolean;
+  progressiveMinLevel: number;
+  progressiveJump: number;
+  progressivePatchedLevel: number;
+  progressivePlaceholderLevel: number;
   videoSyncChecked: boolean;
   startupMs: number;
   fxOffGainDb: number;
@@ -281,6 +286,11 @@ async function run(): Promise<SmokeResult> {
     stemPlatterScratch: false,
     stemPlaying: false,
     stemEngine: "media",
+    progressiveStillPlaying: false,
+    progressiveMinLevel: 0,
+    progressiveJump: 1,
+    progressivePatchedLevel: 0,
+    progressivePlaceholderLevel: 0,
     videoSyncChecked: false,
     startupMs: -1,
     fxOffGainDb: 99,
@@ -462,6 +472,57 @@ async function run(): Promise<SmokeResult> {
       deck.destroy();
     }
 
+    // Progressive stems: switch a playing deck from the mix to part voices
+    // (placeholder = mix / 4 each), then patch one region in place.
+    const live = new Deck(ctx, "B", ctx.destination);
+    try {
+      const file = new File([wavTone(4, ctx.sampleRate)], "live.wav", { type: "audio/wav" });
+      await live.load(file, { bpm: 120 });
+      for (let i = 0; i < 40 && live.engine !== "pcm"; i += 1) await wait(50);
+      const mix = live.audioBuffer!;
+      await live.play();
+      await waitFor(() => live.currentTime > 0.4, 3000);
+      const placeholder: Partial<Record<"drums" | "bass" | "other" | "vocals", AudioBuffer>> = {};
+      for (const part of ["drums", "bass", "other", "vocals"] as const) {
+        const b = ctx.createBuffer(2, mix.length, mix.sampleRate);
+        for (let c = 0; c < 2; c += 1) {
+          const src = mix.getChannelData(Math.min(c, mix.numberOfChannels - 1));
+          const dst = b.getChannelData(c);
+          for (let i = 0; i < src.length; i += 1) dst[i] = src[i] * 0.25;
+        }
+        placeholder[part] = b;
+      }
+      const before = live.currentTime;
+      let minLevel = Infinity;
+      const sampler = setInterval(() => {
+        minLevel = Math.min(minLevel, live.level);
+      }, 15);
+      await live.loadStems(placeholder, { live: true });
+      await wait(250);
+      clearInterval(sampler);
+      const after = live.currentTime;
+      result.progressiveStillPlaying = live.playing && live.hasStems;
+      result.progressiveMinLevel = Number(minLevel.toFixed(3));
+      // Expected advance ~= wall time; a stall or jump back shows as a big gap.
+      result.progressiveJump = Number(Math.abs(after - before - 0.25).toFixed(3));
+      // Patch drums with the full mix over 2.0-3.0 s, solo drums, compare levels.
+      const start = Math.round(2 * mix.sampleRate);
+      const len = Math.round(mix.sampleRate);
+      const region = [0, 1].map((c) => mix.getChannelData(Math.min(c, mix.numberOfChannels - 1)).slice(start, start + len));
+      live.patchStems(start, { drums: [region[0], region[1]] });
+      live.finishStems();
+      live.setPartSolo("drums");
+      live.seek(1.0);
+      await wait(250);
+      result.progressivePlaceholderLevel = Number(live.level.toFixed(3));
+      live.seek(2.3);
+      await wait(250);
+      result.progressivePatchedLevel = Number(live.level.toFixed(3));
+      live.pause();
+    } finally {
+      live.destroy();
+    }
+
     result.ok =
       Math.abs(result.fxOffGainDb) < 0.2 &&
       result.directThdnDb < -50 &&
@@ -496,7 +557,11 @@ async function run(): Promise<SmokeResult> {
       result.stemPosition > 0.1 &&
       result.stemScratch &&
       result.stemPlatterScratch &&
-      result.videoSyncChecked;
+      result.videoSyncChecked &&
+      result.progressiveStillPlaying &&
+      result.progressiveMinLevel > 0.1 &&
+      result.progressiveJump < 0.08 &&
+      result.progressivePatchedLevel > result.progressivePlaceholderLevel * 2.5;
   } catch (error) {
     result.error = (error as Error).message;
   } finally {

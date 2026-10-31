@@ -12,7 +12,8 @@ import {
   type SeratoSqliteColumnsRequest,
   type SeratoWriteRequest,
 } from "./serato-files.ts";
-import { MODEL, findCache, installModel, loadManifestAt, modelInfo, readCache, separateToCache, type SeparateRequest } from "./separation.ts";
+import { MODEL, findCache, installModel, loadManifestAt, modelInfo, pickCacheDir, readCache, type SeparateRequest } from "./separation.ts";
+import { StemHost, defaultSpawner } from "./stems/host.ts";
 import { createLinkNode } from "./link.ts";
 import { setupDetectedMedia } from "./prolink/ipc.ts";
 import type { MediaManager } from "./prolink/manager.ts";
@@ -336,19 +337,63 @@ ipcMain.handle("separation:cache", async (_event, request: { hash: string; track
   return manifest ? { found: true, manifest } : { found: false };
 });
 
+// Inference runs in a utilityProcess (dist/separation-worker.cjs): onnxruntime-node's
+// session.run is synchronous and used to freeze this process for seconds per chunk.
+const stemHost = new StemHost(defaultSpawner(path.join(__dirname, "separation-worker.cjs")), {
+  modelPath: stemModelPath,
+  statePath: path.join(app.getPath("userData"), "stems-providers.json"),
+});
+
 ipcMain.handle("separation:run", async (event, request: SeparateRequest) => {
   const target = stemModelPath();
   const info = await modelInfo(target);
   if (!info.ready) throw new Error("Stem model is not installed");
-  return separateToCache(request, target, app.getPath("userData"), (progress) => {
-    event.sender.send("separation:progress", { ...progress, hash: request.hash });
-  });
+  const deck = String(request.deck ?? `sender-${event.sender.id}`);
+  const cacheDir = await pickCacheDir(request.trackPath, request.hash, app.getPath("userData"));
+  const sender = event.sender;
+  try {
+    const manifest = await stemHost.run(
+      {
+        hash: request.hash,
+        sampleRate: request.sampleRate,
+        left: request.left,
+        right: request.right,
+        focusFrame: request.focusFrame ?? 0,
+        cacheDir,
+      },
+      {
+        deck,
+        onRegion: (region) => {
+          if (!sender.isDestroyed()) sender.send("separation:region", { ...region, deck });
+        },
+        onProgress: (progress) => {
+          if (!sender.isDestroyed()) sender.send("separation:progress", { ...progress, deck });
+        },
+      },
+    );
+    return { ...manifest, provider: stemHost.stats?.provider ?? stemHost.activeProvider, stats: stemHost.stats };
+  } catch (error) {
+    if ((error as Error).message === "cancelled") return { cancelled: true, hash: request.hash };
+    throw error;
+  }
 });
 
-ipcMain.handle("separation:read", async (_event, dir: string) => {
+ipcMain.handle("separation:cancel", (_event, deck: string) => {
+  stemHost.release(String(deck));
+  return { ok: true };
+});
+
+ipcMain.handle("separation:focus", (_event, request: { deck: string; hash: string; frame: number }) => {
+  stemHost.focus(String(request.deck), String(request.hash), Number(request.frame) || 0);
+  return { ok: true };
+});
+
+ipcMain.handle("separation:read", async (_event, dir: string, targetRate?: number) => {
   const manifest = await loadManifestAt(dir);
   if (!manifest) throw new Error("Stem cache is missing or incomplete");
-  return { manifest, parts: await readCache(manifest) };
+  const rate = Number(targetRate) > 0 ? Number(targetRate) : manifest.sampleRate;
+  const result = await readCache(manifest, rate);
+  return { manifest, sampleRate: result.sampleRate, frames: result.frames, parts: result.parts };
 });
 
 ipcMain.handle("serato:running", () => isSeratoRunning());
@@ -554,6 +599,17 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+  // Build the stem session in the background once the window is up, so the
+  // first separation does not pay for it. The worker runs at low priority.
+  if (!process.env.OPENDECK_NO_STEM_PREWARM) {
+    setTimeout(() => {
+      modelInfo(stemModelPath())
+        .then((info) => {
+          if (info.ready) stemHost.prewarm();
+        })
+        .catch(() => undefined);
+    }, 4000);
+  }
 });
 
 app.on("window-all-closed", () => {
@@ -561,6 +617,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
+  stemHost.dispose();
   rtmp?.kill();
   void linkNode?.disable();
   void detectedMedia?.stop();

@@ -38,8 +38,11 @@ const api = {
     install: () => ipcRenderer.invoke("separation:install"),
     cache: (request: { hash: string; trackPath?: string | null }) => ipcRenderer.invoke("separation:cache", request),
     run: (request: unknown) => ipcRenderer.invoke("separation:run", request),
-    read: (dir: string) => ipcRenderer.invoke("separation:read", dir),
+    read: (dir: string, targetRate?: number) => ipcRenderer.invoke("separation:read", dir, targetRate),
+    cancel: (deck: string) => ipcRenderer.invoke("separation:cancel", deck),
+    focus: (deck: string, hash: string, frame: number) => ipcRenderer.invoke("separation:focus", { deck, hash, frame }),
     onProgress: (handler: (payload: unknown) => void) => on("separation:progress", handler),
+    onRegion: (handler: (payload: unknown) => void) => on("separation:region", handler),
   },
   serato: {
     running: () => ipcRenderer.invoke("serato:running"),

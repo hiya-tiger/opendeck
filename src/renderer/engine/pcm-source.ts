@@ -38,6 +38,17 @@ class OpenDecksPcmProcessor extends AudioWorkletProcessor {
       } else if (data.type === "loop") {
         this.loopStart = data.start;
         this.loopEnd = data.end;
+      } else if (data.type === "patch") {
+        // In-place region update (progressive stems). Copies at most one
+        // chunk (~8 s) between render quanta.
+        if (this.left && this.right) {
+          const start = data.start | 0;
+          const n = Math.min(data.left.length, this.left.length - start);
+          if (start >= 0 && n > 0) {
+            this.left.set(n === data.left.length ? data.left : data.left.subarray(0, n), start);
+            this.right.set(n === data.right.length ? data.right : data.right.subarray(0, n), start);
+          }
+        }
       } else if (data.type === "clear") {
         this.left = null;
         this.right = null;
@@ -242,6 +253,29 @@ class WorkletPcmSource {
     this.playing = false;
     this.position = 0;
     this.node?.port.postMessage({ type: "clear" });
+  }
+
+  /**
+   * Overwrites frames [start, start + left.length) of the loaded buffer
+   * without interrupting playback. The arrays are transferred when they own
+   * their whole ArrayBuffer, so callers must not reuse them.
+   */
+  patch(start: number, left: Float32Array, right: Float32Array): void {
+    if (!this.loaded) return;
+    if (this.left && this.right) {
+      // Not handed to the processor yet: patch the pending copy.
+      const n = Math.max(0, Math.min(left.length, this.left.length - start));
+      if (n > 0) {
+        this.left.set(left.subarray(0, n), start);
+        this.right.set(right.subarray(0, n), start);
+      }
+      return;
+    }
+    if (!this.node) return;
+    const own = (a: Float32Array): Float32Array => (a.byteOffset === 0 && a.byteLength === a.buffer.byteLength ? a : a.slice());
+    const l = own(left);
+    const r = own(right);
+    this.node.port.postMessage({ type: "patch", start, left: l, right: r }, [l.buffer as ArrayBuffer, r.buffer as ArrayBuffer]);
   }
 
   private prepare(): Promise<void> {
@@ -622,7 +656,69 @@ export class PcmSource {
     if (this.wantsStretch()) this.updateEngine();
   }
 
+  /**
+   * Updates frames of the loaded buffer in place while it plays (progressive
+   * stems). The caller has already written the same frames into the
+   * AudioBuffer passed to load(); the direct engine gets the region at once,
+   * the stretch engine (key lock / key shift) is resynced from the AudioBuffer
+   * at most every few seconds, or on its next load if it is idle.
+   */
+  patch(start: number, left: Float32Array, right: Float32Array): void {
+    if (!this.loaded) return;
+    this.direct.patch(start, left, right);
+    if (!this.stretchLoaded) return;
+    if (!this.useStretch) {
+      // Idle stretch engine: reload lazily the next time key lock needs it.
+      this.stretchLoaded = false;
+      return;
+    }
+    this.scheduleStretchResync();
+  }
+
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastResyncAt = 0;
+
+  /** Pushes the patched buffer into the stretch node now (end of a progressive load). */
+  flushPatches(): void {
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+      this.resyncTimer = null;
+    }
+    if (this.useStretch && this.stretchLoaded) this.resyncStretch();
+    else this.stretchLoaded = false;
+  }
+
+  private scheduleStretchResync(): void {
+    if (this.resyncTimer) return;
+    const wait = Math.max(0, 4000 - (performance.now() - this.lastResyncAt));
+    this.resyncTimer = setTimeout(() => {
+      this.resyncTimer = null;
+      this.resyncStretch();
+    }, wait);
+  }
+
+  private resyncStretch(): void {
+    const buffer = this.buffer;
+    if (!buffer || !this.stretch) return;
+    this.lastResyncAt = performance.now();
+    const left = buffer.getChannelData(0);
+    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+    void this.enqueue(async () => {
+      const node = this.stretch;
+      if (!node || this.buffer !== buffer) return;
+      // Posted back to back so the processor swaps buffers between two render
+      // quanta at worst; the time map (position, rate, loop) is untouched.
+      const dropped = node.dropBuffers();
+      const added = node.addBuffers([left, right]);
+      await Promise.all([dropped, added]);
+    });
+  }
+
   clear(): void {
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+      this.resyncTimer = null;
+    }
     this.switchToken += 1;
     this.loaded = false;
     this.playing = false;

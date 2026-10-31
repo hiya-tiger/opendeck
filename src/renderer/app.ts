@@ -102,6 +102,19 @@ interface SeparationProgress {
   percent: number;
   detail: string;
   hash?: string;
+  deck?: string;
+  provider?: string;
+}
+
+interface SeparationRegion {
+  deck: string;
+  hash: string;
+  start: number;
+  sampleRate: number;
+  totalFrames: number;
+  chunksDone: number;
+  chunksTotal: number;
+  parts: Record<PartId, [Float32Array, Float32Array]>;
 }
 
 interface SeratoWritePayload {
@@ -171,9 +184,17 @@ interface DesktopApi {
       left: Float32Array;
       right: Float32Array;
       trackPath?: string | null;
-    }) => Promise<StemManifest>;
-    read: (dir: string) => Promise<{ manifest: StemManifest; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }>;
+      deck?: string;
+      focusFrame?: number;
+    }) => Promise<StemManifest & { cancelled?: boolean; provider?: string }>;
+    read: (
+      dir: string,
+      targetRate?: number,
+    ) => Promise<{ manifest: StemManifest; sampleRate?: number; frames?: number; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }>;
+    cancel?: (deck: string) => Promise<unknown>;
+    focus?: (deck: string, hash: string, frame: number) => Promise<unknown>;
     onProgress: (handler: (payload: unknown) => void) => () => void;
+    onRegion?: (handler: (payload: unknown) => void) => () => void;
   };
   video?: {
     openOutput: (opts?: { fullscreen?: boolean }) => Promise<{ open: boolean; fullscreen: boolean }>;
@@ -1383,20 +1404,89 @@ const loadStemManifest = async (deckId: DeckId, manifest: StemManifest): Promise
   const api = desktop?.separation;
   if (!api || !manifest.dir) return false;
   const deck = decks[deckId];
-  const result = await api.read(manifest.dir);
+  // Ask for the deck's own rate: a 44.1 kHz cache in a 48 kHz context used to
+  // play ~9% fast through the direct engine.
+  const targetRate = deck.audioBuffer?.sampleRate ?? deck.ctx.sampleRate;
+  const result = await api.read(manifest.dir, targetRate);
+  const rate = result.sampleRate ?? result.manifest.sampleRate;
   const buffers: Partial<Record<PartId, AudioBuffer>> = {};
   for (const part of PARTS) {
     const data = result.parts[part.id];
     if (!data) continue;
-    const buffer = deck.ctx.createBuffer(2, result.manifest.frames, result.manifest.sampleRate);
-    buffer.copyToChannel(new Float32Array(data.left), 0);
-    buffer.copyToChannel(new Float32Array(data.right), 1);
+    const buffer = deck.ctx.createBuffer(2, data.left.length, rate);
+    buffer.copyToChannel(data.left as Float32Array<ArrayBuffer>, 0);
+    buffer.copyToChannel(data.right as Float32Array<ArrayBuffer>, 1);
     buffers[part.id] = buffer;
   }
-  await deck.loadStems(buffers);
+  await deck.loadStems(buffers, { live: true });
   setPartsState(deckId, "4 parts ready");
   return deck.hasStems;
 };
+
+/* Progressive separation: regions stream in from the playhead outward. The
+ * deck switches to part voices on the first one; unfinished audio is the full
+ * mix split evenly over the four parts, so it still plays (and sums back to
+ * the mix) until its region lands. */
+interface ProgressiveStems {
+  hash: string;
+  mix: AudioBuffer;
+  started: boolean;
+  chain: Promise<void>;
+  done: number;
+  total: number;
+  provider: string;
+  lastFocus: number;
+  timer: ReturnType<typeof setInterval> | null;
+}
+
+const progressive: Partial<Record<DeckId, ProgressiveStems>> = {};
+
+const placeholderStems = (deck: Deck, mix: AudioBuffer): Partial<Record<PartId, AudioBuffer>> => {
+  const quarter = [0, 1].map((channel) => {
+    const source = mix.getChannelData(Math.min(channel, mix.numberOfChannels - 1));
+    const out = new Float32Array(source.length);
+    for (let i = 0; i < source.length; i += 1) out[i] = source[i] * 0.25;
+    return out;
+  });
+  const buffers: Partial<Record<PartId, AudioBuffer>> = {};
+  for (const part of PARTS) {
+    const buffer = deck.ctx.createBuffer(2, mix.length, mix.sampleRate);
+    buffer.copyToChannel(quarter[0], 0);
+    buffer.copyToChannel(quarter[1], 1);
+    buffers[part.id] = buffer;
+  }
+  return buffers;
+};
+
+const stopProgressive = (deckId: DeckId): void => {
+  const state = progressive[deckId];
+  if (state?.timer) clearInterval(state.timer);
+  delete progressive[deckId];
+};
+
+const focusFrameFor = (deck: Deck, sampleRate: number): number => {
+  const seconds = deck.playing || deck.currentTime > 0 ? deck.currentTime : deck.cuePoint;
+  return Math.max(0, Math.round((Number.isFinite(seconds) ? seconds : 0) * sampleRate));
+};
+
+desktop?.separation?.onRegion?.((payload) => {
+  const region = payload as SeparationRegion;
+  const deckId = region.deck as DeckId;
+  const state = progressive[deckId];
+  const deck = decks[deckId];
+  if (!state || !deck || state.hash !== region.hash || deck.audioHash !== region.hash) return;
+  state.chain = state.chain.then(async () => {
+    if (progressive[deckId] !== state) return;
+    if (!state.started) {
+      await deck.loadStems(placeholderStems(deck, state.mix), { live: true });
+      state.started = true;
+    }
+    deck.patchStems(region.start, region.parts);
+    state.done = region.chunksDone;
+    state.total = region.chunksTotal;
+    setPartsState(deckId, `parts ${Math.round((region.chunksDone / region.chunksTotal) * 100)}% - live where ready${state.provider ? ` (${state.provider})` : ""}`);
+  }).catch(() => undefined);
+});
 
 const refreshParts = async (deckId: DeckId): Promise<void> => {
   const refs = ui[deckId] as any;
@@ -1404,6 +1494,13 @@ const refreshParts = async (deckId: DeckId): Promise<void> => {
   if (!refs) return;
   resetPartCards(deckId);
   const api = desktop?.separation;
+  // A different track on this deck: stop separating the old one (the worker
+  // drops it at the next chunk unless another deck still wants it).
+  const running = progressive[deckId];
+  if (running && running.hash !== deck.audioHash) {
+    stopProgressive(deckId);
+    void api?.cancel?.(deckId);
+  }
   if (!api) {
     setPartsState(deckId, "parts need the desktop app");
     refs.separateBtn.disabled = true;
@@ -1453,23 +1550,58 @@ const separateDeck = async (deckId: DeckId): Promise<void> => {
       refs.installModel.classList.add("hidden");
       toast("Stem model installed.");
     }
-    const left = deck.audioBuffer.getChannelData(0).slice();
-    const right = deck.audioBuffer.numberOfChannels > 1 ? deck.audioBuffer.getChannelData(1).slice() : left.slice();
+    const mix = deck.audioBuffer;
+    if (!mix || deck.audioHash !== startHash) return;
+    // IPC copies the channels itself; no extra slice() here.
+    const left = mix.getChannelData(0);
+    const right = mix.numberOfChannels > 1 ? mix.getChannelData(1) : left;
+    stopProgressive(deckId);
+    const state: ProgressiveStems = {
+      hash: startHash,
+      mix,
+      started: false,
+      chain: Promise.resolve(),
+      done: 0,
+      total: 0,
+      provider: "",
+      lastFocus: focusFrameFor(deck, mix.sampleRate),
+      timer: null,
+    };
+    progressive[deckId] = state;
+    // Follow the playhead: if the DJ jumps, separate from there next.
+    state.timer = setInterval(() => {
+      if (progressive[deckId] !== state || !api.focus) return;
+      const frame = focusFrameFor(deck, mix.sampleRate);
+      if (Math.abs(frame - state.lastFocus) > mix.sampleRate * 4) {
+        state.lastFocus = frame;
+        void api.focus(deckId, startHash, frame);
+      }
+    }, 1000);
     setPartsState(deckId, "separating parts...");
     const manifest = await api.run({
-      hash: deck.audioHash,
-      sampleRate: deck.audioBuffer.sampleRate,
+      hash: startHash,
+      sampleRate: mix.sampleRate,
       left,
       right,
       trackPath: trackPathFor(track),
+      deck: deckId,
+      focusFrame: state.lastFocus,
     });
-    if (deck.audioHash !== manifest.hash) return;
-    await loadStemManifest(deckId, manifest);
+    if (manifest.cancelled || deck.audioHash !== manifest.hash) return;
+    await state.chain;
+    if (state.started && deck.hasStems) {
+      // Every region is already in the deck: no need to read the cache back.
+      deck.finishStems();
+      setPartsState(deckId, `4 parts ready${manifest.provider ? ` (${manifest.provider})` : ""}`);
+    } else {
+      await loadStemManifest(deckId, manifest);
+    }
     toast("Parts separated.");
   } catch (error) {
     toast(`Could not separate parts: ${(error as Error).message}`);
     setPartsState(deckId, "separation failed");
   } finally {
+    if (progressive[deckId]?.hash === startHash) stopProgressive(deckId);
     separating[deckId] = false;
     refs.separateBtn.disabled = false;
   }
@@ -1502,6 +1634,11 @@ desktop?.separation?.onProgress((payload) => {
   const progress = payload as SeparationProgress;
   for (const deckId of ALL_DECKS) {
     if (!separating[deckId]) continue;
+    if (progress.deck && progress.deck !== deckId) continue;
+    const state = progressive[deckId];
+    if (state && progress.provider) state.provider = progress.provider;
+    // Once parts are playing, the region handler owns the status line.
+    if (state?.started && progress.stage === "separate") continue;
     const hashMatches = !progress.hash || decks[deckId].audioHash === progress.hash;
     if (!hashMatches) continue;
     setPartsState(deckId, `${progress.stage} ${progress.percent}% - ${progress.detail}`);

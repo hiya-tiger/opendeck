@@ -729,17 +729,29 @@ export class Deck {
     this.stemActive = false;
   }
 
-  async loadStems(buffers: Partial<Record<PartId, AudioBuffer>>): Promise<void> {
-    this.pause();
+  /**
+   * Switches the deck to the four part voices. The playhead stays where it is
+   * (it used to jump to 0). With `live`, a deck that is playing the full mix
+   * keeps playing: the part voices start silent at the mix's position and the
+   * two crossfade over ~15 ms, so progressive stems can arrive mid-track.
+   */
+  async loadStems(buffers: Partial<Record<PartId, AudioBuffer>>, options: { live?: boolean } = {}): Promise<void> {
+    const at = this.currentTime;
+    const mix = this.pcmBuffer;
+    const live = Boolean(options.live && this.playing && !this.stemActive && this.pcmActive && mix && !this.scratching);
+    if (!live) this.pause();
     this.clearStems();
-    this.pcm.clear();
-    this.pcmBuffer = null;
-    this.pcmActive = false;
+    if (!live) {
+      this.pcm.clear();
+      this.pcmBuffer = null;
+      this.pcmActive = false;
+    }
     const loaded = PARTS.map((part) => part.id).filter((id) => Boolean(buffers[id]));
     if (!loaded.length) {
       this.emit();
       return;
     }
+    const voices: PcmSource[] = [];
     for (const id of loaded) {
       const buffer = buffers[id];
       const node = this.partNodes[id];
@@ -748,15 +760,62 @@ export class Deck {
       this.partScratches[id]?.setBuffer(buffer);
       const voice = new PcmSource(this.ctx, node.filter, { onEnded: () => this.emit() });
       this.stemVoices[id] = voice;
+      if (live) voice.output.gain.value = 0;
       voice.setRate(this.rate);
       voice.setKeylock(this.keylock);
       voice.setPitchShift(this.pitchShiftSemitones);
-      await voice.load(buffer, 0);
+      const position = Math.max(0, Math.min(buffer.length - 1, Math.round(at * buffer.sampleRate)));
+      await voice.load(buffer, position);
+      voices.push(voice);
     }
     this.stemActive = true;
     this.applyPartGains();
     this.applyPcmLoop();
+    if (live && mix) {
+      await Promise.all(voices.map((voice) => voice.play()));
+      // Line the parts up with where the mix is now (it kept playing while the
+      // voices were built), then crossfade.
+      const now = this.pcm.positionSamples;
+      const fade = this.ctx.currentTime;
+      for (const voice of voices) {
+        voice.seek(Math.round((now / mix.sampleRate) * (this.stemBuffers.drums?.sampleRate ?? mix.sampleRate)));
+        voice.output.gain.setTargetAtTime(1, fade, 0.004);
+      }
+      this.pcm.output.gain.setTargetAtTime(0, fade, 0.004);
+      setTimeout(() => {
+        if (this.pcmBuffer !== mix || !this.stemActive) return;
+        this.pcm.clear();
+        this.pcm.output.gain.cancelScheduledValues(this.ctx.currentTime);
+        this.pcm.output.gain.value = 1;
+        this.pcmBuffer = null;
+        this.pcmActive = false;
+      }, 160);
+    }
     this.emit();
+  }
+
+  /**
+   * Writes a finished region of separated parts into the playing stems
+   * (progressive separation). Arrays are consumed (transferred to the audio
+   * thread).
+   */
+  patchStems(start: number, parts: Partial<Record<PartId, [Float32Array, Float32Array]>>): void {
+    if (!this.stemActive) return;
+    for (const part of PARTS) {
+      const data = parts[part.id];
+      const buffer = this.stemBuffers[part.id];
+      if (!data || !buffer || start >= buffer.length) continue;
+      const [left, right] = data;
+      buffer.copyToChannel(left as Float32Array<ArrayBuffer>, 0, start);
+      if (buffer.numberOfChannels > 1) buffer.copyToChannel(right as Float32Array<ArrayBuffer>, 1, start);
+      this.partScratches[part.id]?.patch(start, left, right);
+      this.stemVoices[part.id]?.patch(start, left, right);
+    }
+  }
+
+  /** Progressive separation finished: bring any lagging engine up to date. */
+  finishStems(): void {
+    for (const part of PARTS) this.stemVoices[part.id]?.flushPatches();
   }
 
   get partMixState(): PartMix {
