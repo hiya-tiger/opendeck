@@ -671,3 +671,24 @@ body.vertical-waves .wave-card { display: flex; flex-direction: column; }
 .video-xf-row input[type="range"] {
   flex: 1;
 }
+
+/* Detected media: CDJ (Pro DJ Link) and USB drives */
+.topbar-mid { position: relative; }
+.cdj-status { cursor: pointer; font: inherit; font-size: 11px; }
+.cdj-panel {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 40; width: 360px;
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+  background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.cdj-panel label { display: flex; align-items: center; gap: 6px; color: var(--ink); }
+.cdj-panel select { flex: 1; min-width: 0; }
+.cdj-list { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; color: var(--muted); }
+.cdj-line { overflow-wrap: anywhere; }
+.cdj-line.warn { color: var(--amber); }
+.media-prompts { display: flex; flex-direction: column; gap: 6px; margin: 6px 16px 0; }
+.media-prompt {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 14px;
+  background: var(--brand-soft); border: 1px solid var(--brand); border-radius: var(--radius-sm); color: var(--ink);
+}
+.media-prompt-text { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
+.media-prompt-always { display: flex; align-items: center; gap: 4px; color: var(--brand-ink); }

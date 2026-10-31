@@ -12,7 +12,7 @@ import {
   type TrackSortKey,
 } from "./library-ux.ts";
 
-export type TrackSource = "local" | "crate" | "stream";
+export type TrackSource = "local" | "crate" | "stream" | "removable";
 
 export interface Track {
   id: string;
@@ -44,6 +44,8 @@ export interface Track {
   grouping?: string;
   remixer?: string;
   beatgridLocked?: boolean;
+  /** Set for tracks on a detected drive (CDJ slot or USB on this computer). */
+  media?: { sourceId: string; trackId: string; origin: "cdj" | "local"; rating?: number };
 }
 
 export const AUDIO_ACCEPT =
@@ -259,6 +261,26 @@ export class Library {
     this.crateName = crateName;
     this.render();
     return added;
+  }
+
+  /** Add (or replace) every track of a detected drive. Returns the tracks added. */
+  addMediaSource(sourceId: string, tracks: Track[]): Track[] {
+    this.tracks = this.tracks.filter((t) => t.media?.sourceId !== sourceId);
+    for (const track of tracks) {
+      this.applyPersistedMeta(track);
+      this.tracks.push(track);
+    }
+    this.render();
+    return tracks;
+  }
+
+  /** The drive went away: drop its tracks. Tracks already on a deck keep playing. */
+  removeMediaSource(sourceId: string): number {
+    const before = this.tracks.length;
+    this.tracks = this.tracks.filter((t) => t.media?.sourceId !== sourceId);
+    if (this.activeView.startsWith("crate:") && !this.crates().includes(this.activeView.slice(6))) this.activeView = "all";
+    this.render();
+    return before - this.tracks.length;
   }
 
   resolveFolder(files: File[]): Track[] {
@@ -503,7 +525,7 @@ export class Library {
     for (const [index, button] of entry.buttons.entries()) {
       const deckId = deckIds[index] ?? "A";
       button.title = track.missing ? "File not linked: link the music folder first" : `Load into deck ${deckId}`;
-      button.disabled = Boolean(track.missing) || (!track.file && !track.url);
+      button.disabled = Boolean(track.missing) || (!track.file && !track.url && !track.media);
       if (deckId === "C" || deckId === "D") {
         button.hidden = !this.fourDeckMode;
       }

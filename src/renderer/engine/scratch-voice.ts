@@ -22,6 +22,15 @@ class OpenDecksScratchProcessor extends AudioWorkletProcessor {
       } else if (data.type === "stop") {
         this.active = false;
         this.rate = 0;
+      } else if (data.type === "patch") {
+        if (this.left && this.right) {
+          const start = data.start | 0;
+          const n = Math.min(data.left.length, this.left.length - start);
+          if (start >= 0 && n > 0) {
+            this.left.set(data.left.subarray(0, n), start);
+            this.right.set(data.right.subarray(0, n), start);
+          }
+        }
       } else if (data.type === "clear") {
         this.active = false;
         this.left = null;
@@ -125,6 +134,20 @@ export class ScratchVoice {
     this.right = right;
     this.loaded = true;
     this.sendBuffer(0);
+  }
+
+  /** In-place region update (progressive stems); copies, never transfers. */
+  patch(start: number, left: Float32Array, right: Float32Array): void {
+    if (!this.loaded) return;
+    if (this.left && this.right) {
+      const n = Math.max(0, Math.min(left.length, this.left.length - start));
+      if (n > 0) {
+        this.left.set(left.subarray(0, n), start);
+        this.right.set(right.subarray(0, n), start);
+      }
+      return;
+    }
+    this.node?.port.postMessage({ type: "patch", start, left, right });
   }
 
   private sendBuffer(position: number): void {

@@ -22,6 +22,15 @@
       <span id="engineState" class="muted mono">audio engine idle</span>
       <span id="engineDiag" class="muted mono"></span>
       <span id="linkStatus" class="muted mono hidden"></span>
+      <button id="cdjStatus" type="button" class="chip mono cdj-status hidden" title="Pro DJ Link and USB drives">Link</button>
+      <div id="cdjPanel" class="cdj-panel hidden" role="dialog" aria-label="CDJ and USB drives">
+        <div class="cdj-panel-head"><strong>CDJs &amp; USB drives</strong></div>
+        <label class="micro"><input id="cdjEnabled" type="checkbox"> Pro DJ Link (CDJs on the network)</label>
+        <label class="micro">Network <select id="cdjInterface" class="mini-select" aria-label="Pro DJ Link network interface"></select></label>
+        <label class="micro"><input id="cdjLocalDrives" type="checkbox"> Watch USB drives on this computer</label>
+        <div id="cdjList" class="cdj-list mono micro"></div>
+        <button id="cdjForget" type="button" class="ghost small">No remembered drives</button>
+      </div>
     </div>
     <div class="topbar-right">
       <span class="muted mono" id="clock">--:--</span>
@@ -32,6 +41,7 @@
       <a id="saveMix" class="pill-btn hidden" download="opendeck-mix.webm">Save mix</a>
     </div>
   </header>
+  <div id="mediaPrompts" class="media-prompts hidden" role="status" aria-live="polite"></div>
 
   <main class="workspace" id="workspace">
     <div class="deck-column">

@@ -1,11 +1,10 @@
 ﻿import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createWriteStream, promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import * as ort from "onnxruntime-node";
+import { DEFAULT_OVERLAP, decodeCachePart, planChunksWith, type StemPart } from "./stems/core.ts";
 
 export const MODEL = {
   id: "htdemucs-fp16weights",
@@ -18,7 +17,7 @@ export const MODEL = {
   frameCount: 343980,
 } as const;
 
-export const MODEL_OVERLAP = Math.floor(MODEL.frameCount / 4);
+export const MODEL_OVERLAP = DEFAULT_OVERLAP;
 export const MODEL_STRIDE = MODEL.frameCount - MODEL_OVERLAP;
 export const PART_IDS = ["drums", "bass", "other", "vocals"] as const;
 export type PartId = (typeof PART_IDS)[number];
@@ -29,14 +28,7 @@ export interface ChunkPlan {
   length: number;
 }
 
-export const planChunks = (totalFrames: number): ChunkPlan[] => {
-  if (!Number.isFinite(totalFrames) || totalFrames <= 0) return [];
-  const chunks: ChunkPlan[] = [];
-  for (let start = 0, index = 0; start < totalFrames; start += MODEL_STRIDE, index += 1) {
-    chunks.push({ index, start, length: Math.min(MODEL.frameCount, totalFrames - start) });
-  }
-  return chunks;
-};
+export const planChunks = (totalFrames: number): ChunkPlan[] => planChunksWith(totalFrames, MODEL.frameCount, MODEL_OVERLAP);
 
 export const transitionWindow = (length: number, overlap: number): Float32Array => {
   const window = new Float32Array(length);
@@ -97,6 +89,10 @@ export interface SeparateRequest {
   right: Float32Array;
   trackPath?: string | null;
   modelPath?: string | null;
+  /** Deck asking (several decks can share one job). */
+  deck?: string;
+  /** Frame (at `sampleRate`) to separate first: the playhead or first cue. */
+  focusFrame?: number;
 }
 
 export interface StemManifest {
@@ -109,21 +105,6 @@ export interface StemManifest {
   createdAt: string;
   parts: Record<PartId, { file: string; bytes: number }>;
 }
-
-let sessionPromise: Promise<ort.InferenceSession> | null = null;
-let sessionPath = "";
-
-const getSession = async (modelPath: string): Promise<ort.InferenceSession> => {
-  if (!sessionPromise || sessionPath !== modelPath) {
-    sessionPath = modelPath;
-    sessionPromise = ort.InferenceSession.create(modelPath, {
-      executionProviders: ["cpu"],
-      graphOptimizationLevel: "all",
-      intraOpNumThreads: Math.max(1, Math.min(8, os.cpus().length - 1)),
-    });
-  }
-  return sessionPromise;
-};
 
 export const modelInfo = async (modelPath: string): Promise<{ path: string; ready: boolean; bytes: number }> => {
   try {
@@ -227,7 +208,7 @@ export const findCache = async (trackPath: string | null | undefined, hash: stri
   return null;
 };
 
-const pickCacheDir = async (trackPath: string | null | undefined, hash: string, appData: string): Promise<string> => {
+export const pickCacheDir = async (trackPath: string | null | undefined, hash: string, appData: string): Promise<string> => {
   const candidates = cacheCandidates(trackPath, hash, appData);
   for (const dir of candidates) {
     try {
@@ -243,106 +224,56 @@ const pickCacheDir = async (trackPath: string | null | undefined, hash: string, 
   return candidates[candidates.length - 1];
 };
 
-export const readCache = async (manifest: StemManifest): Promise<Record<PartId, { left: Float32Array; right: Float32Array }>> => {
+/**
+ * Reads a finished cache as planar float at `targetRate` (the deck's buffer
+ * rate), deinterleaving, scaling and resampling in one pass per part.
+ */
+export const readCache = async (
+  manifest: StemManifest,
+  targetRate = manifest.sampleRate,
+): Promise<{ sampleRate: number; frames: number; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }> => {
   const dir = (manifest as StemManifest & { dir?: string }).dir ?? "";
   if (!dir) throw new Error("Stem cache location missing");
   const out = {} as Record<PartId, { left: Float32Array; right: Float32Array }>;
+  let frames = manifest.frames;
   for (const id of PART_IDS) {
-    const file = path.join(dir, manifest.parts[id].file);
-    const raw = await fs.readFile(file);
-    const buffer = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2);
-    const interleaved = fromInt16(buffer);
-    const left = new Float32Array(manifest.frames);
-    const right = new Float32Array(manifest.frames);
-    for (let i = 0; i < manifest.frames; i += 1) {
-      left[i] = interleaved[i * 2];
-      right[i] = interleaved[i * 2 + 1];
-    }
+    const raw = await fs.readFile(path.join(dir, manifest.parts[id].file));
+    const data = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2);
+    const [left, right] = decodeCachePart(data, manifest.frames, manifest.sampleRate, targetRate);
+    frames = left.length;
     out[id] = { left, right };
   }
-  return out;
+  return { sampleRate: targetRate, frames, parts: out };
 };
 
-export const separateToCache = async (
-  request: SeparateRequest,
-  modelPath: string,
-  appData: string,
-  onProgress: (progress: SeparationProgress) => void,
-): Promise<StemManifest> => {
-  const left = resampleLinear(request.left, request.sampleRate, MODEL.sampleRate);
-  const right = resampleLinear(request.right, request.sampleRate, MODEL.sampleRate);
-  const frames = Math.min(left.length, right.length);
-  const chunks = planChunks(frames);
-  if (!chunks.length) throw new Error("No audio to separate");
-  const session = await getSession(modelPath);
-  const inputs = session.inputNames;
-  const outputs = session.outputNames;
-  const inputName = inputs.includes("mix") ? "mix" : inputs[0];
-  const outputName = outputs.includes("stems") ? "stems" : outputs[0];
-  onProgress({ stage: "prepare", percent: 0, detail: `Preparing ${chunks.length} chunks` });
-  const parts = {} as Record<PartId, [Float32Array, Float32Array]>;
-  for (const id of PART_IDS) parts[id] = [new Float32Array(frames), new Float32Array(frames)];
-  const weight = new Float32Array(frames);
-  const window = transitionWindow(MODEL.frameCount, MODEL_OVERLAP);
-  const chunk = new Float32Array(2 * MODEL.frameCount);
-  const shape = [1, 2, MODEL.frameCount];
-
-  for (const plan of chunks) {
-    chunk.fill(0);
-    for (let i = 0; i < plan.length; i += 1) {
-      chunk[i] = left[plan.start + i];
-      chunk[MODEL.frameCount + i] = right[plan.start + i];
-    }
-    const tensor = new ort.Tensor("float32", chunk, shape);
-    const result = await session.run({ [inputName]: tensor });
-    const data = result[outputName].data as Float32Array;
-    const stride = 2 * MODEL.frameCount;
-    for (let part = 0; part < PART_IDS.length; part += 1) {
-      const output = parts[PART_IDS[part]];
-      const base = part * stride;
-      for (let i = 0; i < plan.length; i += 1) {
-        const gain = window[i];
-        output[0][plan.start + i] += data[base + i] * gain;
-        output[1][plan.start + i] += data[base + MODEL.frameCount + i] * gain;
-      }
-    }
-    for (let i = 0; i < plan.length; i += 1) weight[plan.start + i] += window[i];
-    onProgress({
-      stage: "separate",
-      percent: Math.round(((plan.index + 1) / chunks.length) * 100),
-      detail: `Chunk ${plan.index + 1} of ${chunks.length}`,
-    });
-  }
-
-  const dir = await pickCacheDir(request.trackPath, request.hash, appData);
+/** Writes the on-disk cache (format unchanged: interleaved int16 per part + manifest.json). */
+export const writeCache = async (
+  dir: string,
+  hash: string,
+  frames: number,
+  parts: Record<StemPart, Int16Array>,
+): Promise<StemManifest & { dir: string }> => {
   await fs.rm(dir, { recursive: true, force: true });
   await fs.mkdir(dir, { recursive: true });
   const manifest: StemManifest = {
     version: 1,
     model: MODEL.id,
     modelVersion: MODEL.version,
-    hash: request.hash,
+    hash,
     sampleRate: MODEL.sampleRate,
     frames,
     createdAt: new Date().toISOString(),
     parts: {} as StemManifest["parts"],
   };
   for (const id of PART_IDS) {
-    const [l, r] = parts[id];
-    const interleaved = new Float32Array(frames * 2);
-    for (let i = 0; i < frames; i += 1) {
-      const normal = weight[i] > 0 ? 1 / weight[i] : 0;
-      interleaved[i * 2] = l[i] * normal;
-      interleaved[i * 2 + 1] = r[i] * normal;
-    }
     const file = `${id}.i16`;
-    const bytes = toInt16(interleaved);
+    const bytes = parts[id];
     await fs.writeFile(path.join(dir, file), Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     manifest.parts[id] = { file, bytes: bytes.byteLength };
   }
+  // The manifest goes last: a cache without one is never read.
   await fs.writeFile(path.join(dir, "manifest.json"), JSON.stringify(manifest));
-  onProgress({ stage: "done", percent: 100, detail: "Stems ready" });
-  return { ...manifest, dir } as StemManifest & { dir: string };
+  return { ...manifest, dir };
 };
 
 export const loadManifestAt = async (dir: string): Promise<StemManifest | null> => {

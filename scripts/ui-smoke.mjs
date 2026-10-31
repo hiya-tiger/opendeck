@@ -17,6 +17,12 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 // otherwise the probe reports "No handler registered" instead of renderer bugs.
 ipcMain.handle("rtmp:available", () => false);
 ipcMain.handle("streaming:status", () => ({ providers: [], active: null }));
+// Detected-media stub: one pending CDJ prompt, so the probe can check it renders.
+const prompt = { sourceId: "cdj-2-usb", origin: "cdj", mediaKey: "cdj:smoke", sourceName: "CDJ 2 · USB · SMOKE", mediaName: "SMOKE", slot: "usb", where: "CDJ 2", trackCount: 412, kind: "rekordbox", message: "USB drive 'SMOKE' found on CDJ 2 (412 tracks). Add it to your library?" };
+ipcMain.handle("djmedia:state", () => ({
+  libraries: [],
+  snapshot: { enabled: true, running: true, interfaceName: "eth0", address: "169.254.1.5", deviceNumber: 1, players: [{ deviceNumber: 2, name: "CDJ-3000", ip: "169.254.1.2", kind: "player", usb: "mounted", sd: "empty" }], media: [], prompts: [prompt], error: null, interfaces: [], settings: { enabled: true, interface: "auto", deviceNumber: "auto", localDrives: true, remembered: {} } },
+}));
 const errors = [];
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -40,7 +46,11 @@ app.whenReady().then(async () => {
       crossfader: !!document.getElementById('crossfader'),
       trackRows: document.querySelectorAll('#trackList tr').length,
       engineState: (document.getElementById('engineState') || {}).textContent || null,
+      mediaPrompt: (document.querySelector('#mediaPrompts .media-prompt-text') || {}).textContent || null,
+      mediaPromptButtons: document.querySelectorAll('#mediaPrompts button').length,
+      cdjStatus: (document.getElementById('cdjStatus') || {}).textContent || null,
     }))()\`, true);
+    if (!probe.mediaPrompt || !probe.mediaPrompt.includes("SMOKE") || probe.mediaPromptButtons !== 2) errors.push("detected-media prompt did not render");
     console.log("UI_RESULT " + JSON.stringify({ ok: errors.length === 0, errors, probe }));
     process.exitCode = errors.length === 0 ? 0 : 1;
   } catch (error) {

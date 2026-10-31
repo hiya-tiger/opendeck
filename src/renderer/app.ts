@@ -1,6 +1,7 @@
 import { Mixer, type CrossfaderCurve } from "./engine/mixer.ts";
 import { Deck, HOT_CUE_COLORS, type DeckState, type DeckId } from "./engine/deck.ts";
 import { analyzeBuffer, formatTime, formatClock, type AnalysisResult } from "./engine/analyze.ts";
+import { AnalysisScheduler, WorkerPool, defaultPoolSize, type AnalysisPriority } from "./engine/analysis-pool.ts";
 import { beatSeconds, formatBeatPosition, LOOP_BEATS, beatGridToMarkers, markersToBeatGrid } from "./engine/beatgrid.ts";
 import { syncDeck } from "./engine/sync.ts";
 import { TempoAuthority, type LinkTempoStatus } from "./engine/tempo-authority.ts";
@@ -28,6 +29,8 @@ import type { PlayedEntry, TrackSortKey, LivePlaylistRule } from "./media/librar
 import { zipSync } from "fflate";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
+import { mediaCrates, promptView, tracksFromMedia } from "./media/cdj.ts";
+import type { CdjFetchProgress, CdjMediaLibrary, LoadedCue, LoadedTrack, MediaPrompt, ProlinkSettings, ProlinkSnapshot } from "../main/prolink/types.ts";
 import { PROVIDERS, findProvider } from "./streaming/providers.ts";
 import { parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "./streaming/youtube.ts";
 import { DrmSessionManager, probeKeySystems, providerEmbedUrl, type DrmScheme } from "./streaming/drm.ts";
@@ -100,6 +103,19 @@ interface SeparationProgress {
   percent: number;
   detail: string;
   hash?: string;
+  deck?: string;
+  provider?: string;
+}
+
+interface SeparationRegion {
+  deck: string;
+  hash: string;
+  start: number;
+  sampleRate: number;
+  totalFrames: number;
+  chunksDone: number;
+  chunksTotal: number;
+  parts: Record<PartId, [Float32Array, Float32Array]>;
 }
 
 interface SeratoWritePayload {
@@ -169,9 +185,17 @@ interface DesktopApi {
       left: Float32Array;
       right: Float32Array;
       trackPath?: string | null;
-    }) => Promise<StemManifest>;
-    read: (dir: string) => Promise<{ manifest: StemManifest; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }>;
+      deck?: string;
+      focusFrame?: number;
+    }) => Promise<StemManifest & { cancelled?: boolean; provider?: string }>;
+    read: (
+      dir: string,
+      targetRate?: number,
+    ) => Promise<{ manifest: StemManifest; sampleRate?: number; frames?: number; parts: Record<PartId, { left: Float32Array; right: Float32Array }> }>;
+    cancel?: (deck: string) => Promise<unknown>;
+    focus?: (deck: string, hash: string, frame: number) => Promise<unknown>;
     onProgress: (handler: (payload: unknown) => void) => () => void;
+    onRegion?: (handler: (payload: unknown) => void) => () => void;
   };
   video?: {
     openOutput: (opts?: { fullscreen?: boolean }) => Promise<{ open: boolean; fullscreen: boolean }>;
@@ -181,6 +205,19 @@ interface DesktopApi {
     syncOutput: (state: unknown) => Promise<{ ok: boolean }>;
     onOutputState: (handler: (payload: unknown) => void) => () => void;
     onOutputClosed: (handler: (payload: unknown) => void) => () => void;
+  };
+  djmedia?: {
+    state: () => Promise<{ snapshot: ProlinkSnapshot; libraries: CdjMediaLibrary[] }>;
+    settings: (patch: Partial<ProlinkSettings>) => Promise<ProlinkSnapshot>;
+    forget: (mediaKey?: string) => Promise<ProlinkSnapshot>;
+    respond: (sourceId: string, action: "add" | "ignore", always: boolean) => Promise<{ ok: boolean; error?: string }>;
+    loadTrack: (sourceId: string, trackId: string) => Promise<LoadedTrack>;
+    onStatus: (handler: (payload: unknown) => void) => () => void;
+    onPrompt: (handler: (payload: unknown) => void) => () => void;
+    onPromptCleared: (handler: (payload: unknown) => void) => () => void;
+    onLibrary: (handler: (payload: unknown) => void) => () => void;
+    onRemoved: (handler: (payload: unknown) => void) => () => void;
+    onProgress: (handler: (payload: unknown) => void) => () => void;
   };
   link?: {
     status: () => Promise<LinkStatusPayload>;
@@ -270,14 +307,6 @@ const partFxFiltered: Record<DeckId, Record<PartId, boolean>> = {
 };
 let samplerBank: SamplerBank = "A";
 
-const analysisQueue: Track[] = [];
-let analysing = false;
-let analysisWorker: Worker | null = null;
-let analysisRequestId = 0;
-const analysisRequests = new Map<
-  number,
-  { resolve: (result: AnalysisResult) => void; reject: (error: Error) => void }
->();
 const desktop = window.opendeckDesktop;
 
 // D35: the single owner of session BPM/beat/phase. Link is an input to it, never
@@ -285,40 +314,6 @@ const desktop = window.opendeckDesktop;
 const tempoAuthority = new TempoAuthority({
   onPushLink: (bpm) => void desktop?.link?.setLocalTempo(bpm),
 });
-
-function workerAnalysis(buffer: AudioBuffer): Promise<AnalysisResult> {
-  if (!analysisWorker) {
-    analysisWorker = new Worker("analysis-worker.js");
-    analysisWorker.addEventListener("message", (event: MessageEvent<{ id: number; result: AnalysisResult }>) => {
-      const request = analysisRequests.get(event.data.id);
-      request?.resolve(event.data.result);
-      analysisRequests.delete(event.data.id);
-    });
-    analysisWorker.addEventListener("error", () => {
-      for (const request of analysisRequests.values()) request.reject(new Error("Analysis worker failed"));
-      analysisRequests.clear();
-      analysisWorker?.terminate();
-      analysisWorker = null;
-    });
-  }
-  const id = (analysisRequestId += 1);
-  const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) =>
-    buffer.getChannelData(channel).slice(),
-  );
-  return new Promise((resolve, reject) => {
-    analysisRequests.set(id, { resolve, reject });
-    analysisWorker!.postMessage(
-      {
-        id,
-        sampleRate: buffer.sampleRate,
-        length: buffer.length,
-        duration: buffer.duration,
-        channels,
-      },
-      channels.map((channel) => channel.buffer),
-    );
-  });
-}
 
 function toast(message: string, ms = 3200): void {
   const el = $("toast");
@@ -1253,11 +1248,61 @@ async function extractArtwork(track: Track, data: ArrayBuffer | null): Promise<v
   }
 }
 
-async function analyseTrack(track: Track): Promise<void> {
+/* Analysis runs on a pool of workers (D41): one per spare core, up to 8.
+ * Tracks just loaded onto a deck jump ahead of library batches, at most
+ * pool-size tracks are read/decoded at once, and a worker that fails takes
+ * only its own track down (that track is retried on the main thread). */
+const nativeResults = new Map<string, NativeAnalysis>();
+
+const decodeForAnalysis = async (track: Track): Promise<AudioBuffer | null> => {
   const data = track.file ? await track.file.arrayBuffer() : null;
   await extractArtwork(track, data);
   const native = await nativeAnalysis(track, data);
   if (native) {
+    nativeResults.set(track.id, native);
+    return null;
+  }
+  if (!data) return null;
+  return mixer.ctx.decodeAudioData(data);
+};
+
+const analysisPool = new WorkerPool<AnalysisResult>({
+  size: defaultPoolSize(navigator.hardwareConcurrency),
+  create: () => new Worker("analysis-worker.js"),
+});
+
+const analysisScheduler = new AnalysisScheduler<Track, AudioBuffer, AnalysisResult>(analysisPool, {
+  key: (track) => track.id,
+  decode: decodeForAnalysis,
+  toMessage: (buffer) => {
+    // Copies (an AudioBuffer's own storage cannot be transferred), then the
+    // copies are transferred and the AudioBuffer is dropped.
+    const channels = Array.from({ length: buffer.numberOfChannels }, (_, channel) => buffer.getChannelData(channel).slice());
+    return {
+      payload: { sampleRate: buffer.sampleRate, length: buffer.length, duration: buffer.duration, channels },
+      transfer: channels.map((channel) => channel.buffer),
+    };
+  },
+  fallback: async (track) => {
+    const data = track.file ? await track.file.arrayBuffer() : null;
+    if (!data) throw new Error("no audio to analyse");
+    return analyzeBuffer(await mixer.ctx.decodeAudioData(data), 2000);
+  },
+});
+
+async function analyseTrack(track: Track, priority: AnalysisPriority): Promise<void> {
+  const result = await analysisScheduler.analyse(track, priority);
+  const native = nativeResults.get(track.id);
+  nativeResults.delete(track.id);
+  if (result) {
+    track.bpm = result.bpm;
+    track.beatPhase = result.beatPhase;
+    track.key = result.key.key;
+    track.camelot = result.key.camelot;
+    track.duration = result.duration;
+    track.peaks = result.peaks;
+    track.bands = result.bands;
+  } else if (native) {
     track.bpm = native.bpm;
     track.beatPhase = native.beatPhase;
     track.key = native.key;
@@ -1270,21 +1315,7 @@ async function analyseTrack(track: Track): Promise<void> {
       high: Float32Array.from(native.bands.high),
     };
   } else {
-    if (!data) return;
-    const buffer = await mixer.ctx.decodeAudioData(data);
-    let result: AnalysisResult;
-    try {
-      result = await workerAnalysis(buffer);
-    } catch {
-      result = analyzeBuffer(buffer, 2000);
-    }
-    track.bpm = result.bpm;
-    track.beatPhase = result.beatPhase;
-    track.key = result.key.key;
-    track.camelot = result.key.camelot;
-    track.duration = result.duration;
-    track.peaks = result.peaks;
-    track.bands = result.bands;
+    return;
   }
   track.analyzed = true;
   library.setMeta(track, {});
@@ -1296,34 +1327,25 @@ async function analyseTrack(track: Track): Promise<void> {
   }
 }
 
-function enqueueAnalysis(track: Track): void {
-  if (track.analyzed || track.queued || (!track.file && !desktop?.analysis)) return;
-  track.queued = true;
-  analysisQueue.push(track);
-  void pumpAnalysis();
-}
-
-async function pumpAnalysis(): Promise<void> {
-  if (analysing) return;
-  analysing = true;
-  const track = analysisQueue.shift();
-  if (!track) {
-    analysing = false;
+function enqueueAnalysis(track: Track, priority: AnalysisPriority = "background"): void {
+  if (track.analyzed || (!track.file && !desktop?.analysis)) return;
+  if (track.queued) {
+    // Already waiting: a deck load moves it to the front.
+    if (priority === "deck") void analysisScheduler.analyse(track, "deck").catch(() => undefined);
     return;
   }
-  try {
-    await new Promise((resolve) => window.setTimeout(resolve, 30));
-    await analyseTrack(track);
-  } catch (error) {
-    console.warn("analysis failed", track.name, error);
-    track.bpm = 0;
-    track.key = "--";
-    track.analyzed = true;
-    library.setMeta(track, {});
-  } finally {
-    analysing = false;
-    if (analysisQueue.length) await pumpAnalysis();
-  }
+  track.queued = true;
+  void analyseTrack(track, priority)
+    .catch((error) => {
+      console.warn("analysis failed", track.name, error);
+      track.bpm = 0;
+      track.key = "--";
+      track.analyzed = true;
+      library.setMeta(track, {});
+    })
+    .finally(() => {
+      track.queued = false;
+    });
 }
 
 /* -------------------------------------------------------------- stems */
@@ -1368,20 +1390,89 @@ const loadStemManifest = async (deckId: DeckId, manifest: StemManifest): Promise
   const api = desktop?.separation;
   if (!api || !manifest.dir) return false;
   const deck = decks[deckId];
-  const result = await api.read(manifest.dir);
+  // Ask for the deck's own rate: a 44.1 kHz cache in a 48 kHz context used to
+  // play ~9% fast through the direct engine.
+  const targetRate = deck.audioBuffer?.sampleRate ?? deck.ctx.sampleRate;
+  const result = await api.read(manifest.dir, targetRate);
+  const rate = result.sampleRate ?? result.manifest.sampleRate;
   const buffers: Partial<Record<PartId, AudioBuffer>> = {};
   for (const part of PARTS) {
     const data = result.parts[part.id];
     if (!data) continue;
-    const buffer = deck.ctx.createBuffer(2, result.manifest.frames, result.manifest.sampleRate);
-    buffer.copyToChannel(new Float32Array(data.left), 0);
-    buffer.copyToChannel(new Float32Array(data.right), 1);
+    const buffer = deck.ctx.createBuffer(2, data.left.length, rate);
+    buffer.copyToChannel(data.left as Float32Array<ArrayBuffer>, 0);
+    buffer.copyToChannel(data.right as Float32Array<ArrayBuffer>, 1);
     buffers[part.id] = buffer;
   }
-  await deck.loadStems(buffers);
+  await deck.loadStems(buffers, { live: true });
   setPartsState(deckId, "4 parts ready");
   return deck.hasStems;
 };
+
+/* Progressive separation: regions stream in from the playhead outward. The
+ * deck switches to part voices on the first one; unfinished audio is the full
+ * mix split evenly over the four parts, so it still plays (and sums back to
+ * the mix) until its region lands. */
+interface ProgressiveStems {
+  hash: string;
+  mix: AudioBuffer;
+  started: boolean;
+  chain: Promise<void>;
+  done: number;
+  total: number;
+  provider: string;
+  lastFocus: number;
+  timer: ReturnType<typeof setInterval> | null;
+}
+
+const progressive: Partial<Record<DeckId, ProgressiveStems>> = {};
+
+const placeholderStems = (deck: Deck, mix: AudioBuffer): Partial<Record<PartId, AudioBuffer>> => {
+  const quarter = [0, 1].map((channel) => {
+    const source = mix.getChannelData(Math.min(channel, mix.numberOfChannels - 1));
+    const out = new Float32Array(source.length);
+    for (let i = 0; i < source.length; i += 1) out[i] = source[i] * 0.25;
+    return out;
+  });
+  const buffers: Partial<Record<PartId, AudioBuffer>> = {};
+  for (const part of PARTS) {
+    const buffer = deck.ctx.createBuffer(2, mix.length, mix.sampleRate);
+    buffer.copyToChannel(quarter[0], 0);
+    buffer.copyToChannel(quarter[1], 1);
+    buffers[part.id] = buffer;
+  }
+  return buffers;
+};
+
+const stopProgressive = (deckId: DeckId): void => {
+  const state = progressive[deckId];
+  if (state?.timer) clearInterval(state.timer);
+  delete progressive[deckId];
+};
+
+const focusFrameFor = (deck: Deck, sampleRate: number): number => {
+  const seconds = deck.playing || deck.currentTime > 0 ? deck.currentTime : deck.cuePoint;
+  return Math.max(0, Math.round((Number.isFinite(seconds) ? seconds : 0) * sampleRate));
+};
+
+desktop?.separation?.onRegion?.((payload) => {
+  const region = payload as SeparationRegion;
+  const deckId = region.deck as DeckId;
+  const state = progressive[deckId];
+  const deck = decks[deckId];
+  if (!state || !deck || state.hash !== region.hash || deck.audioHash !== region.hash) return;
+  state.chain = state.chain.then(async () => {
+    if (progressive[deckId] !== state) return;
+    if (!state.started) {
+      await deck.loadStems(placeholderStems(deck, state.mix), { live: true });
+      state.started = true;
+    }
+    deck.patchStems(region.start, region.parts);
+    state.done = region.chunksDone;
+    state.total = region.chunksTotal;
+    setPartsState(deckId, `parts ${Math.round((region.chunksDone / region.chunksTotal) * 100)}% - live where ready${state.provider ? ` (${state.provider})` : ""}`);
+  }).catch(() => undefined);
+});
 
 const refreshParts = async (deckId: DeckId): Promise<void> => {
   const refs = ui[deckId] as any;
@@ -1389,6 +1480,13 @@ const refreshParts = async (deckId: DeckId): Promise<void> => {
   if (!refs) return;
   resetPartCards(deckId);
   const api = desktop?.separation;
+  // A different track on this deck: stop separating the old one (the worker
+  // drops it at the next chunk unless another deck still wants it).
+  const running = progressive[deckId];
+  if (running && running.hash !== deck.audioHash) {
+    stopProgressive(deckId);
+    void api?.cancel?.(deckId);
+  }
   if (!api) {
     setPartsState(deckId, "parts need the desktop app");
     refs.separateBtn.disabled = true;
@@ -1438,23 +1536,58 @@ const separateDeck = async (deckId: DeckId): Promise<void> => {
       refs.installModel.classList.add("hidden");
       toast("Stem model installed.");
     }
-    const left = deck.audioBuffer.getChannelData(0).slice();
-    const right = deck.audioBuffer.numberOfChannels > 1 ? deck.audioBuffer.getChannelData(1).slice() : left.slice();
+    const mix = deck.audioBuffer;
+    if (!mix || deck.audioHash !== startHash) return;
+    // IPC copies the channels itself; no extra slice() here.
+    const left = mix.getChannelData(0);
+    const right = mix.numberOfChannels > 1 ? mix.getChannelData(1) : left;
+    stopProgressive(deckId);
+    const state: ProgressiveStems = {
+      hash: startHash,
+      mix,
+      started: false,
+      chain: Promise.resolve(),
+      done: 0,
+      total: 0,
+      provider: "",
+      lastFocus: focusFrameFor(deck, mix.sampleRate),
+      timer: null,
+    };
+    progressive[deckId] = state;
+    // Follow the playhead: if the DJ jumps, separate from there next.
+    state.timer = setInterval(() => {
+      if (progressive[deckId] !== state || !api.focus) return;
+      const frame = focusFrameFor(deck, mix.sampleRate);
+      if (Math.abs(frame - state.lastFocus) > mix.sampleRate * 4) {
+        state.lastFocus = frame;
+        void api.focus(deckId, startHash, frame);
+      }
+    }, 1000);
     setPartsState(deckId, "separating parts...");
     const manifest = await api.run({
-      hash: deck.audioHash,
-      sampleRate: deck.audioBuffer.sampleRate,
+      hash: startHash,
+      sampleRate: mix.sampleRate,
       left,
       right,
       trackPath: trackPathFor(track),
+      deck: deckId,
+      focusFrame: state.lastFocus,
     });
-    if (deck.audioHash !== manifest.hash) return;
-    await loadStemManifest(deckId, manifest);
+    if (manifest.cancelled || deck.audioHash !== manifest.hash) return;
+    await state.chain;
+    if (state.started && deck.hasStems) {
+      // Every region is already in the deck: no need to read the cache back.
+      deck.finishStems();
+      setPartsState(deckId, `4 parts ready${manifest.provider ? ` (${manifest.provider})` : ""}`);
+    } else {
+      await loadStemManifest(deckId, manifest);
+    }
     toast("Parts separated.");
   } catch (error) {
     toast(`Could not separate parts: ${(error as Error).message}`);
     setPartsState(deckId, "separation failed");
   } finally {
+    if (progressive[deckId]?.hash === startHash) stopProgressive(deckId);
     separating[deckId] = false;
     refs.separateBtn.disabled = false;
   }
@@ -1487,6 +1620,11 @@ desktop?.separation?.onProgress((payload) => {
   const progress = payload as SeparationProgress;
   for (const deckId of ALL_DECKS) {
     if (!separating[deckId]) continue;
+    if (progress.deck && progress.deck !== deckId) continue;
+    const state = progressive[deckId];
+    if (state && progress.provider) state.provider = progress.provider;
+    // Once parts are playing, the region handler owns the status line.
+    if (state?.started && progress.stage === "separate") continue;
     const hashMatches = !progress.hash || decks[deckId].audioHash === progress.hash;
     if (!hashMatches) continue;
     setPartsState(deckId, `${progress.stage} ${progress.percent}% - ${progress.detail}`);
@@ -1495,7 +1633,55 @@ desktop?.separation?.onProgress((payload) => {
 
 /* -------------------------------------------------------------- loading */
 
+const mediaCues = new Map<string, LoadedCue[]>();
+
+async function ensureMediaFile(track: Track, deckId: DeckId): Promise<boolean> {
+  if (!track.media || track.file) return true;
+  const api = desktop?.djmedia;
+  if (!api) return false;
+  const refs = ui[deckId];
+  if (refs) {
+    refs.title.textContent = track.name;
+    refs.sub.textContent = track.media.origin === "cdj" ? "fetching from CDJ…" : "reading from USB drive…";
+  }
+  const result = await api.loadTrack(track.media.sourceId, track.media.trackId);
+  if (!result.ok || !result.bytes) {
+    toast(`Could not load ${track.name}: ${result.error ?? "no data"}`);
+    if (refs) refs.sub.textContent = result.error ?? "load failed";
+    return false;
+  }
+  const name = result.name || `${track.name}.mp3`;
+  track.file = new File([result.bytes as BlobPart], name, { type: mimeFor(name) });
+  if (result.cues?.length) mediaCues.set(track.id, result.cues);
+  return true;
+}
+
+function mimeFor(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return (
+    { mp3: "audio/mpeg", wav: "audio/wav", aif: "audio/aiff", aiff: "audio/aiff", flac: "audio/flac", m4a: "audio/mp4", aac: "audio/aac" } as Record<string, string>
+  )[ext] ?? "application/octet-stream";
+}
+
+function applyMediaCues(track: Track, deckId: DeckId): boolean {
+  const cues = mediaCues.get(track.id);
+  if (!cues?.length || meta[deckId] !== track) return false;
+  const deck = decks[deckId];
+  let any = false;
+  for (const cue of cues) {
+    if (cue.index < 0 || cue.index >= 8) continue;
+    deck.hotCues[cue.index] = { time: cue.timeMs / 1000, color: cue.color ?? HOT_CUE_COLORS[cue.index % HOT_CUE_COLORS.length], name: cue.name };
+    any = true;
+  }
+  if (any) {
+    updatePads(deckId, true);
+    persistCues(deckId);
+  }
+  return any;
+}
+
 async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
+  if (!(await ensureMediaFile(track, deckId))) return;
   const source = track.file ?? track.url;
   if (!source) {
     toast("This crate entry has no linked file yet.");
@@ -1536,9 +1722,9 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   syncLoopButtons(deckId);
   const hadLocalCues = loadCues(deckId, track.id);
   loadLoops(deckId, track.id);
-  if (!hadLocalCues) void applySeratoCues(track, deckId);
+  if (!hadLocalCues && !applyMediaCues(track, deckId)) void applySeratoCues(track, deckId);
   if (track.analyzed) applyTrackToDeck(track, deckId);
-  else enqueueAnalysis(track);
+  else enqueueAnalysis(track, "deck");
   if (track.file && isVideoFile(track.file)) {
     loadVideoOntoDeck(deckId, track.file);
   }
@@ -2264,7 +2450,13 @@ function refreshPlaylistOptions(): void {
     opt.textContent = `Smart · ${lp.name}`;
     select.append(opt);
   }
-  select.value = current || "all";
+  for (const crate of library.crates()) {
+    const opt = document.createElement("option");
+    opt.value = `crate:${crate}`;
+    opt.textContent = `Crate · ${crate}`;
+    select.append(opt);
+  }
+  select.value = [...select.options].some((o) => o.value === current) ? current : "all";
 }
 
 refreshPlaylistOptions();
@@ -2350,6 +2542,194 @@ async function importCrate(name: string, bytes: Uint8Array): Promise<void> {
       (library.missingCount ? " Link the music folder to load them." : ""),
     library.missingCount > 0,
   );
+}
+
+
+/* ------------------------------------------- detected media (CDJ / USB) */
+
+const mediaApi = desktop?.djmedia;
+const mediaSources = new Map<string, CdjMediaLibrary>();
+let mediaSnapshot: ProlinkSnapshot | null = null;
+const mediaPrompts = new Map<string, MediaPrompt>();
+
+function addMediaLibrary(lib: CdjMediaLibrary): void {
+  mediaSources.set(lib.sourceId, lib);
+  const tracks = library.addMediaSource(lib.sourceId, tracksFromMedia(lib));
+  refreshPlaylistOptions();
+  const crates = mediaCrates(lib).length - 1;
+  toast(`Added ${lib.sourceName}: ${tracks.length} track${tracks.length === 1 ? "" : "s"}${crates ? `, ${crates} playlist${crates === 1 ? "" : "s"}` : ""}`);
+  renderMediaStatus();
+}
+
+function removeMediaLibrary(sourceId: string): void {
+  const lib = mediaSources.get(sourceId);
+  mediaSources.delete(sourceId);
+  const removed = library.removeMediaSource(sourceId);
+  for (const id of [...mediaCues.keys()]) if (id.startsWith(`media:${sourceId}:`)) mediaCues.delete(id);
+  refreshPlaylistOptions();
+  if (lib) toast(`${lib.sourceName} disconnected (${removed} track${removed === 1 ? "" : "s"} removed)`);
+  renderMediaStatus();
+}
+
+function renderMediaPrompts(): void {
+  const host = document.getElementById("mediaPrompts");
+  if (!host) return;
+  host.replaceChildren();
+  host.classList.toggle("hidden", mediaPrompts.size === 0);
+  for (const prompt of mediaPrompts.values()) {
+    const view = promptView(prompt);
+    const row = document.createElement("div");
+    row.className = "media-prompt";
+    row.dataset.sourceId = prompt.sourceId;
+    const text = document.createElement("span");
+    text.className = "media-prompt-text";
+    text.textContent = view.text;
+    const always = document.createElement("label");
+    always.className = "media-prompt-always micro";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    always.append(check, document.createTextNode(` ${view.rememberLabel}`));
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "pill-btn media-prompt-add";
+    add.textContent = view.addLabel;
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "ghost media-prompt-dismiss";
+    dismiss.textContent = view.dismissLabel;
+    const answer = async (action: "add" | "ignore"): Promise<void> => {
+      add.disabled = true;
+      dismiss.disabled = true;
+      mediaPrompts.delete(prompt.sourceId);
+      renderMediaPrompts();
+      const result = await mediaApi?.respond(prompt.sourceId, action, check.checked);
+      if (result && !result.ok && result.error) toast(result.error);
+    };
+    add.addEventListener("click", () => void answer("add"));
+    dismiss.addEventListener("click", () => void answer("ignore"));
+    row.append(text, always, add, dismiss);
+    host.append(row);
+  }
+}
+
+function renderMediaStatus(): void {
+  const chip = document.getElementById("cdjStatus");
+  if (!chip) return;
+  const snap = mediaSnapshot;
+  if (!snap) {
+    chip.classList.add("hidden");
+    return;
+  }
+  chip.classList.remove("hidden");
+  const players = snap.players.filter((p) => p.kind === "player");
+  const ready = snap.media.filter((m) => m.state === "ready");
+  const parts: string[] = [];
+  if (snap.enabled) parts.push(snap.running ? `${players.length} CDJ${players.length === 1 ? "" : "s"}` : "DJ Link off");
+  if (ready.length) parts.push(`${ready.length} drive${ready.length === 1 ? "" : "s"}`);
+  chip.textContent = parts.length ? `Link: ${parts.join(" · ")}` : "Link";
+  chip.classList.toggle("live", players.length > 0 || ready.length > 0);
+  chip.title = snap.error ?? (snap.address ? `Pro DJ Link on ${snap.interfaceName} (${snap.address}) as player ${snap.deviceNumber ?? "-"}` : "Pro DJ Link: waiting for players");
+  const panel = document.getElementById("cdjPanel");
+  if (!panel || panel.classList.contains("hidden")) return;
+  const enabled = panel.querySelector<HTMLInputElement>("#cdjEnabled");
+  const localDrives = panel.querySelector<HTMLInputElement>("#cdjLocalDrives");
+  const iface = panel.querySelector<HTMLSelectElement>("#cdjInterface");
+  if (enabled) enabled.checked = snap.settings.enabled;
+  if (localDrives) localDrives.checked = snap.settings.localDrives;
+  if (iface) {
+    iface.replaceChildren();
+    const auto = document.createElement("option");
+    auto.value = "auto";
+    auto.textContent = "Automatic (follow the CDJs)";
+    iface.append(auto);
+    for (const i of snap.interfaces) {
+      const opt = document.createElement("option");
+      opt.value = i.name;
+      opt.textContent = `${i.name} · ${i.address}`;
+      iface.append(opt);
+    }
+    iface.value = snap.settings.interface;
+  }
+  const list = panel.querySelector("#cdjList");
+  if (list) {
+    list.replaceChildren();
+    const line = (text: string, cls = ""): void => {
+      const el = document.createElement("div");
+      el.className = `cdj-line ${cls}`.trim();
+      el.textContent = text;
+      list.append(el);
+    };
+    if (snap.error) line(snap.error, "warn");
+    else if (snap.enabled) line(snap.address ? `Linked on ${snap.interfaceName} (${snap.address}) as player ${snap.deviceNumber ?? "-"}` : "Waiting for CDJs on the network…");
+    for (const p of snap.players) line(`${p.kind === "mixer" ? "Mixer" : p.kind === "player" ? "CDJ" : "Device"} ${p.deviceNumber} · ${p.name} · ${p.ip}${p.kind === "player" ? ` · USB ${p.usb} · SD ${p.sd}` : ""}`);
+    for (const m of snap.media) {
+      const name = m.sourceName || (m.origin === "cdj" ? `CDJ ${m.deviceNumber} · ${m.slot.toUpperCase()}` : "USB drive");
+      const state = m.state === "ready" ? `${m.trackCount} tracks` : m.state === "error" ? `error: ${m.error ?? ""}` : m.state;
+      line(`${name} — ${state}`, m.state === "error" ? "warn" : "");
+    }
+    const remembered = Object.keys(snap.settings.remembered).length;
+    const forget = panel.querySelector<HTMLButtonElement>("#cdjForget");
+    if (forget) {
+      forget.disabled = remembered === 0;
+      forget.textContent = remembered ? `Forget ${remembered} remembered drive${remembered === 1 ? "" : "s"}` : "No remembered drives";
+    }
+  }
+}
+
+function applyMediaStatus(snap: ProlinkSnapshot): void {
+  mediaSnapshot = snap;
+  const live = new Set(snap.prompts.map((p) => p.sourceId));
+  for (const id of [...mediaPrompts.keys()]) if (!live.has(id)) mediaPrompts.delete(id);
+  for (const p of snap.prompts) mediaPrompts.set(p.sourceId, p);
+  renderMediaPrompts();
+  renderMediaStatus();
+}
+
+if (mediaApi) {
+  mediaApi.onStatus((payload) => applyMediaStatus(payload as ProlinkSnapshot));
+  mediaApi.onPrompt((payload) => {
+    const prompt = payload as MediaPrompt;
+    mediaPrompts.set(prompt.sourceId, prompt);
+    renderMediaPrompts();
+  });
+  mediaApi.onPromptCleared((payload) => {
+    mediaPrompts.delete(String(payload));
+    renderMediaPrompts();
+  });
+  mediaApi.onLibrary((payload) => addMediaLibrary(payload as CdjMediaLibrary));
+  mediaApi.onRemoved((payload) => removeMediaLibrary(String(payload)));
+  mediaApi.onProgress((payload) => {
+    const p = payload as CdjFetchProgress;
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+    for (const deckId of ALL_DECKS) {
+      const refs = ui[deckId];
+      const pending = refs && refs.sub.textContent?.startsWith("fetching from CDJ");
+      if (pending) refs.sub.textContent = `fetching from CDJ… ${pct}%`;
+    }
+  });
+  mediaApi
+    .state()
+    .then(({ snapshot, libraries }) => {
+      for (const lib of libraries) if (!mediaSources.has(lib.sourceId)) addMediaLibrary(lib);
+      applyMediaStatus(snapshot);
+    })
+    .catch(() => undefined);
+  document.getElementById("cdjStatus")?.addEventListener("click", () => {
+    const panel = document.getElementById("cdjPanel");
+    panel?.classList.toggle("hidden");
+    renderMediaStatus();
+  });
+  const update = async (patch: Partial<ProlinkSettings>): Promise<void> => {
+    try {
+      applyMediaStatus(await mediaApi.settings(patch));
+    } catch (error) {
+      toast(`Could not change Link settings: ${(error as Error).message}`);
+    }
+  };
+  document.getElementById("cdjEnabled")?.addEventListener("change", (e) => void update({ enabled: (e.target as HTMLInputElement).checked }));
+  document.getElementById("cdjLocalDrives")?.addEventListener("change", (e) => void update({ localDrives: (e.target as HTMLInputElement).checked }));
+  document.getElementById("cdjInterface")?.addEventListener("change", (e) => void update({ interface: (e.target as HTMLSelectElement).value }));
+  document.getElementById("cdjForget")?.addEventListener("click", async () => applyMediaStatus(await mediaApi.forget()));
 }
 
 $("crateBtn").addEventListener("click", () => $<HTMLInputElement>("crateInput").click());

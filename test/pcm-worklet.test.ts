@@ -103,3 +103,22 @@ test("pcm worklet seeks and pauses with position updates", () => {
   const [silence] = render(processor, 2);
   assert.deepEqual(Array.from(silence), [0, 0]);
 });
+
+test("pcm worklet patches a region in place while playing (progressive stems)", () => {
+  const Processor = loadProcessor();
+  const processor = new Processor();
+  const left = new Float32Array(1024).fill(0.25);
+  const right = new Float32Array(1024).fill(0.25);
+  send(processor, { type: "buffer", left, right, position: 0 });
+  send(processor, { type: "play", position: 0 });
+  const [before] = render(processor, 128);
+  assert.equal(before[127], 0.25);
+  send(processor, { type: "patch", start: 128, left: new Float32Array(256).fill(1), right: new Float32Array(256).fill(-1) });
+  const [l, r] = render(processor, 128);
+  assert.equal(l[0], 1, "patched region plays at once, no reload");
+  assert.equal(r[0], -1);
+  // A patch that runs past the end is clipped, not thrown.
+  send(processor, { type: "patch", start: 1000, left: new Float32Array(100).fill(0.5), right: new Float32Array(100).fill(0.5) });
+  const [after] = render(processor, 128);
+  assert.equal(after[0], 1, "position kept");
+});

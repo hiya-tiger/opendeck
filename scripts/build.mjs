@@ -18,6 +18,18 @@ await build({
   external: ["electron", "onnxruntime-node"],
 });
 
+// Stem separation worker (Electron utilityProcess / worker_thread).
+await build({
+  entryPoints: [`${root}src/main/stems/worker.ts`],
+  outfile: `${out}/separation-worker.cjs`,
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node20",
+  external: ["electron", "onnxruntime-node"],
+  logOverride: { "empty-import-meta": "silent" },
+});
+
 await build({
   entryPoints: [`${root}src/preload/preload.ts`],
   outfile: `${out}/preload.cjs`,
@@ -57,7 +69,7 @@ await build({
 });
 
 console.log(
-  "built dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js",
+  "built dist/main.cjs, dist/separation-worker.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js",
 );
 
 

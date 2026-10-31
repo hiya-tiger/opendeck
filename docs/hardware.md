@@ -313,3 +313,31 @@ OpenDecks includes built-in presets and USB MIDI / USB Audio auto-detection for 
 | Reloop NEON | Reloop | 2 | — |
 | Akai Pro AFX | Akai Pro | 2 | — |
 | Denon DJ DN-HC1000S | Denon DJ | 2 | — |
+
+## CDJs over Pro DJ Link, and USB drives on this computer
+
+OpenDecks can add the music on a USB stick or SD card to its library from two places:
+
+1. **A CDJ / XDJ on the network.** Plug the stick into the player; OpenDecks reads it over the player's built-in file server.
+2. **This computer.** Plug the stick straight into the laptop (Windows, macOS or Linux).
+
+Either way, nothing is imported silently. A banner appears — for example *"USB drive 'NAME' found on CDJ 2 (412 tracks). Add it to your library?"* — with **Add**, **Not now** and **Always do this for this drive**. Ticking *Always* remembers that answer for that drive (by name, creation date and size for CDJ media; by disk serial, or label and size, for a local drive). Remembered choices can be cleared from the **Link** chip in the top bar.
+
+After **Add**, the drive becomes a crate (`CDJ 2 · USB · NAME`, or `USB · LABEL` for a local drive) and each rekordbox playlist becomes a sub-crate (`CDJ 2 · USB · NAME / Folder / Playlist`). Pick them from the playlist/crate selector above the track list. Sticks exported by rekordbox (`PIONEER/rekordbox/export.pdb`) bring title, artist, album, genre, BPM, key, length, rating, colour and playlists; hot cues come from the rekordbox analysis (ANLZ) files when a track is loaded. A stick without a rekordbox export is scanned for MP3, WAV, AIFF, FLAC and M4A/AAC files, and titles come from the filenames (`Artist - Title.mp3`); top-level folders become sub-crates.
+
+When a CDJ track is loaded onto a deck it is copied over the network into a cache (`<userData>/cdj-cache`, oldest files pruned past 4 GB) with progress shown under the deck title, then played like any local file. Tracks on a drive plugged into this computer play directly from the drive. Ejecting the stick (or the player leaving the network) removes that crate; a track already on a deck keeps playing.
+
+### Setup for CDJs
+
+- Connect the CDJs and the computer to the **same switch or router** (or the mixer's LAN ports). CDJs often use self-assigned `169.254.x.x` addresses; give the laptop's Ethernet port a matching address or let it self-assign too.
+- **Link Export / rekordbox is not required.** OpenDecks announces itself as a virtual player (number 1-4 when one is free, otherwise 5 or higher) so the players send it their status. If a real player claims that number, OpenDecks moves to another.
+- Allow the app through the firewall for **UDP 50000-50002** (inbound and outbound) and for **UDP replies from the players' NFS/portmapper services** (port 111 and the ports it hands out). On Windows accept the "allow on private networks" prompt the first time.
+- If the laptop has several networks (Wi-Fi plus Ethernet), OpenDecks follows the first DJ Link traffic it sees. To pin it, open the **Link** chip and choose the interface. The same panel turns Pro DJ Link and local-drive watching on or off (both default on).
+- rekordbox running on the same computer also uses ports 50000-50002; quit it if OpenDecks reports the ports are busy.
+
+### Limitations
+
+- **Untested on physical Pioneer / AlphaTheta hardware.** The protocol code was written from public protocol descriptions and verified against in-process fakes (a fake player, a fake NFS/MOUNT/portmap server and synthetic `export.pdb` / ANLZ files), not against real players.
+- Device Library Plus / OneLibrary-only sticks (no `export.pdb`) fall back to the plain file scan.
+- Album art, waveforms, beat grids, memory points and loops from rekordbox are not imported; hot cues 1-8 are.
+- All-in-one units (XDJ-XZ, XDJ-RX, Opus Quad) are expected to work for media they expose, but their media-slot quirks are untested.
