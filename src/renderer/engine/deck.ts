@@ -214,7 +214,6 @@ export class Deck {
     this.pcm = new PcmSource(ctx, this.deckInput, {
       onEnded: () => this.handleEnded(),
     });
-    this.pcm.prewarm();
     this.splitter = ctx.createChannelSplitter(2);
 
     this.stemBus = ctx.createGain();
@@ -565,6 +564,9 @@ export class Deck {
       this.pcmBuffer = buffer;
       this.scratch.setBuffer(buffer);
       await this.pcm.load(buffer, 0);
+      // Build the key-lock engine in the background so the first tempo move
+      // does not wait on a cold Signalsmith start. Playback does not need it.
+      this.pcm.prewarm();
       this.pcmActive = true;
       this.el.removeAttribute("src");
       this.el.load();
@@ -1169,6 +1171,9 @@ export class Deck {
     if (this.pcmActive) {
       if (this.currentTime >= this.duration - 0.05) this.seek(0);
       await this.pcm.play();
+      // The PCM path fires no media-element "play" event, so nothing woke the
+      // UI loop and the waveform stood still until a scratch emitted.
+      this.emit();
       return;
     }
     try {
@@ -1186,6 +1191,7 @@ export class Deck {
       this.partScratches[this.partScratchId]?.stop();
       this.partScratchId = null;
     }
+    this.emit();
   }
 
   toggle(): void {
@@ -1614,6 +1620,13 @@ export class Deck {
   private applyFxParams(): void {
     const chain = this.fxChain;
     const type = chain.type;
+    if (type === "off") {
+      // "off" is input -> dry/wet -> output with no effect between, so any wet
+      // gain is a second copy of the dry signal (up to +4 dB into the limiter).
+      chain.wet.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
+      chain.dry.gain.setTargetAtTime(1, this.ctx.currentTime, 0.02);
+      return;
+    }
     chain.wet.gain.setTargetAtTime(this.fxWet, this.ctx.currentTime, 0.02);
     if (type === "filter" || type === "crush" || type === "tape-stop" || type === "brake") {
       chain.dry.gain.setTargetAtTime(type === "crush" ? 0.25 : 0, this.ctx.currentTime, 0.02);

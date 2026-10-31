@@ -211,9 +211,19 @@ fully buffered, so they stay on the element.
 
 ## D18: Report engine latency, not device latency
 
-**Decision:** Configure Signalsmith with `blockMs: 8`. The diagnostics panel
-reports the engine's measured `latency` (about 8 ms). It does not add
-`AudioContext.baseLatency` or output-device latency.
+**Decision (revised 2026-10-31):** Configure Signalsmith with `blockMs: 120`,
+`intervalMs: 30`, and only route audio through it when pitch has to be held
+(key lock at a non-unity rate, or a key shift). At 1.0x, or with key lock off,
+`PcmSource` plays through the direct interpolating worklet, which is
+bit-transparent at unity. The diagnostics panel reports the active engine's
+latency: one render quantum (about 3 ms) direct, about 120 ms with Signalsmith.
+It does not add `AudioContext.baseLatency` or output-device latency.
+
+**Why the revision:** `blockMs: 8` measured THD+N of +4.3 dB (55/110 Hz pair)
+and +9.7 dB (80/440/2500 Hz mix), so the artefacts were louder than the music,
+against -59/-57 dB direct. At 120 ms it measures -41/-54 dB. `intervalMs: 2`
+also ran an FFT every 2 ms on every node, including idle decks. The audio smoke
+test now fails if direct THD+N rises above -50 dB or stretched above -40 dB.
 
 **Why:** The target is a controllable, measurable engine figure. Mixing device
 latency into it would vary by machine and driver and make regressions hard to
