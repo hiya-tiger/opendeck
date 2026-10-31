@@ -16,7 +16,7 @@
     "package:win": "node scripts/package-win.mjs"
   },
   "devDependencies": {
-    "electron": "44.8.0",
+    "electron": "44.9.1",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
   },
