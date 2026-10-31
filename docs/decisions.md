@@ -453,3 +453,21 @@ revisit-if shape as D1-D32.
 
 D34 does **not** amend D11: no GPL code was linked, and the shipped Link
 implementation speaks its own protocol (`opendeck-link/1`), not Ableton's.
+
+---
+
+## D39: CDJ (Pro DJ Link) and USB drive import, clean-room, prompt before import (2026-10-31)
+
+- **Context:** A DJ should be able to plug a USB stick into a CDJ networked to the laptop, or into the laptop itself, and play its music in OpenDecks. The project already carries a GPL contamination problem (xwax), so no code from existing Pro DJ Link implementations may be used: beat-link and crate-digger (EPL), prolink-connect, python-prodj-link and the Rust `prolink` crates (GPL or otherwise incompatible) were **not** opened, read or copied. One web search during the work returned short excerpts from the Rust `prolink` crate's docs.rs pages (GPL-3.0) among its results; none of that was used, and every layout here was taken from the Deep Symmetry prose/diagrams and the RFCs (e.g. the `/B/`=SD, `/C/`=USB mapping is stated in exports.html).
+- **Decision:** `src/main/prolink/` implements, from protocol *descriptions* only:
+  - `packets.ts` / `devices.ts` / `network.ts`: keep-alive discovery on UDP 50000, a virtual player (CDJ-3000-compatible keep-alive), CDJ status on 50002 with USB (byte `6f`) / SD (byte `73`) mount transitions, media query/response, channel-conflict handling, 5 s device timeout. Sockets bind `0.0.0.0` (Windows needs it for broadcast) but accept only the chosen interface's subnet, and keep-alives go to that interface's directed broadcast address.
+  - `xdr.ts` / `rpc.ts` / `nfs.ts`: ONC RPC v2 over UDP (RFC 1057) with AUTH_UNIX, portmapper GETPORT, MOUNT v1 MNT, NFSv2 GETATTR/LOOKUP/READ/READDIR (RFC 1094); 8 KB reads with a 4-deep window, short-read handling, retransmission with back-off. File names and the mount path are sent UTF-16LE (Pioneer's server), falling back to ASCII if the mount is refused.
+  - Export paths: **`/C/` is the USB slot and `/B/` is the SD slot**, per the rekordbox export analysis. (The original task note said the reverse; the description was followed.)
+  - `pdb.ts` / `anlz.ts`: `export.pdb` pages, row groups, presence bits, DeviceSQL strings; tracks, artists, albums, genres, labels, keys, colours, artwork, playlist tree and entries. ANLZ `PCO2` (preferred) / `PCOB` hot cues.
+  - `volumes.ts`: local removable drives (Windows drive-letter poll + PowerShell/wmic classification, macOS `/Volumes` + diskutil, Linux `/media/$USER`, `/run/media/$USER`, `/media`).
+  - `importer.ts` / `manager.ts` / `prompt.ts`: one pipeline for both origins (NFS reader or local reader), probe → **prompt** → import → load → remove. Nothing is imported until the user clicks Add, or a remembered "Always do this for this drive" choice (stored per mediaKey in `<userData>/prolink.json`) says so.
+  - IPC (`djmedia:*`) serves track bytes only by (sourceId, trackId) from an imported library; the renderer never names a path, and local paths are confined to the drive root.
+- **Why:** NFS reads of `export.pdb` work with four real players present (dbserver queries do not), and reading the file directly keeps the client small and dependency-free (Node `dgram` only). Copying CDJ tracks into a cache and then loading a normal `File` reuses the existing decode/analysis/cue path unchanged.
+- **Rejected:** dbserver (TCP 12523) metadata queries — need a real player number and do not scale to four players; streaming playback straight from NFS — a network hiccup would become an audio dropout; automatic import — the user asked to be asked first.
+- **Unverified:** every byte layout is from the documentation and checked only against fakes built from the same documentation. Specific uncertainties: the track-row `file_type` offset (the prose says `60-61`, the diagram puts it at `5a`; `5a` is used), the 3-byte row-count packing (low 13 bits = offsets), whether Pioneer's MOUNT accepts AUTH_UNIX with an empty machine name, and the PCO2 colour offset (the prose says `len_comment + 1c`, the diagram implies `2c + len_comment`; the latter is used).
+- **Revisit if:** first contact with real hardware disagrees with any of the above; OneLibrary-only sticks become common (add an `exportLibrary.db` reader); waveform or beat-grid import is wanted.

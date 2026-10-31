@@ -85,3 +85,23 @@ documented from publicly available community reverse-engineering notes
 [rb2serato](https://github.com/SM4RTENHEIMER/rb2serato), all MIT-licensed
 documentation/projects). No source code from those projects is vendored into
 OpenDeck; see `docs/interop.md` for the specific claims and links.
+
+### Pro DJ Link, rekordbox export and NFS (references only)
+
+The CDJ / USB-drive import in `src/main/prolink/` is an original, clean-room
+implementation written from protocol and file-format descriptions. No source
+code from any other implementation was read, copied, ported or linked; in
+particular nothing from Beat Link, Crate Digger (EPL), prolink-connect,
+python-prodj-link or the Rust `prolink` crates (GPL). References used:
+
+- Deep Symmetry, "DJ Link Ecosystem Analysis" (prose and packet diagrams:
+  startup, detailed device status, media slot queries) —
+  https://djl-analysis.deepsymmetry.org/djl-analysis/
+- Deep Symmetry, "Rekordbox Export Structure Analysis" (export.pdb and ANLZ
+  file descriptions) — https://djl-analysis.deepsymmetry.org/rekordbox-export-analysis/
+- RFC 1057 (ONC RPC v2), RFC 1014 (XDR), RFC 1094 (NFS v2 and MOUNT v1).
+
+Pioneer DJ, AlphaTheta, rekordbox, CDJ and Pro DJ Link are trademarks of their
+owners, used only to describe compatibility. No endorsement or affiliation is
+implied.
+
