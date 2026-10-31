@@ -3,6 +3,7 @@ import { Deck, HOT_CUE_COLORS, type DeckState, type DeckId } from "./engine/deck
 import { analyzeBuffer, formatTime, formatClock, type AnalysisResult } from "./engine/analyze.ts";
 import { beatSeconds, formatBeatPosition, LOOP_BEATS, beatGridToMarkers, markersToBeatGrid } from "./engine/beatgrid.ts";
 import { syncDeck } from "./engine/sync.ts";
+import { TempoAuthority, type LinkTempoStatus } from "./engine/tempo-authority.ts";
 import { FX_DEFS, DIVISIONS, fxDefault, type Division, type FxType } from "./engine/fx.ts";
 import { STEMS, type StemId } from "./engine/stems.ts";
 import { PARTS, STEM_MODEL, type PartId } from "./engine/parts.ts";
@@ -117,6 +118,19 @@ interface SeratoWriteResult {
   detail: string;
 }
 
+interface LinkStatusPayload {
+  enabled: boolean;
+  peerCount: number;
+  sessionBpm: number;
+  localBpm: number;
+  beat: number;
+  phase: number;
+  quantum: number;
+  status: string;
+  protocol: string;
+  error: string | null;
+}
+
 interface DesktopApi {
   platform: string;
   analysis?: {
@@ -167,6 +181,12 @@ interface DesktopApi {
     syncOutput: (state: unknown) => Promise<{ ok: boolean }>;
     onOutputState: (handler: (payload: unknown) => void) => () => void;
     onOutputClosed: (handler: (payload: unknown) => void) => () => void;
+  };
+  link?: {
+    status: () => Promise<LinkStatusPayload>;
+    enable: () => Promise<LinkStatusPayload>;
+    disable: () => Promise<LinkStatusPayload>;
+    setLocalTempo: (bpm: number) => Promise<LinkStatusPayload>;
   };
   serato?: {
     running: () => Promise<boolean>;
@@ -259,6 +279,12 @@ const analysisRequests = new Map<
   { resolve: (result: AnalysisResult) => void; reject: (error: Error) => void }
 >();
 const desktop = window.opendeckDesktop;
+
+// D35: the single owner of session BPM/beat/phase. Link is an input to it, never
+// a second authority, and this object holds no transport handle at all.
+const tempoAuthority = new TempoAuthority({
+  onPushLink: (bpm) => void desktop?.link?.setLocalTempo(bpm),
+});
 
 function workerAnalysis(buffer: AudioBuffer): Promise<AnalysisResult> {
   if (!analysisWorker) {
@@ -2414,7 +2440,7 @@ async function backupSeratoFolder(serato: FileSystemDirectoryHandle): Promise<st
     // no existing database
   }
   if (!existing) return null;
-  const name = `OpenDeck Backup ${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const name = `OpenDecks Backup ${new Date().toISOString().replace(/[:.]/g, "-")}`;
   const backup = await serato.getDirectoryHandle(name, { create: true });
   let copied = 0;
   for (const file of ["database V2", "neworder.pref"]) {
@@ -2639,7 +2665,7 @@ $("undoTagsBtn").addEventListener("click", async () => {
     setNote("Undo is available in the Electron desktop app.", true);
     return;
   }
-  if (!confirm("Restore the files changed by the last OpenDeck tag write?")) return;
+  if (!confirm("Restore the files changed by the last OpenDecks tag write?")) return;
   try {
     const result = await desktop.serato.undo();
     setNote(result.detail, !result.ok);
@@ -3084,7 +3110,7 @@ desktop?.rtmp.available().then((available) => {
   $("rtmpState").classList.toggle("live", available);
   $<HTMLButtonElement>("rtmpBtn").disabled = !available;
   if (!available) {
-    $("rtmpLog").textContent = "RTMP needs FFmpeg. Install it, add ffmpeg to PATH, then restart OpenDeck.";
+    $("rtmpLog").textContent = "RTMP needs FFmpeg. Install it, add ffmpeg to PATH, then restart OpenDecks.";
   }
 });
 
@@ -4048,6 +4074,25 @@ renderStreamHead();
 renderQueue();
 updateClock();
 window.setInterval(updateClock, 30_000);
+
+// Link status readout only — no controls. See docs/mobile/ADR-D35.md.
+if (desktop?.link) {
+  const linkApi = desktop.link;
+  const pollLink = async (): Promise<void> => {
+    try {
+      const status = await linkApi.status();
+      tempoAuthority.onLinkStatus(status as LinkTempoStatus);
+      const chip = $("linkStatus");
+      chip.textContent = status.status;
+      chip.title = `${status.protocol} · session tempo transport, not Ableton Link compatible`;
+      chip.classList.toggle("hidden", !status.enabled && !status.error);
+    } catch {
+      /* main process not reachable yet */
+    }
+  };
+  void pollLink();
+  window.setInterval(() => void pollLink(), 1_000);
+}
 requestFrame();
 
 if (desktop) {
@@ -4060,4 +4105,4 @@ if (desktop) {
   });
 }
 
-window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, drmManager, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream };
+window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, drmManager, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream, tempoAuthority };

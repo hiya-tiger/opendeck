@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenDeck",
+  "productName": "OpenDecks",
   "version": "0.1.6",
   "identifier": "io.opendeck.desktop",
   "build": {
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "OpenDeck",
+        "title": "OpenDecks",
         "width": 1500,
         "height": 980,
         "minWidth": 900,

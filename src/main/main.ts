@@ -13,6 +13,7 @@ import {
   type SeratoWriteRequest,
 } from "./serato-files.ts";
 import { MODEL, findCache, installModel, loadManifestAt, modelInfo, readCache, separateToCache, type SeparateRequest } from "./separation.ts";
+import { createLinkNode } from "./link.ts";
 
 const root = (): string => app.getAppPath();
 
@@ -62,7 +63,7 @@ const createWindow = (): void => {
     height: 940,
     minWidth: 1120,
     minHeight: 720,
-    title: "OpenDeck",
+    title: "OpenDecks",
     backgroundColor: "#f4f6fd",
     webPreferences: {
       preload: path.join(root(), "dist", "preload.cjs"),
@@ -107,7 +108,7 @@ const openProviderWindow = async (
   const window = new BrowserWindow({
     width: purpose === "login" ? 1120 : 900,
     height: 820,
-    title: purpose === "login" ? `Sign in to ${provider}` : "OpenDeck player",
+    title: purpose === "login" ? `Sign in to ${provider}` : "OpenDecks player",
     parent: mainWindow ?? undefined,
     autoHideMenuBar: true,
     webPreferences: {
@@ -441,7 +442,7 @@ ipcMain.handle("video:open-output", async (_event, opts?: { fullscreen?: boolean
       height: 720,
       minWidth: 640,
       minHeight: 360,
-      title: "OpenDeck · Video Output",
+      title: "OpenDecks · Video Output",
       backgroundColor: "#000000",
       autoHideMenuBar: true,
       fullscreen: Boolean(opts?.fullscreen),
@@ -501,6 +502,19 @@ ipcMain.handle("video:sync-output", (_event, state: unknown) => {
   return { ok: false };
 });
 
+// Session tempo transport (opendeck-link/1). Default-off: nothing is created
+// until the renderer asks. Not Ableton Link — see docs/mobile/ADR-D34.md.
+let linkNode: ReturnType<typeof createLinkNode> | null = null;
+const requireLinkNode = (): ReturnType<typeof createLinkNode> => {
+  if (!linkNode) linkNode = createLinkNode();
+  return linkNode;
+};
+
+ipcMain.handle("link:status", () => requireLinkNode().status());
+ipcMain.handle("link:enable", async () => requireLinkNode().enable());
+ipcMain.handle("link:disable", async () => requireLinkNode().disable());
+ipcMain.handle("link:set-tempo", (_event, bpm: number) => requireLinkNode().setLocalTempo(Number(bpm)));
+
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
@@ -538,4 +552,5 @@ app.on("window-all-closed", () => {
 
 app.on("will-quit", () => {
   rtmp?.kill();
+  void linkNode?.disable();
 });

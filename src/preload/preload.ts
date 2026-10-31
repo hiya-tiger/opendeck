@@ -62,6 +62,12 @@ const api = {
     onExit: (handler: (payload: unknown) => void) => on("rtmp:exit", handler),
   },
   video: videoApi,
+  link: {
+    status: () => ipcRenderer.invoke("link:status"),
+    enable: () => ipcRenderer.invoke("link:enable"),
+    disable: () => ipcRenderer.invoke("link:disable"),
+    setLocalTempo: (bpm: number) => ipcRenderer.invoke("link:set-tempo", bpm),
+  },
   videoOpenOutput: videoApi.openOutput,
   videoCloseOutput: videoApi.closeOutput,
   videoFullscreenOutput: videoApi.fullscreenOutput,

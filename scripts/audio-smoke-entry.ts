@@ -1,6 +1,8 @@
 import { Deck } from "../src/renderer/engine/deck.ts";
 import { PcmSource } from "../src/renderer/engine/pcm-source.ts";
 import { VideoMixer, computeAspectRect, shouldResyncVideoElement } from "../src/renderer/engine/video-mixer.ts";
+import { buildStemBands } from "../src/renderer/engine/stem-bands.ts";
+import { createFxShell } from "../src/renderer/engine/fx-shell.ts";
 
 interface SmokeResult {
   ok: boolean;
@@ -27,6 +29,11 @@ interface SmokeResult {
   stemPlaying: boolean;
   stemEngine: string;
   videoSyncChecked: boolean;
+  startupMs: number;
+  fxOffGainDb: number;
+  bandWorstDb: number;
+  baseLatency: number;
+  outputLatency: number;
   error?: string;
 }
 
@@ -80,6 +87,63 @@ async function rms(analyser: AnalyserNode): Promise<number> {
   return Math.sqrt(sum / data.length);
 }
 
+
+/** Magnitude of one sine at `hz` after passing it through `build`. */
+async function graphGain(
+  hz: number,
+  build: (ctx: OfflineAudioContext, source: AudioNode) => AudioNode,
+): Promise<number> {
+  const sr = 48000;
+  const ctx = new OfflineAudioContext(2, sr, sr);
+  const src = ctx.createBufferSource();
+  const buf = ctx.createBuffer(2, sr, sr);
+  for (let c = 0; c < 2; c += 1) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < d.length; i += 1) d[i] = Math.sin((2 * Math.PI * hz * i) / sr) * 0.25;
+  }
+  src.buffer = buf;
+  build(ctx, src).connect(ctx.destination);
+  src.start();
+  const rendered = await ctx.startRendering();
+  const data = rendered.getChannelData(0).subarray(Math.round(sr * 0.15));
+  const k = (2 * Math.PI * hz) / sr;
+  const coeff = 2 * Math.cos(k);
+  let s1 = 0;
+  let s2 = 0;
+  for (let i = 0; i < data.length; i += 1) {
+    const s0 = data[i] + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+  const mag = Math.sqrt(s1 * s1 + s2 * s2 - coeff * s1 * s2) / (data.length / 2);
+  return mag > 0 ? 20 * Math.log10(mag / 0.25) : -120;
+}
+
+/**
+ * The deck's fixed signal path must be transparent at unity. These two checks
+ * pin the defects that made the build sound malformed:
+ *  - the FX shell summed dry+wet at construction (+6.02 dB into the limiter)
+ *  - the parallel Butterworth band split notched -14.6/-9.8/-17.4 dB at the
+ *    three crossovers
+ */
+async function graphReport(): Promise<{ fxOffGainDb: number; bandWorstDb: number }> {
+  const fxOffGainDb = await graphGain(1000, (ctx, source) => {
+    const shell = createFxShell(ctx);
+    source.connect(shell.input);
+    return shell.output;
+  });
+  let bandWorstDb = 0;
+  for (const hz of [60, 120, 180, 300, 800, 1500, 5000, 8000, 12000]) {
+    const gain = await graphGain(hz, (ctx, source) => {
+      const bus = ctx.createGain();
+      buildStemBands(ctx, source, bus);
+      return bus;
+    });
+    if (Math.abs(gain) > Math.abs(bandWorstDb)) bandWorstDb = gain;
+  }
+  return { fxOffGainDb, bandWorstDb };
+}
+
 async function run(): Promise<SmokeResult> {
   const result: SmokeResult = {
     ok: false,
@@ -106,6 +170,11 @@ async function run(): Promise<SmokeResult> {
     stemPlaying: false,
     stemEngine: "media",
     videoSyncChecked: false,
+    startupMs: -1,
+    fxOffGainDb: 99,
+    bandWorstDb: 99,
+    baseLatency: -1,
+    outputLatency: -1,
   };
   const ctx = new AudioContext({ latencyHint: "interactive" });
   try {
@@ -121,8 +190,18 @@ async function run(): Promise<SmokeResult> {
     }
 
     await pcm.load(buffer);
+    const startupStart = performance.now();
     await pcm.play();
-    await wait(350);
+    // Poll for the first audible block instead of sleeping a fixed 350 ms: the
+    // PCM engine has to ingest the buffer before it can render, and a fixed
+    // sleep made this probe report a silent deck on slower runs. The real
+    // start-up time is recorded either way.
+    for (let i = 0; i < 80; i += 1) {
+      if ((await rms(analyser)) > 0.01) break;
+      await wait(25);
+    }
+    result.startupMs = Math.round(performance.now() - startupStart);
+    await wait(150);
     result.rms = await rms(analyser);
     result.position = pcm.positionSamples / ctx.sampleRate;
 
@@ -138,6 +217,12 @@ async function run(): Promise<SmokeResult> {
 
     pcm.pause();
     pcm.dispose();
+
+    const graph = await graphReport();
+    result.fxOffGainDb = Number(graph.fxOffGainDb.toFixed(3));
+    result.bandWorstDb = Number(graph.bandWorstDb.toFixed(3));
+    result.baseLatency = ctx.baseLatency;
+    result.outputLatency = typeof ctx.outputLatency === "number" ? ctx.outputLatency : -1;
 
     const deck = new Deck(ctx, "A", ctx.destination);
     try {
@@ -237,6 +322,10 @@ async function run(): Promise<SmokeResult> {
     }
 
     result.ok =
+      Math.abs(result.fxOffGainDb) < 0.2 &&
+      Math.abs(result.bandWorstDb) < 0.5 &&
+      result.startupMs >= 0 &&
+      result.startupMs < 1500 &&
       result.rms > 0.05 &&
       result.position > 1.05 &&
       result.looped &&

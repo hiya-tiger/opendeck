@@ -17,11 +17,11 @@ interface DeckLike {
   setPlaybackMode?(mode: "INT" | "REL" | "ABS"): void;
 }
 
-interface OpenDeckGlobal {
+interface OpenDecksGlobal {
   decks: Record<DeckKey, DeckLike>;
 }
 
-const bridge = window as unknown as { openDeck?: OpenDeckGlobal };
+const bridge = window as unknown as { openDeck?: OpenDecksGlobal };
 
 const byId = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 

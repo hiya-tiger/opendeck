@@ -3,7 +3,7 @@ name = "opendeck-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "OpenDeck Tauri shell: Rust core behind the existing OpenDeck UI."
+description = "OpenDecks Tauri shell: Rust core behind the existing OpenDecks UI."
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

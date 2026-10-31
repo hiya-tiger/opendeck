@@ -130,7 +130,7 @@ than a failed export.
 **Decision:** MIT/Apache-2.0 preferred, MPL-2.0 allowed, GPL forbidden for
 linked code. Every dependency goes into `NOTICE`, including planned ones.
 
-**Why:** OpenDeck is MIT and should stay redistributable under that license.
+**Why:** OpenDecks is MIT and should stay redistributable under that license.
 Symphonia's MPL-2.0 is file-level copyleft and acceptable while unmodified.
 FFmpeg stays an optional external tool and is never bundled.
 
@@ -138,7 +138,7 @@ FFmpeg stays an optional external tool and is never bundled.
 
 ## D12: Naming and assets
 
-**Decision:** Do not call OpenDeck "Serato". Refer to the other product as
+**Decision:** Do not call OpenDecks "Serato". Refer to the other product as
 "Serato DJ Pro" only when describing compatibility, and copy no assets, fonts,
 audio or manual text.
 
@@ -346,21 +346,6 @@ or shared buffer for very long tracks instead of structured-cloning PCM and
 Float32 parts across IPC. Revisit the cache format when stem FX chains become
 user-configurable.
 
-## Open assumptions
-
-- **[verify]** Serato DJ Pro 4 still imports legacy crates automatically when
-  the files change, including on a library that already exists in SQLite.
-- **[verify]** The 18-colour cue palette values and the exact `Markers2`
-  encoding used by the current Serato build.
-- **[verify]** Which Serato versions prefer `Markers_` over `Markers2` for slots
-  1-5; the encoder writes both regardless.
-- **[verify]** The beat-grid lock flag bit and its position in `Serato BeatGrid`.
-- **[verify]** Whether `container_asset_list_columns` usage `1` is stable across
-  Serato 4 point releases.
-- **[verify]** WebView2's SharedArrayBuffer/AudioWorklet combination for the
-  Rust engine seam, and whether cross-origin isolation is needed in the Tauri
-  build.
-
 ## D25: Bidirectional Serato V2 database, text tags, and opt-in SQLite column layout
 
 **Decision:** Extend `serato-codec.ts` to decode and re-encode `database V2` `otrk` records (preserving unknown sub-chunks and mapping `tgrp` grouping, `trmx` remixer, `ulbl` track colour, `utpc` play count, `bbgl` beatgrid lock, and `bply` played flags), add `TBPM`/`TKEY` ID3v2 and FLAC/MP4 `BPM`/`INITIALKEY` text tag readers/writers alongside `Serato Markers2`/`Markers_`/`BeatGrid`, and format `container_asset_list_columns` payloads with the ASCII `0x1e` Record Separator for the opt-in SQLite layout command.
@@ -417,6 +402,44 @@ user-configurable.
 
 **Revisit:** When vendor-specific HID platter/display feedback reports are added for CDJ/RANE motorized decks.
 
-### D32: Phase 7 Video Mixing & Secondary Fullscreen Output Window (2026-10-24)
+## D32: Phase 7 Video Mixing & Secondary Fullscreen Output Window (2026-10-24)
 - **Context:** Phase 7 specifies one video file per deck position-locked to that deck's transport (play, pause, seek, reverse, and scratch follow), an independent video crossfader, `fit`/`fill` scaling, optional video FX, and a second fullscreen output window.
 - **Decision:** Implemented `src/renderer/engine/video-mixer.ts` (`VideoMixer`, `computeVideoSyncTarget`, `shouldResyncVideoElement`, `computeVideoCrossfaderWeights`, `computeAspectRect`, `formatVideoCssFilter`), `renderer/video-output.html`, and Electron IPC (`video:open-output`, `video:close-output`, `video:fullscreen-output`, `video:sync-output`) in `src/main/main.ts` and `src/preload/preload.ts`. Because HTML5 `<video>` elements do not support negative `playbackRate`, reverse playback (`rate < 0` / Censor) and active platter/DVS scratch step `currentTime` directly on every frame while forward playback uses native `playbackRate` with a 45 ms drift resync window.
+
+---
+
+## Open assumptions
+
+- **[verify]** Serato DJ Pro 4 still imports legacy crates automatically when
+  the files change, including on a library that already exists in SQLite.
+- **[verify]** The 18-colour cue palette values and the exact `Markers2`
+  encoding used by the current Serato build.
+- **[verify]** Which Serato versions prefer `Markers_` over `Markers2` for slots
+  1-5; the encoder writes both regardless.
+- **[verify]** The beat-grid lock flag bit and its position in `Serato BeatGrid`.
+- **[verify]** Whether `container_asset_list_columns` usage `1` is stable across
+  Serato 4 point releases.
+- **[verify]** WebView2's SharedArrayBuffer/AudioWorklet combination for the
+  Rust engine seam, and whether cross-origin isolation is needed in the Tauri
+  build.
+
+---
+
+## D33-D38: Run 1 decisions
+
+Run 1 added six decisions. They are kept as standalone files under `docs/mobile/`
+because they are long, each carries its own evidence table, and several were
+written concurrently. They use the same decision / why / rejected options /
+revisit-if shape as D1-D32.
+
+| ADR | Title | File |
+|---|---|---|
+| D33 | Native output probe (amends D22) | `docs/mobile/ADR-D33.md` |
+| D34 | Ableton Link licensing | `docs/mobile/ADR-D34.md` |
+| D35 | Tempo authority | `docs/mobile/ADR-D35.md` |
+| D36 | Shared-core boundary | `docs/mobile/ADR-D36.md` |
+| D37 | Per-platform surface and providers | `docs/mobile/ADR-D37.md` |
+| D38 | Shell: Electron is the product, Tauri is a harness | `docs/mobile/ADR-D38.md` |
+
+D34 does **not** amend D11: no GPL code was linked, and the shipped Link
+implementation speaks its own protocol (`opendeck-link/1`), not Ableton's.

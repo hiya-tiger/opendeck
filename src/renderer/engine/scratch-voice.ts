@@ -1,5 +1,5 @@
 ﻿const WORKLET_SOURCE = `
-class OpenDeckScratchProcessor extends AudioWorkletProcessor {
+class OpenDecksScratchProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.left = null;
@@ -66,7 +66,7 @@ class OpenDeckScratchProcessor extends AudioWorkletProcessor {
     return true;
   }
 }
-registerProcessor("opendeck-scratch", OpenDeckScratchProcessor);
+registerProcessor("opendeck-scratch", OpenDecksScratchProcessor);
 `;
 
 export const MAX_SCRATCH_RATE = 6;

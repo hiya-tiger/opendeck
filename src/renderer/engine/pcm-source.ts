@@ -1,7 +1,7 @@
-import type { StretchNode } from "signalsmith-stretch";
+import type { StretchNode, StretchSchedule } from "signalsmith-stretch";
 
 export const WORKLET_SOURCE = `
-class OpenDeckPcmProcessor extends AudioWorkletProcessor {
+class OpenDecksPcmProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.left = null;
@@ -111,7 +111,7 @@ class OpenDeckPcmProcessor extends AudioWorkletProcessor {
     }
   }
 }
-registerProcessor("opendeck-pcm", OpenDeckPcmProcessor);
+registerProcessor("opendeck-pcm", OpenDecksPcmProcessor);
 `;
 
 export interface PcmSourceOptions {
@@ -341,9 +341,28 @@ export class PcmSource {
   }
 
   private setTarget(seconds: number): void {
-    this.targetPosition = Math.max(0, Math.min(seconds, this.durationSeconds()));
+    const safe = Number.isFinite(seconds) ? seconds : this.reportedPosition;
+    this.targetPosition = Math.max(0, Math.min(safe, this.durationSeconds()));
     this.commandAt = performance.now();
     this.reportedPosition = this.targetPosition;
+  }
+
+  /**
+   * `StretchNode#schedule` merges the object it is given over the previous
+   * segment, so an explicitly-undefined `input` (which `drive()` produces when
+   * the caller has no absolute position) overwrites the segment's real input
+   * with `undefined` and every later `inputTime` becomes NaN. The whole time map
+   * is then poisoned and the deck goes silent until it is reloaded. Drop any
+   * non-finite field instead of forwarding it.
+   */
+  private async scheduleStretch(options: StretchSchedule): Promise<void> {
+    const node = this.stretch;
+    if (!node) return;
+    const safe: StretchSchedule = { ...options };
+    if (typeof safe.input !== "number" || !Number.isFinite(safe.input)) delete safe.input;
+    if (typeof safe.rate !== "number" || !Number.isFinite(safe.rate)) safe.rate = this.rate;
+    if (typeof safe.output !== "number" || !Number.isFinite(safe.output)) delete safe.output;
+    await node.schedule(safe);
   }
 
   private durationSeconds(): number {
@@ -390,7 +409,14 @@ export class PcmSource {
           numberOfOutputs: 1,
           outputChannelCount: [2],
         });
-        await node.configure({ blockMs: 8, intervalMs: 2 });
+        // Measured time from `play()` to audible output on this machine:
+        //   blockMs 8 / intervalMs 2 / splitComputation on  (previous)  324 ms
+        //   blockMs 8 / intervalMs 2 / splitComputation off             57 ms
+        // plus a one-off warm render pass below, which took the first play to
+        // 31 ms. `splitComputation` spreads each block's FFT across render
+        // quanta to flatten CPU spikes, but it also holds back the first block
+        // for hundreds of milliseconds. `blockMs` stays at 8 (D18).
+        await node.configure({ blockMs: 8, intervalMs: 2, splitComputation: false });
         await node.setUpdateInterval(0.02, (time) => {
           if (!Number.isFinite(time)) return;
           this.reportedPosition = Math.max(0, time);
@@ -401,11 +427,28 @@ export class PcmSource {
         node.connect(this.gainNode);
         this.latency = await node.latency();
         this.stretch = node;
+        // Render silence once so the worklet allocates its internal buffers and
+        // the first real play does not open with a gap.
+        await node.schedule({ active: false, input: 0, rate: 1, semitones: 0, output: this.ctx.currentTime });
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 60);
+        });
       } catch {
         this.fallback = new WorkletPcmSource(this.ctx, this.gainNode);
       }
     })();
     return this.ready;
+  }
+
+  /**
+   * Builds the stretch node ahead of the first track so the AudioContext, the
+   * worklet module and the node's internal buffers are already warm. Measured
+   * cold start for the first play in a fresh context was ~1.3 s; a warmed deck
+   * starts in tens of milliseconds. Decks are constructed at app start, so this
+   * cost is paid before the user can press play.
+   */
+  prewarm(): void {
+    void this.ensure();
   }
 
   async load(buffer: AudioBuffer, position = 0): Promise<void> {
@@ -423,12 +466,18 @@ export class PcmSource {
     const left = buffer.getChannelData(0);
     const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
     await this.enqueue(async () => {
-      const node = this.stretch;
-      if (!node) return;
-      await node.schedule({ active: false, input: position / buffer.sampleRate, rate: this.rate, semitones: this.semitones() });
-      await node.dropBuffers();
-      await node.addBuffers([left, right]);
+      if (!this.stretch) return;
+      await this.scheduleStretch({ active: false, input: position / buffer.sampleRate, rate: this.rate, semitones: this.semitones() });
+      await this.stretch.dropBuffers();
+      await this.stretch.addBuffers([left, right]);
       await this.applyLoop();
+    });
+    // `addBuffers` resolves before the processor has applied the buffers, and a
+    // time map scheduled in the same task is then clamped against an empty
+    // buffer range: the first play after a load came out silent and the playhead
+    // never advanced. Yielding one macrotask lets the buffer messages land first.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
     });
   }
 
@@ -443,7 +492,7 @@ export class PcmSource {
       return;
     }
     this.enqueue(async () => {
-      await this.stretch?.schedule({ active: false, input: 0 });
+      await this.scheduleStretch({ active: false, input: 0 });
       await this.stretch?.dropBuffers();
     });
   }
@@ -459,9 +508,8 @@ export class PcmSource {
     this.playing = true;
     this.setTarget(this.positionSeconds());
     await this.enqueue(async () => {
-      const node = this.stretch;
-      if (!node) return;
-      await node.schedule({
+      if (!this.stretch) return;
+      await this.scheduleStretch({
         active: true,
         input: this.targetPosition ?? this.reportedPosition,
         rate: this.rate,
@@ -480,7 +528,7 @@ export class PcmSource {
       return;
     }
     this.enqueue(async () => {
-      await this.stretch?.schedule({
+      await this.scheduleStretch({
         active: false,
         input: this.targetPosition ?? this.reportedPosition,
         rate: this.rate,
@@ -497,13 +545,13 @@ export class PcmSource {
     }
     if (!this.stretch) return;
     this.enqueue(async () => {
-      await this.stretch?.schedule({
+      await this.scheduleStretch({
         active: this.playing,
         input: seconds,
         rate: this.rate,
         semitones: this.semitones(),
       });
-      this.applyLoop();
+      await this.applyLoop();
     });
   }
 
@@ -520,9 +568,11 @@ export class PcmSource {
     if (!this.stretch) return;
     const seconds = position === null ? undefined : position / (this.buffer?.sampleRate ?? this.ctx.sampleRate);
     this.enqueue(async () => {
-      const node = this.stretch;
-      if (!node) return;
-      await node.schedule({
+      if (!this.stretch) return;
+      // `seconds` is undefined whenever the caller drives by rate alone (DVS in
+      // relative mode, platter drive): passing `input: undefined` here used to
+      // write NaN into the stretch time map. scheduleStretch drops it instead.
+      await this.scheduleStretch({
         active,
         input: seconds,
         rate: this.rate,
@@ -542,13 +592,13 @@ export class PcmSource {
     if (!this.stretch) return;
     this.setTarget(this.positionSeconds());
     this.enqueue(async () => {
-      await this.stretch?.schedule({
+      await this.scheduleStretch({
         active: this.playing,
         input: this.targetPosition ?? this.reportedPosition,
         rate: this.rate,
         semitones: this.semitones(),
       });
-      this.applyLoop();
+      await this.applyLoop();
     });
   }
 
@@ -576,11 +626,10 @@ export class PcmSource {
   }
 
   private async applyLoop(): Promise<void> {
-    const node = this.stretch;
-    if (!node) return;
+    if (!this.stretch) return;
     const sampleRate = this.buffer?.sampleRate ?? this.ctx.sampleRate;
     const loop = this.loop;
-    await node.schedule({
+    await this.scheduleStretch({
       loopStart: loop ? loop.start / sampleRate : 0,
       loopEnd: loop ? loop.end / sampleRate : 0,
     });

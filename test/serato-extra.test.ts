@@ -183,7 +183,7 @@ function mp4Freeform(name: string, data: Uint8Array, wrap: boolean): Uint8Array 
 
 function buildMp4(entries: Uint8Array[], useMdat64: boolean): Uint8Array {
   const ilst = mp4Atom("ilst", [
-    mp4Atom("\xa9nam", [mp4FullBox("data", "OpenDeck")]),
+    mp4Atom("\xa9nam", [mp4FullBox("data", "OpenDecks")]),
     ...entries,
   ]);
   const meta = mp4Atom("meta", [Uint8Array.from([0, 0, 0, 0]), ilst]);

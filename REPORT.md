@@ -1,4 +1,4 @@
-# OpenDeck parity report
+# OpenDecks parity report
 
 Updated after Waves 1–5 (P1–P6 + 195-device hardware catalogue & verification pass).
 
