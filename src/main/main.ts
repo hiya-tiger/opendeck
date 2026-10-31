@@ -14,6 +14,8 @@ import {
 } from "./serato-files.ts";
 import { MODEL, findCache, installModel, loadManifestAt, modelInfo, readCache, separateToCache, type SeparateRequest } from "./separation.ts";
 import { createLinkNode } from "./link.ts";
+import { setupDetectedMedia } from "./prolink/ipc.ts";
+import type { MediaManager } from "./prolink/manager.ts";
 
 const root = (): string => app.getAppPath();
 
@@ -56,6 +58,7 @@ let videoOutputWindow: BrowserWindow | null = null;
 const providerWindows = new Map<string, BrowserWindow>();
 let rtmp: ChildProcessWithoutNullStreams | null = null;
 let rtmpKey = "";
+let detectedMedia: MediaManager | null = null;
 
 const createWindow = (): void => {
   mainWindow = new BrowserWindow({
@@ -541,6 +544,13 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  // CDJ (Pro DJ Link) and local USB drive detection. Nothing is imported
+  // until the user answers the in-app prompt.
+  setupDetectedMedia(() => mainWindow)
+    .then((manager) => {
+      detectedMedia = manager;
+    })
+    .catch((error) => console.error("detected media setup failed", error));
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -553,4 +563,5 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
   rtmp?.kill();
   void linkNode?.disable();
+  void detectedMedia?.stop();
 });
