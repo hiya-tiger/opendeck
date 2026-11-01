@@ -571,7 +571,10 @@ export class PcmSource {
     if (this.stretchLoaded) return true;
     const buffer = this.buffer;
     const left = buffer.getChannelData(0);
-    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+    // Mono: give the stretch node a separate right array. The same array twice
+    // makes the processor's dropBuffers() transfer one ArrayBuffer twice, which
+    // throws DataCloneError in the worklet and stalls the key-lock queue.
+    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left.slice();
     await this.enqueue(async () => {
       if (!this.stretch) return;
       await this.scheduleStretch({ active: false, input: 0, rate: this.rate, semitones: this.semitones() });
@@ -702,7 +705,10 @@ export class PcmSource {
     if (!buffer || !this.stretch) return;
     this.lastResyncAt = performance.now();
     const left = buffer.getChannelData(0);
-    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+    // Mono: give the stretch node a separate right array. The same array twice
+    // makes the processor's dropBuffers() transfer one ArrayBuffer twice, which
+    // throws DataCloneError in the worklet and stalls the key-lock queue.
+    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left.slice();
     void this.enqueue(async () => {
       const node = this.stretch;
       if (!node || this.buffer !== buffer) return;

@@ -88,6 +88,7 @@ import {
   type MidiEvent,
 } from "./midi/midi.ts";
 import { applyProfile, profileForDevice } from "./midi/profiles.ts";
+import { applyWaveOrientation, deckTimeText, resetDeckReadouts, storedWaveVertical } from "./ui/deck-view.ts";
 
 interface NativeAnalysis {
   bpm: number;
@@ -651,6 +652,7 @@ function buildDeck(deckId: DeckId): void {
   const zoom = new ZoomWaveform(refs.zoom as HTMLCanvasElement, 8);
   waves[deckId] = wave;
   zooms[deckId] = zoom;
+  zoom.setVertical(document.body.classList.contains("vertical-waves"));
 
   wave.onSeek((seconds) => {
     deck.seek(seconds);
@@ -788,17 +790,7 @@ function buildDeck(deckId: DeckId): void {
     toast(`Instant Double ${sourceId} → ${deckId}`);
   });
 
-  refs.ejectBtn?.addEventListener("click", () => {
-    deck.eject();
-    delete meta[deckId];
-    refs.title.textContent = "No track";
-    refs.sub.textContent = "Drop audio or load from the library";
-    refs.bpm.textContent = "-- BPM";
-    refs.key.textContent = "--";
-    setVinylArt(deckId, null);
-    waves[deckId]?.clear();
-    updatePads(deckId, true);
-  });
+  refs.ejectBtn?.addEventListener("click", () => ejectDeck(deckId));
 
   refs.slipToggle?.addEventListener("click", () => {
     const enabled = deck.toggleReturnMode();
@@ -1138,6 +1130,43 @@ function buildDeck(deckId: DeckId): void {
   });
 }
 
+/**
+ * Eject: stops the deck and returns its whole view to the empty state on
+ * every deck (A-D) in either waveform orientation. Before Nov 1 2026 only the
+ * title, art and overview were cleared, so the scrolling waveform, markers
+ * and time readout stayed, and the peak buffers stayed referenced.
+ */
+function ejectDeck(deckId: DeckId): boolean {
+  const deck = decks[deckId];
+  const refs = ui[deckId];
+  if (!refs) return false;
+  if (!deck.eject()) {
+    toast(`Deck ${deckId} is playing with load lock on.`);
+    return false;
+  }
+  closeStream(deckId);
+  if (progressive[deckId]) {
+    stopProgressive(deckId);
+    void desktop?.separation?.cancel?.(deckId);
+  }
+  releasePadHold(deckId);
+  delete meta[deckId];
+  synced[deckId] = false;
+  refs.sync.classList.remove("active");
+  refs.syncChip.classList.add("hidden");
+  refs.title.title = "";
+  resetDeckReadouts(refs);
+  setVinylArt(deckId, null);
+  waves[deckId]?.clear();
+  zooms[deckId]?.clear();
+  resetPartCards(deckId);
+  setPartsState(deckId, "parts not ready");
+  syncLoopButtons(deckId);
+  updatePads(deckId, true);
+  requestFrame();
+  return true;
+}
+
 function toggleDeck(deckId: DeckId): void {
   void mixer.resume();
   decks[deckId].toggle();
@@ -1455,6 +1484,8 @@ const loadStemManifest = async (deckId: DeckId, manifest: StemManifest): Promise
     buffer.copyToChannel(data.right as Float32Array<ArrayBuffer>, 1);
     buffers[part.id] = buffer;
   }
+  // Ejected or replaced while the cache was read: do not revive an empty deck.
+  if (!deck.hasTrack || deck.audioHash !== manifest.hash) return false;
   await deck.loadStems(buffers, { live: true });
   setPartsState(deckId, "4 parts ready");
   return deck.hasStems;
@@ -1769,6 +1800,9 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   refs.time.textContent = `0:00 / ${formatTime(track.duration)}`;
   refs.bar.textContent = "1.1.1";
   waves[deckId]?.clear();
+  // The scrolling view must not keep the previous track's peaks until the new
+  // analysis lands.
+  zooms[deckId]?.clear();
   zooms[deckId]?.setBpm(track.bpm, track.beatPhase);
   waves[deckId]?.setCue(deck.cuePoint);
   syncLoopButtons(deckId);
@@ -3729,8 +3763,9 @@ function renderDeckFrame(deckId: DeckId): void {
   const refs = ui[deckId]!;
   if (!state) return;
 
-  refs.time.textContent = `${formatTime(deck.currentTime)} / ${formatTime(deck.duration)}`;
-  refs.time.classList.toggle("track-end-warn", Boolean(state.trackEndWarning));
+  const loaded = deck.hasTrack && Boolean(meta[deckId]);
+  refs.time.textContent = deckTimeText(loaded, deck.currentTime, deck.duration);
+  refs.time.classList.toggle("track-end-warn", loaded && Boolean(state.trackEndWarning));
   refs.slipToggle?.setAttribute("aria-pressed", String(Boolean(state.returnMode)));
   refs.bar.textContent = state.bpm ? formatBeatPosition(deck.currentTime, state.bpm, deck.info.beatPhase) : "—";
   refs.tempo.textContent = `${state.tempoPercent >= 0 ? "+" : ""}${state.tempoPercent.toFixed(1)}%`;
@@ -3740,8 +3775,8 @@ function renderDeckFrame(deckId: DeckId): void {
   refs.loop.classList.toggle("active", state.loopActive);
   refs.keylock.setAttribute("aria-pressed", String(state.keylock));
 
-  waves[deckId]?.setProgress(deck.currentTime);
-  zooms[deckId]?.update(deck.currentTime);
+  waves[deckId]?.setProgress(loaded ? deck.currentTime : 0);
+  zooms[deckId]?.update(loaded ? deck.currentTime : 0);
   updatePads(deckId);
 
   const signature = loopSignature(deck);
@@ -3830,6 +3865,7 @@ for (const deckId of ALL_DECKS) {
 for (const pad of SAMPLER_SLOTS) {
   MIDI_TARGETS.push({ id: `smp.${pad.slot + 1}`, label: `Sampler ${pad.slot + 1} ${pad.label}` });
 }
+
 
 const midiBindings: MidiBindings = loadBindings(window.localStorage);
 let midiLearnTarget: string | null = null;
@@ -4208,10 +4244,11 @@ function setWaveMode(vertical: boolean): void {
   const button = $("waveMode");
   button.setAttribute("aria-pressed", String(vertical));
   button.textContent = vertical ? "Horizontal waves" : "Vertical waves";
-  for (const deckId of ["A", "B"] as const) zooms[deckId]?.setVertical(vertical);
+  // Every deck, not just A and B: C and D used to stay horizontal.
+  applyWaveOrientation(zooms, vertical, ALL_DECKS);
 }
 
-setWaveMode(localStorage.getItem("opendeck.waveMode") === "1");
+setWaveMode(storedWaveVertical(localStorage.getItem("opendeck.waveMode")));
 $("waveMode").addEventListener("click", () => {
   const next = !document.body.classList.contains("vertical-waves");
   localStorage.setItem("opendeck.waveMode", next ? "1" : "0");
