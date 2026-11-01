@@ -16,7 +16,8 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 // real dist/main.cjs registers do not exist. Stub the two the renderer polls,
 // otherwise the probe reports "No handler registered" instead of renderer bugs.
 ipcMain.handle("rtmp:available", () => false);
-ipcMain.handle("streaming:status", () => ({ providers: [], active: null }));
+// Stream sources with no partner keys stored: every partner source must say so.
+ipcMain.handle("stream:status", () => ({ sources: [], widevineBuild: false, redirectUri: "http://127.0.0.1:43827/callback" }));
 // Detected-media stub: one pending CDJ prompt, so the probe can check it renders.
 const prompt = { sourceId: "cdj-2-usb", origin: "cdj", mediaKey: "cdj:smoke", sourceName: "CDJ 2 · USB · SMOKE", mediaName: "SMOKE", slot: "usb", where: "CDJ 2", trackCount: 412, kind: "rekordbox", message: "USB drive 'SMOKE' found on CDJ 2 (412 tracks). Add it to your library?" };
 ipcMain.handle("djmedia:state", () => ({
@@ -49,7 +50,13 @@ app.whenReady().then(async () => {
       mediaPrompt: (document.querySelector('#mediaPrompts .media-prompt-text') || {}).textContent || null,
       mediaPromptButtons: document.querySelectorAll('#mediaPrompts button').length,
       cdjStatus: (document.getElementById('cdjStatus') || {}).textContent || null,
+      streamSources: Array.from(document.querySelectorAll('#providerList .provider')).map(b => b.dataset.source + '=' + (b.querySelector('span') || {}).textContent),
+      streamLogin: (document.getElementById('loginState') || {}).textContent || null,
+      streamWidevine: (document.getElementById('drmStatusChip') || {}).textContent || null,
     }))()\`, true);
+    const partners = (probe.streamSources || []).filter((s) => /^(beatport|beatsource|tidal|soundcloud)=/.test(s));
+    if (partners.length !== 4 || !partners.every((s) => s.endsWith("=needs partner API key"))) errors.push("stream sources did not show 'needs partner API key': " + JSON.stringify(probe.streamSources));
+    if (probe.streamLogin !== "needs partner API key") errors.push("stream head state: " + probe.streamLogin);
     if (!probe.mediaPrompt || !probe.mediaPrompt.includes("SMOKE") || probe.mediaPromptButtons !== 2) errors.push("detected-media prompt did not render");
     console.log("UI_RESULT " + JSON.stringify({ ok: errors.length === 0, errors, probe }));
     process.exitCode = errors.length === 0 ? 0 : 1;

@@ -31,9 +31,23 @@ import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
 import { mediaCrates, promptView, tracksFromMedia } from "./media/cdj.ts";
 import type { CdjFetchProgress, CdjMediaLibrary, LoadedCue, LoadedTrack, MediaPrompt, ProlinkSettings, ProlinkSnapshot } from "../main/prolink/types.ts";
-import { PROVIDERS, findProvider } from "./streaming/providers.ts";
-import { parseSearchResponse, videoIdFromTrackUrl, youtubeEmbedUrl } from "./streaming/youtube.ts";
-import { DrmSessionManager, probeKeySystems, providerEmbedUrl, type DrmScheme } from "./streaming/drm.ts";
+import { probeKeySystems, widevineStatusText } from "./streaming/drm.ts";
+import { createDefaultSources } from "./streaming/index.ts";
+import {
+  NEEDS_PARTNER_KEY,
+  parseStreamTrackKey,
+  streamTrackKey,
+  type AuthStatus,
+  type BrowseNode,
+  type CredentialStatus,
+  type PlaybackPlan,
+  type StreamHttp,
+  type StreamRequest,
+  type StreamResponse,
+  type StreamSource,
+  type StreamTrack,
+} from "./streaming/source.ts";
+import { describeError, libraryFieldsFor, loadStreamTrack, type FetchedAudio } from "./streaming/loader.ts";
 import { WhipBroadcaster, type BroadcastStatus } from "./broadcast/whip.ts";
 import { normaliseDegrees, pointerAngle, scratchPosition } from "./engine/scratch.ts";
 import { Sampler, SAMPLER_BANKS, SAMPLER_SLOTS, type SamplerBank } from "./engine/sampler.ts";
@@ -153,14 +167,14 @@ interface DesktopApi {
     fromFile: (path: string) => Promise<NativeAnalysis>;
     fromBytes: (bytes: Uint8Array) => Promise<NativeAnalysis>;
   };
-  streaming: {
-    login: (provider: string, url: string, hints: string[]) => Promise<{ ok: boolean; loggedIn: boolean }>;
-    open: (provider: string, url: string, hints: string[]) => Promise<{ ok: boolean; loggedIn: boolean }>;
-    status: (provider: string, hints: string[]) => Promise<{ loggedIn: boolean }>;
-    logout: (provider: string) => Promise<{ ok: boolean }>;
-    search: (provider: string, url: string, token?: string) => Promise<{ status: number; body: string }>;
-    license?: (provider: string, licenseUrl: string, challenge: Uint8Array, token?: string) => Promise<{ ok: boolean; status: number; license: Uint8Array }>;
-    onLogin: (handler: (payload: unknown) => void) => () => void;
+  streaming?: {
+    status: () => Promise<{ sources: CredentialStatus[]; widevineBuild: boolean; redirectUri: string }>;
+    setKey: (source: string, clientId: string, clientSecret?: string) => Promise<{ ok: boolean; error?: string }>;
+    clearKey: (source: string) => Promise<{ ok: boolean }>;
+    signIn: (source: string) => Promise<{ ok: boolean; error?: string }>;
+    signOut: (source: string) => Promise<{ ok: boolean }>;
+    request: (source: string, req: StreamRequest) => Promise<StreamResponse>;
+    audio: (source: string, plan: Extract<PlaybackPlan, { kind: "decodable" }>) => Promise<FetchedAudio>;
   };
   recording: { save: (name: string, bytes: Uint8Array) => Promise<{ ok: boolean; path?: string }> };
   rtmp: {
@@ -356,57 +370,93 @@ function closeStream(deckId: DeckId): void {
   (refs.streamTitle as HTMLElement).textContent = "";
 }
 
-const drmManager = new DrmSessionManager();
+/** Streamed tracks known to the library, by library id (stream:<source>:<id>). */
+const streamTrackMeta = new Map<string, StreamTrack>();
 
-function playStreamOnDeck(track: QueueTrack, deckId: DeckId): void {
+function showMonitorPlayer(deckId: DeckId, title: string, embedUrl: string, label: string): void {
   const refs = ui[deckId];
   if (!refs) return;
-  const provider = findProvider(track.provider) ?? selectedProvider;
-  const embedSrc =
-    track.provider === "youtube-music"
-      ? youtubeEmbedUrl(videoIdFromTrackUrl(track.url, track.id))
-      : providerEmbedUrl(track.provider, track.url, track.id);
-
   closeStream(deckId);
   decks[deckId].pause();
-
-  if (/\.(mp4|m4a|webm|mpd|m3u8|flac|ogg|mp3)(\?|$)/i.test(track.url)) {
-    const audioEl = document.createElement("audio");
-    audioEl.controls = true;
-    audioEl.autoplay = true;
-    audioEl.crossOrigin = "anonymous";
-    audioEl.src = track.url;
-    audioEl.style.width = "100%";
-    const creds = drmManager.credentials.get(provider.id);
-    const scheme: DrmScheme = creds?.preferredDrm ?? provider.drmSchemes[0] ?? "widevine";
-    void drmManager.attachToMediaElement(audioEl, {
-      provider: provider.id,
-      scheme,
-      licenseUrl: creds?.licenseUrl || provider.licenseUrl,
-      bearerToken: creds?.accessToken || creds?.developerToken,
-      clientId: creds?.clientId,
-    });
-    (refs.streamSlot as HTMLElement).append(audioEl);
-  } else if (embedSrc) {
-    const frame = document.createElement("iframe");
-    frame.className = "deck-stream-frame";
-    frame.src = embedSrc;
-    frame.title = `${track.title} - ${provider.name} EME DRM player`;
-    frame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write";
-    frame.referrerPolicy = "strict-origin-when-cross-origin";
-    frame.allowFullscreen = true;
-    (refs.streamSlot as HTMLElement).append(frame);
-  } else {
-    toast(`Opening ${track.title} in ${provider.name} player window.`);
-    void openInService(track);
-    return;
-  }
-
-  (refs.streamTitle as HTMLElement).textContent = `Deck ${deckId} (${provider.name} DRM) - ${track.title}`;
+  const frame = document.createElement("iframe");
+  frame.className = "deck-stream-frame";
+  frame.src = embedUrl;
+  frame.title = `${title}: official player (monitor only)`;
+  frame.allow = "autoplay; encrypted-media";
+  frame.referrerPolicy = "strict-origin-when-cross-origin";
+  (refs.streamSlot as HTMLElement).append(frame);
+  (refs.streamTitle as HTMLElement).textContent = `Deck ${deckId} · MONITOR ONLY · ${title}`;
+  (refs.streamNote as HTMLElement).textContent = label;
   (refs.stream as HTMLElement).hidden = false;
   refs.root.classList.add("streaming");
-  $("streamWarn").textContent = `Deck ${deckId}: ${track.title} (${provider.name} EME DRM active). Enable Capture output (AUX) to route encrypted player audio through mixer EQ & faders.`;
-  toast(`Deck ${deckId}: ${track.title}`);
+}
+
+async function ensureStreamFile(track: Track, deckId: DeckId): Promise<boolean> {
+  const key = parseStreamTrackKey(track.id);
+  const source = key ? streamSources.get(key.source) : undefined;
+  if (!key || !source) {
+    toast(`${track.name}: unknown streaming source.`);
+    return false;
+  }
+  const refs = ui[deckId];
+  if (refs) {
+    refs.title.textContent = track.name;
+    refs.sub.textContent = `resolving on ${source.name}…`;
+  }
+  let meta = streamTrackMeta.get(track.id);
+  if (!meta) {
+    try {
+      meta = await source.metadata(key.id);
+      streamTrackMeta.set(track.id, meta);
+    } catch (error) {
+      toast(describeError(error), 6000);
+      return false;
+    }
+  }
+  const fetcher = async (sourceId: string, plan: Extract<PlaybackPlan, { kind: "decodable" }>): Promise<FetchedAudio> =>
+    desktop?.streaming ? desktop.streaming.audio(sourceId, plan) : { ok: false, error: "streaming needs the desktop app" };
+  const outcome = await loadStreamTrack(source, meta, fetcher, widevineAvailable);
+  if (outcome.kind === "unavailable") {
+    toast(outcome.reason, 6000);
+    if (refs) refs.sub.textContent = outcome.reason;
+    return false;
+  }
+  if (outcome.kind === "monitor") {
+    showMonitorPlayer(deckId, `${meta.artist} - ${meta.title}`, outcome.embedUrl, outcome.label);
+    toast(`Deck ${deckId}: ${meta.title} plays in ${source.name}'s own player (monitor only).`, 5000);
+    return false;
+  }
+  track.file = outcome.file;
+  track.missing = false;
+  enqueueAnalysis(track);
+  toast(`${outcome.preview ? "Preview clip" : "Full track"} from ${source.name}: ${meta.artist} - ${meta.title}`);
+  return true;
+}
+
+/** Load a streamed track the way a local file loads: into the library, then onto the deck. */
+async function playStreamOnDeck(track: StreamTrack, deckId: DeckId): Promise<void> {
+  const source = streamSources.get(track.source);
+  if (!source) return;
+  if (!source.capabilities.decodable) {
+    const outcome = await loadStreamTrack(source, track, async () => ({ ok: false, error: "not decodable" }), widevineAvailable);
+    if (outcome.kind === "monitor") showMonitorPlayer(deckId, track.title, outcome.embedUrl, outcome.label);
+    else if (outcome.kind === "unavailable") toast(outcome.reason, 6000);
+    return;
+  }
+  const id = streamTrackKey(track);
+  streamTrackMeta.set(id, track);
+  let entry = library.find(id);
+  if (!entry) {
+    entry = library.addStreamTrack(libraryFieldsFor(track));
+    entry.artwork = track.artworkUrl ?? null;
+  }
+  await loadTrack(entry, deckId);
+  const refs = ui[deckId];
+  if (refs && meta[deckId] === entry) {
+    // Attribution: credit the artist/uploader and the service on the deck.
+    refs.sub.textContent = `${track.artist} · via ${source.name}`;
+    refs.sub.title = track.permalink ?? "";
+  }
 }
 
 function setupScratch(deckId: DeckId): void {
@@ -585,11 +635,12 @@ function buildDeck(deckId: DeckId): void {
     '<div class="deck-stream-head"><span class="deck-stream-title"></span>' +
     '<button type="button" class="mini deck-stream-close" title="Close stream player">x</button></div>' +
     '<div class="deck-stream-slot"></div>' +
-    '<span class="deck-stream-note">YouTube player. Mix it with Capture output (AUX).</span>';
+    '<span class="deck-stream-note"></span>';
   node.append(streamPanel);
   refs.stream = streamPanel;
   refs.streamTitle = streamPanel.querySelector(".deck-stream-title");
   refs.streamSlot = streamPanel.querySelector(".deck-stream-slot");
+  refs.streamNote = streamPanel.querySelector(".deck-stream-note");
   (streamPanel.querySelector(".deck-stream-close") as HTMLElement).addEventListener("click", () =>
     closeStream(deckId),
   );
@@ -1636,6 +1687,7 @@ desktop?.separation?.onProgress((payload) => {
 const mediaCues = new Map<string, LoadedCue[]>();
 
 async function ensureMediaFile(track: Track, deckId: DeckId): Promise<boolean> {
+  if (track.source === "stream" && !track.file) return ensureStreamFile(track, deckId);
   if (!track.media || track.file) return true;
   const api = desktop?.djmedia;
   if (!api) return false;
@@ -3113,188 +3165,259 @@ $("auxBtn").addEventListener("click", async () => {
 });
 
 /* ---------------------------------------------------------- streaming UI */
+// Stream sources (D42): every service is a StreamSource. Decodable audio is
+// loaded into the library and onto a deck exactly like a local file; services
+// that only allow their own (DRM) player get it embedded in the deck panel,
+// labelled monitor-only. Nothing opens a separate window.
 
 const streamQueue = new PlayQueue();
-let selectedProvider = PROVIDERS[0];
-let loggedIn: Record<string, boolean> = {};
+const queuedStreamTracks = new Map<string, StreamTrack>();
+const streamSources = createDefaultSources((sourceId): StreamHttp => ({
+  request: async (req) => {
+    if (!desktop?.streaming) return { status: 0, body: "", error: "network", detail: "streaming needs the desktop app" };
+    return desktop.streaming.request(sourceId, req);
+  },
+}));
+let selectedSource: StreamSource = streamSources.list()[0];
+let streamStatus: Record<string, CredentialStatus> = {};
+let widevineAvailable = false;
+let browseStack: string[] = [];
+
+function sourceStatus(source: StreamSource): AuthStatus {
+  return source.authStatus(streamStatus[source.id]);
+}
 
 function renderProviders(): void {
   const list = $("providerList");
   list.replaceChildren();
-  for (const provider of PROVIDERS) {
+  for (const source of streamSources.list()) {
+    const status = sourceStatus(source);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "provider";
-    button.setAttribute("aria-selected", String(provider.id === selectedProvider.id));
-    button.innerHTML = `<strong>${escapeHtml(provider.name)}</strong><span class="${loggedIn[provider.id] ? "ok" : ""}">${loggedIn[provider.id] ? "signed in" : "signed out"}</span>`;
+    button.dataset.source = source.id;
+    button.setAttribute("aria-selected", String(source.id === selectedSource.id));
+    const label = status.state === "needs-partner-key" ? NEEDS_PARTNER_KEY : status.state === "signed-in" ? "signed in" : status.state === "expired" ? "sign in again" : status.state === "signed-out" ? "key saved, signed out" : source.id === "web-player" ? "no key needed" : "catalogue key saved";
+    button.innerHTML = `<strong>${escapeHtml(source.name)}</strong><span class="${status.state === "signed-in" || status.state === "app-only" ? "ok" : ""}">${escapeHtml(label)}</span>`;
     button.addEventListener("click", () => {
-      selectedProvider = provider;
+      selectedSource = source;
+      browseStack = [];
+      searchResults = [];
       renderProviders();
-      const drmConnectBtn = document.getElementById("drmConnectBtn");
-drmConnectBtn?.addEventListener("click", () => {
-  const tokenInput = document.getElementById("drmTokenInput") as HTMLInputElement | null;
-  const schemeSelect = document.getElementById("drmSchemeSelect") as HTMLSelectElement | null;
-  const token = tokenInput?.value.trim() ?? "";
-  const scheme = ((schemeSelect?.value as DrmScheme) || selectedProvider.drmSchemes[0] || "widevine");
-  drmManager.credentials.set({
-    provider: selectedProvider.id,
-    accessToken: token || "eme-session-active",
-    developerToken: token || undefined,
-    licenseUrl: selectedProvider.licenseUrl,
-    preferredDrm: scheme,
-    updatedAt: Date.now(),
-  });
-  loggedIn[selectedProvider.id] = true;
-  if (tokenInput) tokenInput.value = "";
-  renderProviders();
-  renderStreamHead();
-  toast(`Connected ${selectedProvider.name} (${scheme.toUpperCase()} EME DRM)`);
-});
-
-void probeKeySystems().then((report) => {
-  const chip = document.getElementById("drmStatusChip");
-  if (!chip) return;
-  if (report.supportedSchemes.length > 0) {
-    chip.textContent = `EME DRM: ${report.supportedSchemes.map((s) => s.toUpperCase()).join(" · ")}`;
-    chip.classList.add("live");
-  } else {
-    chip.textContent = "EME DRM: ClearKey / WebEmbed";
-  }
-});
-
-renderStreamHead();
+      renderStreamHead();
+      renderResults();
     });
     list.append(button);
   }
 }
 
 function renderStreamHead(): void {
-  $("streamTitle").textContent = selectedProvider.name;
-  $("streamNote").textContent = selectedProvider.note;
-  const hasCreds = drmManager.credentials.hasCredentials(selectedProvider.id);
-  const isIn = Boolean(loggedIn[selectedProvider.id] || hasCreds);
+  const source = selectedSource;
+  const status = sourceStatus(source);
+  $("streamTitle").textContent = source.name;
+  $("streamNote").textContent = status.message;
   const loginState = $("loginState");
-  loginState.textContent = hasCreds ? "DRM token active" : isIn ? "signed in" : "signed out";
-  loginState.classList.toggle("live", isIn);
-  $("loginBtn").classList.toggle("hidden", Boolean(loggedIn[selectedProvider.id]));
-  $("logoutBtn").classList.toggle("hidden", !isIn);
-  $("streamSearchForm").classList.toggle("hidden", !selectedProvider.supportsSearch);
-  const schemeSelect = document.getElementById("drmSchemeSelect") as HTMLSelectElement | null;
-  if (schemeSelect && selectedProvider.drmSchemes.length > 0) {
-    const preferred = drmManager.credentials.get(selectedProvider.id)?.preferredDrm ?? selectedProvider.drmSchemes[0];
-    schemeSelect.value = preferred;
-  }
-  $("streamWarn").textContent = isIn
-    ? `${selectedProvider.name} W3C EME (${selectedProvider.drmSchemes.join("/").toUpperCase()}) ready for Decks A–D.`
-    : "";
+  loginState.textContent = status.state === "needs-partner-key" ? NEEDS_PARTNER_KEY : status.state.replace(/-/g, " ");
+  loginState.classList.toggle("live", status.state === "signed-in" || status.state === "app-only");
+  const canSignIn = source.capabilities.userAuth && status.state !== "needs-partner-key";
+  $("loginBtn").classList.toggle("hidden", !canSignIn || status.state === "signed-in");
+  $("logoutBtn").classList.toggle("hidden", status.state !== "signed-in" && status.state !== "expired");
+  $("streamKeyForm").classList.toggle("hidden", !source.oauth);
+  $("streamSearchForm").classList.toggle("hidden", !source.capabilities.search);
+  $("streamBrowseBtn").classList.toggle("hidden", !source.capabilities.browse);
+  $<HTMLInputElement>("streamSearch").placeholder = source.id === "web-player" ? "Paste a Spotify, Apple Music, Deezer, YouTube, TIDAL, SoundCloud or Beatport track link" : `Search ${source.name}`;
+  $("streamWarn").textContent = source.capabilities.decodable
+    ? "Tracks this service hands out as plain audio load onto the decks like local files (BPM, key, waveform, stems, FX). Anything it only allows in its own player plays monitor-only."
+    : "Official players only: monitor-only, so no deck EQ, FX or analysis. Mix them in with System audio capture (AUX).";
 }
 
-async function refreshLogin(providerId: string): Promise<void> {
-  if (!desktop) return;
-  const provider = findProvider(providerId);
-  if (!provider) return;
-  const status = await desktop.streaming.status(provider.id, provider.cookieHints);
-  loggedIn[provider.id] = status.loggedIn;
+async function refreshStreamStatus(): Promise<void> {
+  if (!desktop?.streaming) return;
+  try {
+    const status = await desktop.streaming.status();
+    streamStatus = Object.fromEntries(status.sources.map((s) => [s.source, s]));
+    widevineAvailable = widevineAvailable || status.widevineBuild;
+  } catch {
+    /* main process not ready; keep "needs partner API key" */
+  }
   renderProviders();
-  if (selectedProvider.id === provider.id) renderStreamHead();
+  renderStreamHead();
 }
+
+$("streamKeyForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!desktop?.streaming) {
+    toast("Keys are stored by the desktop app.");
+    return;
+  }
+  const idInput = $<HTMLInputElement>("streamClientId");
+  const secretInput = $<HTMLInputElement>("streamClientSecret");
+  const result = await desktop.streaming.setKey(selectedSource.id, idInput.value.trim(), secretInput.value.trim());
+  secretInput.value = "";
+  if (!result.ok) {
+    toast(result.error ?? "Key not saved.");
+    return;
+  }
+  idInput.value = "";
+  await refreshStreamStatus();
+  toast(`${selectedSource.name}: key saved. ${sourceStatus(selectedSource).message}`);
+});
+
+$("streamKeyClear").addEventListener("click", async () => {
+  if (!desktop?.streaming) return;
+  await desktop.streaming.clearKey(selectedSource.id);
+  await refreshStreamStatus();
+  toast(`${selectedSource.name}: key removed.`);
+});
 
 $("loginBtn").addEventListener("click", async () => {
-  if (!desktop) {
+  if (!desktop?.streaming) {
     toast("Sign-in needs the desktop app.");
     return;
   }
-  await desktop.streaming.login(selectedProvider.id, selectedProvider.loginUrl, selectedProvider.cookieHints);
-  toast(`Sign in to ${selectedProvider.name} in the window that opened.`);
-  window.setTimeout(() => void refreshLogin(selectedProvider.id), 2500);
+  const source = selectedSource;
+  toast(`Finish signing in to ${source.name} in your browser, then come back here.`, 6000);
+  const result = await desktop.streaming.signIn(source.id);
+  await refreshStreamStatus();
+  toast(result.ok ? `${source.name}: signed in.` : `${source.name}: ${result.error ?? "sign-in failed"}`);
 });
 
 $("logoutBtn").addEventListener("click", async () => {
-  if (!desktop) return;
-  await desktop.streaming.logout(selectedProvider.id);
-  loggedIn[selectedProvider.id] = false;
-  renderProviders();
-  renderStreamHead();
+  if (!desktop?.streaming) return;
+  await desktop.streaming.signOut(selectedSource.id);
+  await refreshStreamStatus();
 });
 
-let searchResults: QueueTrack[] = [];
+let searchResults: StreamTrack[] = [];
+let browseNodes: BrowseNode[] = [];
 
-function deckButtons(track: QueueTrack): HTMLButtonElement[] {
+function deckButtons(track: StreamTrack): HTMLButtonElement[] {
   return ALL_DECKS.map((deckId) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "mini deck-btn";
     button.textContent = deckId;
-    button.title = `Play on deck ${deckId}`;
-    button.addEventListener("click", () => playStreamOnDeck(track, deckId));
+    button.title = `Load on deck ${deckId}`;
+    button.addEventListener("click", () => void playStreamOnDeck(track, deckId));
     return button;
   });
+}
+
+function accessLabel(track: StreamTrack): string {
+  if (track.source === "web-player") return " · official player, monitor only";
+  if (track.access === "preview") return " · preview";
+  if (track.access === "blocked") return " · not streamable";
+  return "";
 }
 
 function renderResults(): void {
   const list = $("resultList");
   $("resultCount").textContent = String(searchResults.length);
-  if (!searchResults.length) {
+  list.replaceChildren();
+  if (browseNodes.length || browseStack.length) {
+    if (browseStack.length) {
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "ghost small";
+      back.textContent = "← Back";
+      back.addEventListener("click", () => {
+        browseStack.pop();
+        void browseSource(browseStack.pop());
+      });
+      list.append(back);
+    }
+    for (const node of browseNodes) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "result browse-node";
+      row.textContent = node.title;
+      row.addEventListener("click", () => void browseSource(node.id));
+      list.append(row);
+    }
+  }
+  if (!searchResults.length && !browseNodes.length) {
     list.classList.add("empty");
-    list.textContent = selectedProvider.supportsSearch
-      ? loggedIn[selectedProvider.id]
-        ? "No results. Try another query."
-        : "Sign in to search."
-      : "This service has no search integration; open it and capture system audio.";
+    const status = sourceStatus(selectedSource);
+    list.textContent =
+      status.state === "needs-partner-key"
+        ? `${selectedSource.name}: ${NEEDS_PARTNER_KEY}. ${selectedSource.keyHelp}`
+        : selectedSource.id === "web-player"
+          ? "Paste a track link above."
+          : "Search or browse to find tracks.";
     return;
   }
   list.classList.remove("empty");
-  list.replaceChildren();
   for (const track of searchResults) {
     const row = document.createElement("div");
     row.className = "result";
-    row.innerHTML = `<div class="result-main"><div class="result-title">${escapeHtml(track.title)}</div><div class="result-sub">${escapeHtml(track.artist)}${track.durationSec ? ` · ${formatTime(track.durationSec)}` : ""}</div></div>`;
+    row.innerHTML = `<div class="result-main"><div class="result-title">${escapeHtml(track.title)}</div><div class="result-sub">${escapeHtml(track.artist)}${track.durationSec ? ` · ${formatTime(track.durationSec)}` : ""}${track.bpm ? ` · ${Math.round(track.bpm)} BPM` : ""}${track.key ? ` · ${escapeHtml(track.key)}` : ""}${accessLabel(track)}</div></div>`;
     const queueButton = document.createElement("button");
     queueButton.type = "button";
     queueButton.className = "primary";
     queueButton.textContent = "Queue";
+    queueButton.disabled = track.access === "blocked";
     queueButton.addEventListener("click", () => {
-      streamQueue.add(track);
+      queuedStreamTracks.set(streamTrackKey(track), track);
+      streamQueue.add({ id: streamTrackKey(track), title: track.title, artist: track.artist, durationSec: track.durationSec, provider: track.source, url: track.permalink ?? "", thumbnail: track.artworkUrl });
       renderQueue();
       toast(`Queued: ${track.title}`);
     });
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "ghost";
-    openButton.textContent = "Open";
-    openButton.addEventListener("click", () => openInService(track));
-    row.append(queueButton, ...deckButtons(track), openButton);
+    const buttons = deckButtons(track);
+    for (const b of buttons) b.disabled = track.access === "blocked";
+    row.append(queueButton, ...buttons);
     list.append(row);
   }
+}
+
+function streamErrorToast(error: unknown): void {
+  toast(describeError(error), 6000);
 }
 
 $("streamSearchForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = $<HTMLInputElement>("streamSearch").value.trim();
   if (!query) return;
-  if (!desktop) {
+  if (!desktop?.streaming && selectedSource.id !== "web-player") {
     toast("Search needs the desktop app.");
     return;
   }
-  if (!loggedIn[selectedProvider.id]) {
-    toast(`Sign in to ${selectedProvider.name} first.`);
+  const status = sourceStatus(selectedSource);
+  if (status.state === "needs-partner-key") {
+    toast(`${selectedSource.name}: ${NEEDS_PARTNER_KEY}.`);
+    renderResults();
     return;
   }
-  const creds = drmManager.credentials.get(selectedProvider.id);
-  const token = creds?.accessToken || creds?.developerToken;
-  const url = token && selectedProvider.apiSearchUrl ? selectedProvider.apiSearchUrl(query) : selectedProvider.searchUrl(query);
   try {
-    const response = await desktop.streaming.search(selectedProvider.id, url, token);
-    if (response.status !== 200) {
-      toast(`Search returned HTTP ${response.status}.`);
-      return;
-    }
-    searchResults = parseSearchResponse(response.body, selectedProvider.id);
+    browseNodes = [];
+    browseStack = [];
+    searchResults = await selectedSource.search(query);
     renderResults();
-    if (!searchResults.length) toast("No tracks parsed; check your session or developer token.");
+    if (!searchResults.length) toast(selectedSource.id === "web-player" ? "That link isn't one of the supported players." : "No tracks found.");
   } catch (error) {
-    toast(`Search failed: ${(error as Error).message}`);
+    streamErrorToast(error);
   }
+});
+
+async function browseSource(nodeId?: string): Promise<void> {
+  if (sourceStatus(selectedSource).state === "needs-partner-key") {
+    toast(`${selectedSource.name}: ${NEEDS_PARTNER_KEY}.`);
+    return;
+  }
+  try {
+    const result = await selectedSource.browse(nodeId);
+    if (nodeId) browseStack.push(nodeId);
+    browseNodes = result.nodes;
+    searchResults = result.tracks;
+    renderResults();
+    if (result.note && !result.nodes.length && !result.tracks.length) toast(result.note);
+  } catch (error) {
+    streamErrorToast(error);
+  }
+}
+
+$("streamBrowseBtn").addEventListener("click", () => {
+  browseStack = [];
+  void browseSource();
 });
 
 function renderQueue(): void {
@@ -3307,55 +3430,39 @@ function renderQueue(): void {
   }
   list.classList.remove("empty");
   list.replaceChildren();
-  streamQueue.items.forEach((track, index) => {
+  streamQueue.items.forEach((item, index) => {
+    const track = queuedStreamTracks.get(item.id);
     const row = document.createElement("div");
     row.className = "queue-item" + (index === streamQueue.index ? " active" : "");
-    row.innerHTML = `<span class="idx">${index + 1}</span><span class="q-main">${escapeHtml(track.title)} — ${escapeHtml(track.artist)}</span>`;
-    const play = document.createElement("button");
-    play.type = "button";
-    play.className = "icon-btn";
-    play.textContent = "▶";
-    play.title = "Open this track";
-    play.addEventListener("click", () => {
-      streamQueue.jump(index);
-      renderQueue();
-      void openInService(track);
-    });
+    row.innerHTML = `<span class="idx">${index + 1}</span><span class="q-main">${escapeHtml(item.title)} — ${escapeHtml(item.artist)}</span>`;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "icon-btn";
     remove.textContent = "✕";
     remove.title = "Remove";
     remove.addEventListener("click", () => {
-      streamQueue.remove(track.id);
+      streamQueue.remove(item.id);
+      queuedStreamTracks.delete(item.id);
       renderQueue();
     });
-    row.append(...deckButtons(track), play, remove);
+    row.append(...(track ? deckButtons(track) : []), remove);
     list.append(row);
   });
   $("queueNow").textContent = streamQueue.current ? `${streamQueue.current.title} — ${streamQueue.current.artist}` : "—";
 }
 
-async function openInService(track: QueueTrack): Promise<void> {
-  if (!desktop) return;
-  const provider = findProvider(track.provider) ?? selectedProvider;
-  if (track.provider === "local") {
-    toast("Local tracks play on the decks.");
-    return;
-  }
-  await desktop.streaming.open(provider.id, track.url, provider.cookieHints);
-  $("streamWarn").textContent = "Playing in the service window. Enable System audio capture to bring it into the mix.";
+function loadQueued(item: QueueTrack | null, deckId: DeckId = "A"): void {
+  const track = item ? queuedStreamTracks.get(item.id) : undefined;
+  if (track) void playStreamOnDeck(track, deckId);
 }
 
 $("queueNext").addEventListener("click", () => {
-  const next = streamQueue.next();
+  streamQueue.next();
   renderQueue();
-  if (next) void openInService(next);
 });
 $("queuePrev").addEventListener("click", () => {
-  const previous = streamQueue.previous();
+  streamQueue.previous();
   renderQueue();
-  if (previous) void openInService(previous);
 });
 $("queueRepeat").addEventListener("click", () => {
   streamQueue.repeat = streamQueue.repeat === "off" ? "all" : streamQueue.repeat === "all" ? "one" : "off";
@@ -3364,10 +3471,15 @@ $("queueRepeat").addEventListener("click", () => {
 });
 $("queueClear").addEventListener("click", () => {
   streamQueue.clear();
+  queuedStreamTracks.clear();
   renderQueue();
 });
-$("queueOpen").addEventListener("click", () => {
-  if (streamQueue.current) void openInService(streamQueue.current);
+$("queueOpen").addEventListener("click", () => loadQueued(streamQueue.current, "A"));
+
+void probeKeySystems().then((report) => {
+  widevineAvailable = widevineAvailable || report.keySystems.widevine;
+  const chip = document.getElementById("drmStatusChip");
+  if (chip) chip.textContent = widevineStatusText(report);
 });
 
 $("urlBtn").addEventListener("click", async () => {
@@ -4475,14 +4587,6 @@ if (desktop?.link) {
 }
 requestFrame();
 
-if (desktop) {
-  for (const provider of PROVIDERS) void refreshLogin(provider.id);
-  desktop.streaming.onLogin((payload) => {
-    const info = payload as { provider: string; loggedIn: boolean };
-    loggedIn[info.provider] = info.loggedIn;
-    renderProviders();
-    if (selectedProvider.id === info.provider) renderStreamHead();
-  });
-}
+void refreshStreamStatus();
 
-window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, drmManager, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream, tempoAuthority };
+window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, streamSources, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream, tempoAuthority };

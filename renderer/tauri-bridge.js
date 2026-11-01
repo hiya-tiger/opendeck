@@ -29,13 +29,16 @@
       fromFile: (path) => invoke("analyze_file", { path }),
       fromBytes: (bytes) => invoke("analyze_bytes_raw", raw(bytes)),
     },
+    // D42: stream sources (partner keys, OAuth, decodable audio) are only
+    // implemented in the Electron build; the Tauri shell reports none.
     streaming: {
-      login: (provider, url, hints) => invoke("streaming_login", { provider, url, hints }),
-      open: (provider, url, hints) => invoke("streaming_open", { provider, url, hints }),
-      status: (provider, hints) => invoke("streaming_status", { provider, hints }),
-      logout: (provider) => invoke("streaming_logout", { provider }),
-      search: (provider, url) => invoke("streaming_search", { provider, url }),
-      onLogin: (handler) => listen("streaming:login", handler),
+      status: async () => ({ sources: [], widevineBuild: false, redirectUri: "" }),
+      setKey: async () => ({ ok: false, error: "Streaming sources need the Electron build." }),
+      clearKey: async () => ({ ok: false }),
+      signIn: async () => ({ ok: false, error: "Streaming sources need the Electron build." }),
+      signOut: async () => ({ ok: false }),
+      request: async () => ({ status: 0, body: "", error: "network", detail: "Streaming sources need the Electron build." }),
+      audio: async () => ({ ok: false, error: "Streaming sources need the Electron build." }),
     },
     media: {
       fetch: async (url) => {

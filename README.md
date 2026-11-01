@@ -53,9 +53,12 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 - **Unified Undo Backup:** Every embedded tag write and `_Serato_` library export creates an automatic backup snapshot that can be restored in one click (`Undo tags` / `restoreLibraryBackup`).
 - **Smart Crates, Scratchpad & History:** Rule-based Smart Crates (`contains`, `equals`, `>=`, `<=`, `inRange` across BPM, key, crate, title, and play count), Prepare Scratchpad, Played History with CSV export, high-contrast **Day Mode**, and **Offline / Practice Mode**.
 
-### Direct Commercial Streaming DRM & 8-Provider Catalog Integration
-- **W3C Encrypted Media Extensions (EME) DRM Engine (`src/renderer/streaming/drm.ts`):** Native `MediaKeySystemAccess` / `MediaKeys` / `MediaKeySession` negotiation across **Widevine (`com.widevine.alpha`)**, **FairPlay (`com.apple.fps.1_0`)**, **PlayReady (`com.microsoft.playready`)**, and **ClearKey (`org.w3.clearkey`)** with OAuth2 PKCE (`S256`) and per-provider Developer/Bearer token management.
-- **8 Commercial Streaming Services on Decks A–D:** Direct catalog search, EME license exchange, and in-deck playback across **TIDAL**, **Beatport**, **Beatsource**, **SoundCloud Go+**, **Spotify**, **Apple Music**, **Deezer**, and **YouTube Music**.
+### Streaming sources (in-deck, partner APIs; see [D42](docs/decisions.md) and [setup](docs/streaming-setup.md))
+- **What it is:** a pluggable `StreamSource` interface (`src/renderer/streaming/`) with adapters for **Beatport LINK**, **Beatsource LINK**, **TIDAL** and **SoundCloud**, written against their official APIs. Streamed tracks sit in the library and load onto decks A–D like local files. Nothing opens a separate player window.
+- **Needs partner API keys.** OpenDecks ships no service credentials. Until you paste a key from the service's developer or partner programme, each source says "needs partner API key" and does nothing else. Beatport/Beatsource LINK keys are issued only to licensed DJ-software partners, and each DJ also needs their own subscription.
+- **Full deck features only for audio the service hands out unencrypted** (for example SoundCloud's public-API MP3 streams). That audio is decoded once and gets BPM/key analysis, waveform, stems and FX.
+- **DRM services are monitor-only.** When a service only allows its own Widevine player (most of TIDAL, Spotify, Apple Music, Deezer), OpenDecks embeds that official player in the deck panel and labels it monitor-only: DRM audio cannot reach Web Audio, so no EQ, FX, waveform, sync or analysis. Mix it in with System audio capture. Stock Electron has no Widevine CDM, so in this build those players show previews only; full tracks need a Widevine-enabled Electron (castlabs ECS).
+- **Not verified against live partner accounts yet.** The OAuth flows and API calls follow the public docs and are covered by unit tests with recorded response shapes, but have not run against real partner keys. OpenDecks never decrypts streams, scrapes service pages or uses yt-dlp.
 
 ### P6 — DVS Timecode Control & 195 Supported Hardware Devices
 - **Real DVS Timecode Decoder (`src/timecode`, `src/dvs`):** Supports **Serato CV02 Vinyl (Side A/B, 1 kHz)**, **Serato Control CD**, **Traktor Scratch MK2 (2 kHz)**, **MixVibes V2 / 7" (1.3 kHz)**, and **Pioneer rekordbox DVS (1 kHz)** with Absolute (`ABS`), Relative (`REL`), and Internal (`INT`) modes, needle-drop seeking, 1-second reference level & phase calibration (`Set needle position`), drift correction, and circular X-Y scope display.
@@ -100,7 +103,7 @@ cargo build --release -p opendeck-app
 ## Verification Status
 
 - **TypeScript Typecheck (`npx tsc --noEmit`):** `0 errors`
-- **Node Unit & Integration Tests (`npm test`):** `190/190 passing` across 19 test files (`defs`, `timecode`, `dvs`, `engine`, `streaming`, `artwork`, `midi` [195-device catalogue], `formats`, `pcm-transport`, `serato`, `serato-write`, `serato-extra`, `cue-store`, `library-ux`, `pad-modes`, `pcm-worklet`, `platter`, `parts`, and `video-mixer`)
+- **Node Unit & Integration Tests (`npm test`):** `270/270 passing` across 26 test files (see the `test` script in `package.json`; `stream-sources` covers the streaming adapters)
 - **Rust Workspace Tests (`cargo test`):** `39/39 passing` (`opendeck-core`: 7, `opendeck-audio`: 30, `opendeck-app`: 2)
 - **Headless Electron Audio + Stems + Video Smoke Test (`npm run smoke:audio`):**
   ```json
