@@ -220,37 +220,34 @@
         <div class="stream-main">
           <div class="stream-head">
             <div>
-              <h2 id="streamTitle">YouTube Music</h2>
-              <p class="micro" id="streamNote">Sign in with your own account to search and queue.</p>
+              <h2 id="streamTitle">Beatport LINK</h2>
+              <p class="micro" id="streamNote">Needs partner API key.</p>
             </div>
             <div class="stream-actions">
-              <span class="chip" id="loginState">signed out</span>
-              <button id="loginBtn" type="button" class="primary small">Sign in</button>
+              <span class="chip" id="loginState">needs partner API key</span>
+              <button id="loginBtn" type="button" class="primary small hidden" title="Opens the service's sign-in page in your browser">Sign in</button>
               <button id="logoutBtn" type="button" class="ghost small hidden">Sign out</button>
             </div>
           </div>
 
-          <div class="search-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <span class="chip" id="drmStatusChip" title="W3C Encrypted Media Extensions (EME) Key System status">EME DRM: probing…</span>
-            <select id="drmSchemeSelect" class="small" title="DRM Key System (Widevine, FairPlay, PlayReady, ClearKey)">
-              <option value="widevine">Widevine (com.widevine.alpha)</option>
-              <option value="playready">PlayReady (com.microsoft.playready)</option>
-              <option value="fairplay">FairPlay (com.apple.fps.1_0)</option>
-              <option value="clearkey">ClearKey (org.w3.clearkey)</option>
-            </select>
-            <input id="drmTokenInput" type="password" placeholder="API / Bearer / MusicKit Dev Token (optional)" style="flex:1;min-width:180px;">
-            <button id="drmConnectBtn" type="button" class="ghost small">Connect DRM</button>
-          </div>
+          <form id="streamKeyForm" class="search-row stream-key" autocomplete="off">
+            <input id="streamClientId" type="text" placeholder="Partner client id" spellcheck="false">
+            <input id="streamClientSecret" type="password" placeholder="Client secret (if the service issued one)">
+            <button type="submit" class="ghost small">Save key</button>
+            <button id="streamKeyClear" type="button" class="ghost small">Remove key</button>
+          </form>
+          <p class="micro" id="drmStatusChip" title="Whether embedded official players can use Widevine in this build">Checking Widevine…</p>
 
           <form id="streamSearchForm" class="search-row">
-            <input id="streamSearch" type="search" placeholder="Search tracks, artists, playlists across signed-in or DRM-linked catalog">
+            <input id="streamSearch" type="search" placeholder="Search this service">
             <button type="submit" class="primary small">Search</button>
+            <button id="streamBrowseBtn" type="button" class="ghost small">Browse</button>
           </form>
 
           <div class="stream-body">
             <div class="results">
               <div class="section-head"><span class="eyebrow">Results</span><span class="micro" id="resultCount">0</span></div>
-              <div id="resultList" class="result-list empty">Search the signed-in service to queue music.</div>
+              <div id="resultList" class="result-list empty">Pick a service. Each one needs its partner API key before it can search.</div>
             </div>
             <div class="queue">
               <div class="section-head">
@@ -266,7 +263,7 @@
               <div class="queue-now">
                 <span class="micro">Now</span>
                 <strong id="queueNow">—</strong>
-                <button id="queueOpen" type="button" class="primary small">Open in service</button>
+                <button id="queueOpen" type="button" class="primary small">Load on deck A</button>
               </div>
             </div>
           </div>

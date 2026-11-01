@@ -15,48 +15,15 @@ import {
 import { MODEL, findCache, installModel, loadManifestAt, modelInfo, pickCacheDir, readCache, type SeparateRequest } from "./separation.ts";
 import { StemHost, defaultSpawner } from "./stems/host.ts";
 import { createLinkNode } from "./link.ts";
+import { setupStreaming } from "./streaming.ts";
 import { setupDetectedMedia } from "./prolink/ipc.ts";
 import type { MediaManager } from "./prolink/manager.ts";
 
 const root = (): string => app.getAppPath();
 
-const ALLOWED_HOSTS = [
-  "accounts.google.com",
-  "music.youtube.com",
-  "youtube.com",
-  "www.youtube.com",
-  "accounts.spotify.com",
-  "open.spotify.com",
-  "api.spotify.com",
-  "gew1-spclient.spotify.com",
-  "secure.soundcloud.com",
-  "soundcloud.com",
-  "api.soundcloud.com",
-  "api-v2.soundcloud.com",
-  "w.soundcloud.com",
-  "login.tidal.com",
-  "listen.tidal.com",
-  "api.tidal.com",
-  "embed.tidal.com",
-  "www.deezer.com",
-  "api.deezer.com",
-  "media.deezer.com",
-  "widget.deezer.com",
-  "music.apple.com",
-  "amp-api.music.apple.com",
-  "embed.music.apple.com",
-  "play.itunes.apple.com",
-  "www.beatport.com",
-  "api.beatport.com",
-  "embed.beatport.com",
-  "www.beatsource.com",
-  "api.beatsource.com",
-  "embed.beatsource.com",
-];
 
 let mainWindow: BrowserWindow | null = null;
 let videoOutputWindow: BrowserWindow | null = null;
-const providerWindows = new Map<string, BrowserWindow>();
 let rtmp: ChildProcessWithoutNullStreams | null = null;
 let rtmpKey = "";
 let detectedMedia: MediaManager | null = null;
@@ -77,138 +44,21 @@ const createWindow = (): void => {
       backgroundThrottling: true,
     },
   });
+  // Embedded official players (D42) sometimes try to open their own pages.
+  // Never spawn app windows for them: https links go to the system browser.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("file:")) return { action: "allow" }; // the app's own video output page
+    if (/^https:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
   mainWindow.loadFile(path.join(root(), "renderer", "index.html"));
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 };
 
-const partitionFor = (provider: string): string => `persist:provider-${provider.replace(/[^a-z0-9-]/gi, "")}`;
-
-const sessionFor = (provider: string): Electron.Session => session.fromPartition(partitionFor(provider));
-
-const providerLoginStatus = async (provider: string, hints: string[]): Promise<boolean> => {
-  const cookies = await sessionFor(provider).cookies.get({});
-  const names = new Set(cookies.map((cookie) => cookie.name));
-  return hints.some((hint) => names.has(hint));
-};
-
-const openProviderWindow = async (
-  provider: string,
-  url: string,
-  hints: string[],
-  purpose: "login" | "player",
-): Promise<{ ok: boolean; loggedIn: boolean }> => {
-  if (!ALLOWED_HOSTS.includes(new URL(url).host)) {
-    return { ok: false, loggedIn: false };
-  }
-  const existing = providerWindows.get(provider);
-  if (existing && !existing.isDestroyed()) {
-    existing.focus();
-    if (purpose === "player") existing.loadURL(url);
-    return { ok: true, loggedIn: await providerLoginStatus(provider, hints) };
-  }
-
-  const window = new BrowserWindow({
-    width: purpose === "login" ? 1120 : 900,
-    height: 820,
-    title: purpose === "login" ? `Sign in to ${provider}` : "OpenDecks player",
-    parent: mainWindow ?? undefined,
-    autoHideMenuBar: true,
-    webPreferences: {
-      partition: partitionFor(provider),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
-  providerWindows.set(provider, window);
-  window.on("closed", () => providerWindows.delete(provider));
-  window.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (ALLOWED_HOSTS.includes(new URL(target).host)) return { action: "allow" };
-    void shell.openExternal(target);
-    return { action: "deny" };
-  });
-  await window.loadURL(url);
-
-  if (purpose === "login") {
-    const deadline = Date.now() + 15 * 60 * 1000;
-    const timer = setInterval(async () => {
-      if (window.isDestroyed() || Date.now() > deadline) {
-        clearInterval(timer);
-        return;
-      }
-      if (await providerLoginStatus(provider, hints)) {
-        clearInterval(timer);
-        mainWindow?.webContents.send("streaming:login", { provider, loggedIn: true });
-      }
-    }, 1500);
-    window.on("closed", () => clearInterval(timer));
-  }
-  return { ok: true, loggedIn: await providerLoginStatus(provider, hints) };
-};
-
-ipcMain.handle("streaming:login", async (_event, provider: string, url: string, hints: string[]) =>
-  openProviderWindow(provider, url, hints, "login"),
-);
-
-ipcMain.handle("streaming:open", async (_event, provider: string, url: string, hints: string[]) =>
-  openProviderWindow(provider, url, hints, "player"),
-);
-
-ipcMain.handle("streaming:status", async (_event, provider: string, hints: string[]) => ({
-  loggedIn: await providerLoginStatus(provider, hints),
-}));
-
-ipcMain.handle("streaming:logout", async (_event, provider: string) => {
-  await sessionFor(provider).clearStorageData();
-  providerWindows.get(provider)?.close();
-  return { ok: true };
-});
-
-ipcMain.handle("streaming:search", async (_event, provider: string, url: string, token?: string) => {
-  const target = new URL(url);
-  if (!ALLOWED_HOSTS.includes(target.host)) throw new Error("provider host not allowed");
-  if (!/^[a-z0-9-]+$/.test(provider)) throw new Error("bad provider id");
-  const headers: Record<string, string> = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-  };
-  if (token && token.trim()) {
-    headers.Authorization = `Bearer ${token.trim()}`;
-  }
-  const response = await sessionFor(provider).fetch(url, { headers });
-  return { status: response.status, body: await response.text() };
-});
-
-ipcMain.handle(
-  "streaming:license",
-  async (
-    _event,
-    provider: string,
-    licenseUrl: string,
-    challenge: Uint8Array,
-    token?: string,
-  ) => {
-    const target = new URL(licenseUrl);
-    if (!ALLOWED_HOSTS.includes(target.host)) throw new Error("license host not allowed");
-    if (!/^[a-z0-9-]+$/.test(provider)) throw new Error("bad provider id");
-    const headers: Record<string, string> = {
-      "Content-Type": "application/octet-stream",
-    };
-    if (token && token.trim()) {
-      headers.Authorization = `Bearer ${token.trim()}`;
-    }
-    const response = await sessionFor(provider).fetch(licenseUrl, {
-      method: "POST",
-      headers,
-      body: Buffer.from(challenge),
-    });
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    return { ok: response.ok, status: response.status, license: bytes };
-  },
-);
+// Streaming sources (partner keys, OAuth, decodable audio) live in ./streaming.ts.
+// No provider windows, no cookie sniffing, no licence-server proxy (D42).
 
 ipcMain.handle("media:fetch", async (_event, url: string) => {
   const target = new URL(url);
@@ -571,7 +421,10 @@ app.whenReady().then(() => {
     permission === "media" ||
     permission === "audioCapture" ||
     permission === "display-capture" ||
-    permission === "speaker-selection";
+    permission === "speaker-selection" ||
+    // EME for the official players embedded in a deck (D42). Only has an effect
+    // on a Widevine-enabled (castlabs ECS) build; stock Electron has no CDM.
+    permission === "mediaKeySystem";
 
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
     callback(allowMedia(permission));
@@ -588,6 +441,7 @@ app.whenReady().then(() => {
     callback({ video: sources[0], audio: "loopback" });
   });
 
+  setupStreaming();
   createWindow();
   // CDJ (Pro DJ Link) and local USB drive detection. Nothing is imported
   // until the user answers the in-app prompt.

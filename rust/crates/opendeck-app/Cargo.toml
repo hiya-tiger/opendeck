@@ -16,7 +16,6 @@ opendeck-core = { path = "../opendeck-core" }
 opendeck-audio = { path = "../opendeck-audio", features = ["decode"] }
 ureq = "2"
 rfd = "0.15"
-sha1 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.39.1"

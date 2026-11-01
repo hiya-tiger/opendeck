@@ -333,48 +333,20 @@ fn streaming_logout(_provider: String) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 async fn streaming_search(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     provider: String,
-    url: String,
+    _url: String,
 ) -> Result<serde_json::Value, String> {
-    if provider == "youtube-music" {
-        return youtube_music_search(app, url).await;
-    }
-    let cookies = cookie_header_for(&app, &provider, &url);
-    let response = tauri::async_runtime::spawn_blocking(move || {
-        let mut request = ureq::AgentBuilder::new()
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            )
-            .build()
-            .get(&url)
-            .set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            .set("Accept-Language", "en-US,en;q=0.9");
-        if !cookies.is_empty() {
-            request = request.set("Cookie", &cookies);
-        }
-        match request.call() {
-            Ok(response) => {
-                let status = response.status();
-                let body = response.into_string().unwrap_or_default();
-                Ok(serde_json::json!({ "status": status, "body": body }))
-            }
-            Err(ureq::Error::Status(status, response)) => Ok(serde_json::json!({
-                "status": status,
-                "body": response.into_string().unwrap_or_default()
-            })),
-            Err(error) => Err(format!("{provider} search failed: {error}")),
-        }
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-    response
+    // D42: page/cookie scraping of streaming services was removed. Stream
+    // sources now use official partner APIs, implemented in the Electron build.
+    Err(format!("{provider}: search uses official partner APIs in the Electron build (docs/decisions.md D42)"))
 }
 
+#[allow(dead_code)]
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+#[allow(dead_code)]
 fn cookie_value(app: &tauri::AppHandle, provider: &str, host: &str, name: &str) -> Option<String> {
     let window = app
         .get_webview_window(&format!("provider-{provider}"))
@@ -395,72 +367,7 @@ fn cookie_value(app: &tauri::AppHandle, provider: &str, host: &str, name: &str) 
         .map(|cookie| cookie.value().to_string())
 }
 
-async fn youtube_music_search(
-    app: tauri::AppHandle,
-    url: String,
-) -> Result<serde_json::Value, String> {
-    let query = url
-        .parse::<tauri::Url>()
-        .ok()
-        .and_then(|parsed| {
-            parsed
-                .query_pairs()
-                .find(|(key, _)| key == "q")
-                .map(|(_, value)| value.to_string())
-        })
-        .ok_or_else(|| "search url is missing the q parameter".to_string())?;
-    let cookies = cookie_header_for(&app, "youtube-music", "https://music.youtube.com/");
-    let sapisid = cookie_value(&app, "youtube-music", "music.youtube.com", "SAPISID")
-        .ok_or_else(|| "YouTube Music is not signed in".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0);
-        let origin = "https://music.youtube.com";
-        use sha1::{Digest, Sha1};
-        let digest = Sha1::digest(format!("{timestamp} {sapisid} {origin}").as_bytes());
-        let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        let payload = serde_json::json!({
-            "context": { "client": {
-                "clientName": "WEB_REMIX",
-                "clientVersion": "1.20240101.01.00",
-                "hl": "en",
-                "gl": "CA",
-                "platform": "DESKTOP"
-            }},
-            "query": query
-        });
-        let response = ureq::AgentBuilder::new()
-            .user_agent(BROWSER_UA)
-            .build()
-            .post("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
-            .set("Content-Type", "application/json")
-            .set("Authorization", &format!("SAPISIDHASH {timestamp}_{hash}"))
-            .set("X-Origin", origin)
-            .set("Origin", origin)
-            .set("Cookie", &cookies)
-            .send_string(&payload.to_string());
-        match response {
-            Ok(response) => {
-                let body = response.into_string().unwrap_or_default();
-                let tracks = extract_ytmusic_tracks(&body);
-                Ok(serde_json::json!({
-                    "status": 200,
-                    "body": serde_json::json!({ "tracks": tracks }).to_string()
-                }))
-            }
-            Err(ureq::Error::Status(status, response)) => Ok(serde_json::json!({
-                "status": status,
-                "body": response.into_string().unwrap_or_default()
-            })),
-            Err(error) => Err(format!("YouTube Music search failed: {error}")),
-        }
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
+#[allow(dead_code)]
 fn extract_ytmusic_tracks(body: &str) -> Vec<serde_json::Value> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
         return Vec::new();
