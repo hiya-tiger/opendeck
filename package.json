@@ -12,7 +12,7 @@
     "smoke:link": "node scripts/smoke-link.mjs",
     "smoke:ui": "node scripts/ui-smoke.mjs",
     "start": "npm run build && electron .",
-    "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts test/formats.test.ts test/pcm-transport.test.ts test/serato.test.ts test/serato-write.test.ts test/serato-extra.test.ts test/cue-store.test.ts test/library-ux.test.ts test/pad-modes.test.ts test/pcm-worklet.test.ts test/platter.test.ts test/parts.test.ts test/video-mixer.test.ts test/prolink-protocol.test.ts test/prolink-nfs.test.ts test/prolink-pdb.test.ts test/prolink-media.test.ts test/stems.test.ts test/analysis-pool.test.ts test/stream-sources.test.ts test/deck-ui.test.ts",
+    "test": "node --test test/defs.test.ts test/timecode.test.ts test/dvs.test.ts test/engine.test.ts test/streaming.test.ts test/artwork.test.ts test/midi.test.ts test/formats.test.ts test/pcm-transport.test.ts test/serato.test.ts test/serato-write.test.ts test/serato-extra.test.ts test/cue-store.test.ts test/library-ux.test.ts test/pad-modes.test.ts test/pcm-worklet.test.ts test/platter.test.ts test/parts.test.ts test/video-mixer.test.ts test/prolink-protocol.test.ts test/prolink-nfs.test.ts test/prolink-pdb.test.ts test/prolink-media.test.ts test/stems.test.ts test/analysis-pool.test.ts test/stream-sources.test.ts test/deck-ui.test.ts test/slab.test.ts",
     "package:win": "node scripts/package-win.mjs",
     "installer:win": "node scripts/make-installer.mjs",
     "package:mac": "node scripts/make-mac.mjs",

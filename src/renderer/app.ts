@@ -64,6 +64,7 @@ import {
 import {
   PART_FX_PADS,
   PAD_MODE_DEFS,
+  PAD_MODE_IDS,
   SequenceRecorder,
   beatJumpStep,
   cueLoopRange,
@@ -88,6 +89,7 @@ import {
   type MidiEvent,
 } from "./midi/midi.ts";
 import { applyProfile, profileForDevice } from "./midi/profiles.ts";
+import { SlabController, isSlabPort, slabFilterAmount, type SlabHost } from "./midi/slab.ts";
 import { applyWaveOrientation, deckTimeText, resetDeckReadouts, storedWaveVertical } from "./ui/deck-view.ts";
 
 interface NativeAnalysis {
@@ -3802,6 +3804,7 @@ function frame(): void {
     wasPlaying[deckId] = playing;
   }
   updateEngineDiagnostics(performance.now());
+  syncSlabLeds();
   for (const deckId of ALL_DECKS) {
     renderDeckFrame(deckId);
     syncDeckVideoFrame(deckId);
@@ -3866,6 +3869,327 @@ for (const pad of SAMPLER_SLOTS) {
   MIDI_TARGETS.push({ id: `smp.${pad.slot + 1}`, label: `Sampler ${pad.slot + 1} ${pad.label}` });
 }
 
+/* ------------------------------------------------- AlphaTheta SLAB driver */
+
+// SLAB in general MIDI mode, mapped from AlphaTheta's official message list
+// (src/renderer/midi/slab.ts). Untested on a physical unit.
+const slabHud = document.createElement("div");
+slabHud.id = "slabHud";
+slabHud.className = "slab-hud hidden";
+slabHud.setAttribute("role", "status");
+document.body.append(slabHud);
+let slabHudTimer: number | null = null;
+let slabBrowseIndex = -1;
+const slabPrevFx: Partial<Record<DeckId, FxType>> = {};
+const slabFilterPrevFx: Partial<Record<DeckId, FxType>> = {};
+const slabFxAmount: Record<DeckId, number> = { A: 0.5, B: 0.5, C: 0.5, D: 0.5 };
+const slabPartGain: Record<DeckId, Record<PartId, number>> = {
+  A: { drums: 1, bass: 1, other: 1, vocals: 1 },
+  B: { drums: 1, bass: 1, other: 1, vocals: 1 },
+  C: { drums: 1, bass: 1, other: 1, vocals: 1 },
+  D: { drums: 1, bass: 1, other: 1, vocals: 1 },
+};
+
+function setSlabHud(text: string | null): void {
+  if (slabHudTimer !== null) window.clearTimeout(slabHudTimer);
+  slabHudTimer = null;
+  if (!text) {
+    slabHudTimer = window.setTimeout(() => slabHud.classList.add("hidden"), 600);
+    return;
+  }
+  slabHud.textContent = text;
+  slabHud.classList.remove("hidden");
+  slabHudTimer = window.setTimeout(() => slabHud.classList.add("hidden"), 2500);
+}
+
+function stepRange(input: HTMLInputElement, delta: number): number {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 1);
+  const next = Math.max(min, Math.min(max, Number(input.value) + delta));
+  input.value = String(Math.round(next * 1000) / 1000);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  return Number(input.value);
+}
+
+function stepSelect(select: HTMLSelectElement, delta: number): string {
+  if (select.disabled || !select.options.length) return select.value;
+  const count = select.options.length;
+  const at = Math.max(0, select.selectedIndex);
+  select.selectedIndex = (((at + Math.sign(delta)) % count) + count) % count;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  return select.value;
+}
+
+const SLAB_EQ_INPUT: Record<string, string> = { "eq-high": "eqHigh", "eq-mid": "eqMid", "eq-low": "eqLow", trim: "trim" };
+
+function slabReadout(deckId: DeckId, assign: string): string {
+  const deck = decks[deckId];
+  const refs = ui[deckId]!;
+  if (SLAB_EQ_INPUT[assign]) {
+    const value = Number((refs[SLAB_EQ_INPUT[assign]!] as HTMLInputElement).value);
+    return assign === "trim" ? `${deckId} · TRIM ${value.toFixed(2)}` : `${deckId} · ${assign.replace("eq-", "EQ ").toUpperCase()} ${value >= 0 ? "+" : ""}${value.toFixed(1)} dB`;
+  }
+  if (assign.startsWith("part-")) {
+    const part = assign.slice(5) as PartId;
+    return `${deckId} · ${part.toUpperCase()} ${Math.round(slabPartGain[deckId][part] * 100)}%${partFxMuted[deckId][part] ? " (muted)" : ""}`;
+  }
+  switch (assign) {
+    case "fx-type": return `${deckId} · FX ${(refs.fxType as HTMLSelectElement).selectedOptions[0]?.textContent ?? deck.fx}`;
+    case "fx-wet": return `${deckId} · FX MIX ${Math.round(Number((refs.fxWet as HTMLInputElement).value) * 100)}%`;
+    case "fx-amount": return `${deckId} · FX AMOUNT ${Math.round(slabFxAmount[deckId] * 100)}%`;
+    case "fx-division": return `${deckId} · FX BEAT ${(refs.fxDiv as HTMLSelectElement).value}`;
+    case "tempo": return `${deckId} · TEMPO ${deck.tempo >= 0 ? "+" : ""}${deck.tempo.toFixed(2)}%`;
+    case "key": return `${deckId} · KEY ${deck.pitchShift > 0 ? "+" : ""}${deck.pitchShift} st`;
+    case "loop-size": return `${deckId} · LOOP ${deck.loopBeats < 1 ? `1/${Math.round(1 / deck.loopBeats)}` : deck.loopBeats} beats${deck.loopActive ? " (on)" : ""}`;
+    case "beat-jump": return `${deckId} · BEAT JUMP`;
+    default: return `${deckId} · ${assign}`;
+  }
+}
+
+function restoreFx(deckId: DeckId, previous: FxType | undefined): void {
+  const refs = ui[deckId]!;
+  (refs.fxType as HTMLSelectElement).value = previous ?? "off";
+  refs.fxType.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function engageFx(deckId: DeckId, type: FxType, wet: number): void {
+  const refs = ui[deckId]!;
+  (refs.fxType as HTMLSelectElement).value = type;
+  refs.fxType.dispatchEvent(new Event("change", { bubbles: true }));
+  (refs.fxWet as HTMLInputElement).value = String(wet);
+  decks[deckId].setFxWet(wet);
+}
+
+function highlightSlabDeck(deckId: DeckId): void {
+  for (const id of ALL_DECKS) document.getElementById(`deckSlot${id}`)?.classList.toggle("slab-focus", id === deckId);
+}
+
+const slabHost: SlabHost = {
+  selectDeck(deckId) {
+    if ((deckId === "C" || deckId === "D") && document.getElementById("fourDeckToggle")?.getAttribute("aria-pressed") !== "true") {
+      localStorage.setItem("opendeck.fourDecks", "1");
+      setFourDeckMode(true);
+    }
+    highlightSlabDeck(deckId);
+  },
+  deckPad(deckId, index, pressed, options) {
+    const deck = decks[deckId];
+    const forced = options.mode as PadMode | undefined;
+    const mode = forced ?? padModes[deckId];
+    if (mode === "part-fx" && forced) {
+      if (pressed) togglePartFx(deckId, index);
+      return;
+    }
+    const holds = ["loop-roll", "slicer", "pitch-play", "scratch"].includes(mode);
+    if (!pressed) {
+      if (padHolds[deckId]?.index === index) releasePadHold(deckId);
+      if (mode === "hot-cue") deck.releaseHotCue();
+      return;
+    }
+    if (options.shift && mode === "hot-cue") {
+      deck.clearHotCue(index);
+      persistCues(deckId);
+      updatePads(deckId, true);
+      return;
+    }
+    if (holds) startPadHold(deckId, index, undefined, mode);
+    else handlePadAction(deckId, index, forced);
+    persistCues(deckId);
+  },
+  cycleDeckPadMode(deckId, direction) {
+    const at = PAD_MODE_IDS.indexOf(padModes[deckId]);
+    const next = PAD_MODE_IDS[(at + direction + PAD_MODE_IDS.length) % PAD_MODE_IDS.length]!;
+    slabHost.setDeckPadMode(deckId, next);
+    return PAD_MODE_DEFS.find((def) => def.id === next)?.label ?? next;
+  },
+  setDeckPadMode(deckId, mode) {
+    if (!isPadMode(mode) || padModes[deckId] === mode) return;
+    padModes[deckId] = mode;
+    (ui[deckId]!.padMode as HTMLSelectElement).value = mode;
+    releasePadHold(deckId);
+    updatePads(deckId, true);
+  },
+  padFeedback(deckId, index, mode) {
+    if (mode === "loop-roll") {
+      const hold = padHolds[deckId];
+      return { color: null, active: Boolean(hold && hold.kind === "loop-roll" && hold.index === index) };
+    }
+    if (mode === "part-fx") {
+      const [kind, ...rest] = PART_FX_PADS[index]!.split("-");
+      const part = rest.join("-") as PartId;
+      const active = kind === "filter" ? partFxFiltered[deckId][part] : partFxMuted[deckId][part];
+      return { color: PARTS.find((p) => p.id === part)?.color ?? null, active };
+    }
+    const pad = ui[deckId]!.pads.children[index] as HTMLElement | undefined;
+    if (!pad) return { color: null, active: false };
+    return { color: pad.style.background || null, active: pad.classList.contains("set") || pad.classList.contains("pad-held") };
+  },
+  sampler(slot, velocity) {
+    triggerSamplerPad(slot, velocity);
+  },
+  samplerLoaded(slot) {
+    return sampler.has(slot);
+  },
+  padFx(deckId, fx, wet) {
+    if (fx) {
+      if (slabPrevFx[deckId] === undefined) slabPrevFx[deckId] = decks[deckId].fx;
+      engageFx(deckId, fx as FxType, wet);
+    } else if (slabPrevFx[deckId] !== undefined) {
+      restoreFx(deckId, slabPrevFx[deckId]);
+      delete slabPrevFx[deckId];
+    }
+  },
+  padFxAmount(deckId, amount) {
+    slabFxAmount[deckId] = amount;
+    decks[deckId].setFxAmount(amount);
+  },
+  encoder(deckId, assign, delta, fine) {
+    const deck = decks[deckId];
+    const refs = ui[deckId]!;
+    if (SLAB_EQ_INPUT[assign]) {
+      const step = assign === "trim" ? (fine ? 0.005 : 0.02) : fine ? 0.1 : 0.5;
+      stepRange(refs[SLAB_EQ_INPUT[assign]!] as HTMLInputElement, delta * step);
+    } else if (assign.startsWith("part-")) {
+      const part = assign.slice(5) as PartId;
+      const next = Math.max(0, Math.min(1.5, slabPartGain[deckId][part] + delta * (fine ? 0.01 : 0.04)));
+      slabPartGain[deckId][part] = next;
+      deck.setPartGain(part, next);
+    } else {
+      switch (assign) {
+        case "fx-type": stepSelect(refs.fxType as HTMLSelectElement, delta); break;
+        case "fx-wet": stepRange(refs.fxWet as HTMLInputElement, delta * (fine ? 0.005 : 0.02)); break;
+        case "fx-amount":
+          slabFxAmount[deckId] = Math.max(0, Math.min(1, slabFxAmount[deckId] + delta * (fine ? 0.005 : 0.02)));
+          deck.setFxAmount(slabFxAmount[deckId]);
+          break;
+        case "fx-division": stepSelect(refs.fxDiv as HTMLSelectElement, delta); break;
+        case "tempo": applyTempo(deckId, deck.tempo + delta * (fine ? 0.02 : 0.1)); break;
+        case "key":
+          for (let i = 0; i < Math.abs(delta); i += 1) (delta > 0 ? refs.keyUp : refs.keyDown)?.click();
+          break;
+        case "loop-size":
+          if (delta > 0) deck.doubleLoop();
+          else if (delta < 0) deck.halveLoop();
+          syncLoopButtons(deckId);
+          break;
+        case "beat-jump": deck.beatJump(delta * (fine ? 0.25 : 1)); break;
+      }
+    }
+    return slabReadout(deckId, assign);
+  },
+  encoderPress(deckId, assign) {
+    const deck = decks[deckId];
+    const refs = ui[deckId]!;
+    if (SLAB_EQ_INPUT[assign]) {
+      const input = refs[SLAB_EQ_INPUT[assign]!] as HTMLInputElement;
+      input.value = assign === "trim" ? "1" : "0";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    } else if (assign.startsWith("part-")) {
+      const part = assign.slice(5) as PartId;
+      togglePartFx(deckId, PART_FX_PADS.indexOf(`mute-${part}` as never));
+    } else {
+      switch (assign) {
+        case "fx-type": restoreFx(deckId, "off"); break;
+        case "fx-wet": stepRange(refs.fxWet as HTMLInputElement, -1); break;
+        case "fx-amount": slabFxAmount[deckId] = 0.5; deck.setFxAmount(0.5); break;
+        case "tempo": applyTempo(deckId, 0); break;
+        case "key": refs.keyVal?.click(); break;
+        case "loop-size": refs.loop.click(); break;
+        case "beat-jump": refs.sync.click(); break;
+      }
+    }
+    return slabReadout(deckId, assign);
+  },
+  readout: slabReadout,
+  showHud: setSlabHud,
+  browse(delta) {
+    const visible = library.visible();
+    if (!visible.length) return;
+    library.rowFor(visible[slabBrowseIndex]?.id ?? "")?.classList.remove("slab-browse");
+    slabBrowseIndex = Math.max(0, Math.min(visible.length - 1, (slabBrowseIndex < 0 ? -1 : slabBrowseIndex) + delta));
+    const row = library.rowFor(visible[slabBrowseIndex]!.id);
+    row?.classList.add("slab-browse");
+    row?.scrollIntoView({ block: "nearest" });
+    setSlabHud(`Browse: ${visible[slabBrowseIndex]!.name}`);
+  },
+  loadBrowsed(deckId, play) {
+    const track = library.visible()[slabBrowseIndex];
+    if (!track) {
+      setSlabHud("Turn the dial to pick a track first");
+      return;
+    }
+    void loadTrack(track, deckId).then(() => {
+      if (play && meta[deckId] === track) void decks[deckId].play();
+    });
+    setSlabHud(`${deckId} ← ${track.name}`);
+  },
+  scrub(deckId, delta) {
+    const deck = decks[deckId];
+    if (!deck.hasTrack) return;
+    if (deck.playing) deck.nudge(delta * 0.02, 120);
+    else deck.seek(Math.max(0, Math.min(deck.duration, deck.currentTime + delta * 0.05)));
+    requestFrame();
+  },
+  filter(deckId, value) {
+    const deck = decks[deckId];
+    if (value === null) {
+      if (slabFilterPrevFx[deckId] !== undefined) {
+        restoreFx(deckId, slabFilterPrevFx[deckId]);
+        delete slabFilterPrevFx[deckId];
+      }
+      return;
+    }
+    if (deck.fx !== "filter") {
+      slabFilterPrevFx[deckId] = deck.fx;
+      engageFx(deckId, "filter", 1);
+    }
+    deck.setFxAmount(slabFilterAmount(value));
+  },
+  pitchBend(deckId, amount) {
+    decks[deckId].nudge(amount, amount === 0 ? 20 : 400);
+  },
+  needle(deckId, ratio) {
+    const deck = decks[deckId];
+    if (!deck.hasTrack || deck.playing) return;
+    deck.seek(ratio * deck.duration);
+    requestFrame();
+  },
+  transport(deckId, action) {
+    const deck = decks[deckId];
+    const refs = ui[deckId]!;
+    switch (action) {
+      case "play": toggleDeck(deckId); break;
+      case "cue": refs.cue.click(); break;
+      case "sync": refs.sync.click(); break;
+      case "rec": $("recBtn").click(); break;
+      case "loop": refs.loop.click(); break;
+      case "loop-half": refs.loopHalf.click(); break;
+      case "loop-double": refs.loopDouble.click(); break;
+      case "eject": ejectDeck(deckId); break;
+      case "jump-back": deck.beatJump(-4); break;
+      case "jump-forward": deck.beatJump(4); break;
+      case "jump-back-fine": deck.beatJump(-1); break;
+      case "jump-forward-fine": deck.beatJump(1); break;
+    }
+    requestFrame();
+  },
+  focusLibrary() {
+    $("trackList").scrollIntoView({ block: "nearest" });
+  },
+  isPlaying: (deckId) => decks[deckId].playing,
+  isRecording: () => mixer.recording,
+};
+
+const slabControllers = new Map<string, SlabController>();
+let slabLedAt = 0;
+
+function syncSlabLeds(force = false): void {
+  if (!slabControllers.size) return;
+  const now = performance.now();
+  if (!force && now - slabLedAt < 60) return;
+  slabLedAt = now;
+  for (const controller of slabControllers.values()) controller.syncLeds();
+}
 
 const midiBindings: MidiBindings = loadBindings(window.localStorage);
 let midiLearnTarget: string | null = null;
@@ -3880,6 +4204,7 @@ let midiAccess: {
       onmidimessage: ((event: { data: ArrayLike<number> }) => void) | null;
     }
   >;
+  outputs?: Map<string, { id?: string; name?: string | null; manufacturer?: string | null; send: (data: number[]) => void }>;
   addEventListener: (type: string, handler: () => void) => void;
 } | null = null;
 
@@ -4003,12 +4328,40 @@ function renderMidiDevices(inputs: { name?: string | null; manufacturer?: string
 function refreshMidiInputs(): void {
   if (!midiAccess) return;
   const inputs = [...midiAccess.inputs.values()];
+  const outputs = [...(midiAccess.outputs?.values() ?? [])];
+  const slabSeen = new Set<string>();
   for (const input of inputs) {
+    if (isSlabPort(input.name, input.manufacturer) && input.state !== "disconnected") {
+      // SLAB gets its own driver (general MIDI mode) instead of note/CC bindings.
+      const key = input.id ?? input.name ?? "slab";
+      slabSeen.add(key);
+      let controller = slabControllers.get(key);
+      if (!controller) {
+        controller = new SlabController(slabHost);
+        slabControllers.set(key, controller);
+        highlightSlabDeck(controller.deck);
+      }
+      const output = outputs.find((port) => port.name === input.name) ?? outputs.find((port) => isSlabPort(port.name, port.manufacturer));
+      controller.attachOutput(output ? (bytes) => output.send(bytes) : null);
+      const active = controller;
+      input.onmidimessage = (event) => {
+        $("midiMonitor").textContent = `SLAB ${Array.from(event.data, (b) => b.toString(16).padStart(2, "0")).join(" ")}`;
+        if (midiLearnTarget) {
+          const parsed = parseMidiMessage(event.data);
+          if (parsed) applyMidiEvent(parsed);
+          return;
+        }
+        active.handle(event.data);
+        requestFrame();
+      };
+      continue;
+    }
     input.onmidimessage = (event) => {
       const parsed = parseMidiMessage(event.data);
       if (parsed) applyMidiEvent(parsed);
     };
   }
+  for (const key of [...slabControllers.keys()]) if (!slabSeen.has(key)) slabControllers.delete(key);
   renderMidiDevices(inputs);
   $("midiState").textContent = inputs.length ? `${inputs.length} in` : "no device";
   const detected: string[] = [];
