@@ -43,11 +43,25 @@ interface Column {
 
 class WaveColors {
   private cache: Column[] | null = null;
-  private signature = "";
+  // Keyed by the arrays themselves, not their lengths: analysis produces the
+  // same column count for every track, so a length key kept the previous
+  // track's colours after an eject and reload.
+  private peaksRef: Float32Array | null = null;
+  private bandsRef: BandPeaks | null = null;
+
+  /** Drops the cached columns (and the reference to the old track's peaks). */
+  reset(): void {
+    this.cache = null;
+    this.peaksRef = null;
+    this.bandsRef = null;
+  }
+
+  get cached(): boolean {
+    return this.cache !== null;
+  }
 
   build(peaks: Float32Array, bands?: BandPeaks): Column[] {
-    const key = `${peaks.length}:${bands ? bands.low.length : 0}`;
-    if (this.cache && this.signature === key) return this.cache;
+    if (this.cache && this.peaksRef === peaks && this.bandsRef === (bands ?? null)) return this.cache;
     const out: Column[] = new Array(peaks.length);
     for (let i = 0; i < peaks.length; i += 1) {
       if (!bands) {
@@ -67,7 +81,8 @@ class WaveColors {
       };
     }
     this.cache = out;
-    this.signature = key;
+    this.peaksRef = peaks;
+    this.bandsRef = bands ?? null;
     return out;
   }
 }
@@ -197,7 +212,13 @@ export class Waveform {
     this.cue = 0;
     this.loop = null;
     this.hotCues = [];
+    this.colors.reset();
     this.draw();
+  }
+
+  /** True while the colour columns of a track are held in memory. */
+  get holdsColumns(): boolean {
+    return this.colors.cached;
   }
 
   draw(): void {
@@ -343,6 +364,30 @@ export class ZoomWaveform {
   setVertical(value: boolean): void {
     this.vertical = value;
     this.invalidate();
+  }
+
+  /**
+   * Empties the scrolling view after an eject: drops the peaks, bands, colour
+   * columns, beatgrid, loop and cue markers. The orientation is a view
+   * setting, not track state, so it survives.
+   */
+  clear(): void {
+    this.peaks = null;
+    this.bands = null;
+    this.gain = 1;
+    this.duration = 0;
+    this.progress = 0;
+    this.bpm = 0;
+    this.beatPhase = 0;
+    this.loop = null;
+    this.hotCues = [];
+    this.colors.reset();
+    this.invalidate();
+  }
+
+  /** True while the colour columns of a track are held in memory. */
+  get holdsColumns(): boolean {
+    return this.colors.cached;
   }
 
   update(progress: number): void {

@@ -612,8 +612,9 @@ export class Deck {
     this.emit();
   }
 
-  eject(): void {
-    if (this.loadLock && this.playing) return;
+  /** Empties the deck. Returns false (and changes nothing) under load lock while playing. */
+  eject(): boolean {
+    if (this.loadLock && this.playing) return false;
     this.pause();
     this.clearStems();
     this.pcm.clear();
@@ -634,6 +635,7 @@ export class Deck {
     Object.assign(this.info, { id: "", title: "No track", bpm: 0, beatPhase: 0, key: "--", camelot: "--" });
     this.beatgrid = createBeatGrid(0, 0, false);
     this.emit();
+    return true;
   }
 
   async cloneFrom(other: Deck): Promise<void> {
