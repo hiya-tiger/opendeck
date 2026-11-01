@@ -692,3 +692,15 @@ body.vertical-waves .wave-card { display: flex; flex-direction: column; }
 }
 .media-prompt-text { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
 .media-prompt-always { display: flex; align-items: center; gap: 4px; color: var(--brand-ink); }
+
+/* AlphaTheta SLAB: touch-to-show readout, browse cursor, focused deck */
+.slab-hud {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  z-index: 60; padding: 8px 14px; border-radius: 8px;
+  background: rgba(11, 17, 28, 0.94); border: 1px solid #4d6bfe; color: #e6ecff;
+  font: 600 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  pointer-events: none; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.slab-hud.hidden { display: none; }
+#trackList tr.slab-browse { outline: 1px solid #4d6bfe; outline-offset: -1px; background: rgba(77, 107, 254, 0.14); }
+.slab-focus > .deck { box-shadow: inset 0 0 0 1px rgba(77, 107, 254, 0.55); }
