@@ -1,6 +1,6 @@
 # D34: Ableton Link licensing
 
-**Status:** Accepted for Run 1 (m3).
+**Status:** Accepted for Run 1 (m3). **Superseded in part by D44** (2026-11-02): a clean-room, MIT Ableton Link backend now ships as the default; `opendeck-link/1` remains as the fallback. See docs/link-cleanroom.md.
 **Date:** 2026-10-31.
 **Supersedes:** nothing. **Amends:** nothing. D11 stands unmodified.
 **Evidence tier for the decision:** SOURCE (licence texts and package metadata read

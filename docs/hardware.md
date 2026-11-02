@@ -57,6 +57,25 @@ Mappings are stored per browser profile in `localStorage` under `opendeck.midi.m
 - Pads send notes; bank A defaults to 36-43, which triggers OpenDecks's sampler immediately. Use Learn if your bank starts elsewhere.
 - The SP-404MKII's own effects and sequencer remain on the device; OpenDecks only receives MIDI.
 
+### AlphaTheta SLAB (untested on hardware)
+
+SLAB is driven in its **general-purpose MIDI mode** by a dedicated driver (`src/renderer/midi/slab.ts`), not by Learn bindings. Every MIDI number comes from AlphaTheta's official [SLAB List of MIDI Messages](https://downloads.support.alphatheta.com/midi-mapping/music-production/SLAB/SLAB_MIDI_Message_List_en.pdf). SLAB's native mode is Serato's own protocol; OpenDecks never switches the unit into it or poses as Serato software. Built and tested against simulated MIDI only: please report what does and does not work on a real unit.
+
+- **Detection:** any MIDI port whose name or maker contains `SLAB` (for example "SLAB", "AlphaTheta SLAB", "SLAB MIDI 1"). Put the unit in MIDI mode first (see AlphaTheta's guide).
+- **Deck:** the SLAB plays one deck at a time. **DECK SELECT** turns pads 1-4 into deck A-D (lit in the deck colours), then returns to the previous pad page; **SHIFT + DECK SELECT** steps A → B → C → D. Picking C or D turns on the 4-deck layout. The deck being played is outlined on screen.
+- **Pads (16, velocity and aftertouch):**
+  - **TRIGGER** - pads 1-8 = the deck's eight pads in its pad mode (hot cues by default, lit in the cue colours; SHIFT + pad deletes a hot cue), pads 9-16 = loop rolls 1/8 to 16 beats while held. **SHIFT + TRIGGER** steps the deck pad mode through all ten OpenDecks modes (Cue Loop, Slicer, Beat Jump, ...).
+  - **PIANO** - 16 sampler pads, hit velocity sets the level; **SHIFT + PIANO** swaps banks A+B / C+D.
+  - **SCENE SELECT** - pads 1-8 = stems (filter / mute drums, bass, other, vocals); pads 9-16 = pad FX held while pressed (echo, delay, reverb, filter, flanger, phaser, crush, gate), velocity sets the mix and aftertouch the amount.
+  - OCTAVE -/+ switch the unit's own pad page; OpenDecks reads the pads on every page.
+- **Dial:** turn = browse the library, press = load the highlighted track to the deck, SHIFT + press = load and play, SHIFT + turn = scrub (nudge while playing).
+- **Encoders (4, touch-sensitive):** ENCODER MODE steps EQ → FX → Stems → Param (SHIFT steps back). Touching an encoder shows its value on screen. SHIFT + turn = fine steps. Press = reset.
+  - EQ: high, mid, low, trim. FX: effect, mix, amount, beat division. Stems: drums, bass, other, vocals level (press mutes). Param: tempo, key shift, loop size (press = loop on/off), beat jump (press = sync).
+- **Touch strip:** STRIP MODE on the unit switches modes. Mode 1 = filter (centre off, left low-pass, right high-pass; with SHIFT it snaps back on release). Mode 2 = pitch bend from where you touch, springing back on release; SHIFT + mode 2 = needle search while the deck is stopped.
+- **Buttons:** PLAY = play/pause, SHIFT + PLAY = cue, REC = mixer recording, SHIFT + REC or AUTOSET = sync, ← / → = beat jump 4 (SHIFT: 1), SCENE SIZE -/+ = halve / double loop, NOTE REPEAT = loop on/off, DELETE = eject, LIBRARY = show the library. UNDO, REDO, FAVORITE, SELECT ALL are free.
+- **LEDs:** pads, the four pad-mode buttons, PLAY, REC and the encoder rings light through the documented MIDI-OUT messages. **Provisional:** the list says pads light "in color specified in color number (0x01-0x7F)" but does not publish the colour table, so colours are approximated from hue and may not match on the unit.
+- **Not supported:** the OLED display (the message list documents no display message), FOCUS mode (mouse emulation is handled by the unit itself).
+
 ### Akai MPK Mini
 
 - Class compliant on Windows/macOS. The eight pads send notes 36-43 by default on many presets, so they map to the sampler with no setup.
@@ -297,7 +316,7 @@ OpenDecks includes built-in presets and USB MIDI / USB Audio auto-detection for 
 
 | Device | Vendor | Decks | DVS |
 | --- | --- | --- | --- |
-| AlphaTheta SLAB | AlphaTheta | 2 | — |
+| AlphaTheta SLAB (dedicated driver, untested on hardware) | AlphaTheta | 4 (one at a time) | — |
 | Roland SP-404MKII | Roland | 2 | — |
 | Pioneer DJ DDJ-XP2 | Pioneer DJ | 2 | — |
 | Roland TR-8S | Roland | 2 | — |
