@@ -1,0 +1,26 @@
+# Flatpak for the Linux leg of the MyGo + Rust benchmark. Both sides (today's
+# Electron build and the prototype) are packaged in the same Flatpak and run
+# in its sandbox on the GNOME 47 runtime (WebKitGTK 4.1 for MyGo).
+# bench/flatpak/stage/ is filled by the workflow with prebuilt binaries.
+app-id: dev.opendecks.Bench
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+command: od-mygo
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=host
+modules:
+  - name: bench
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/bench /app/bin
+      - cp -a . /app/bench/
+      - ln -s /app/bench/od-mygo /app/bin/od-mygo
+    sources:
+      - type: dir
+        path: stage

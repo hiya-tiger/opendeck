@@ -1,0 +1,153 @@
+name: bench-mygo-rust
+# MyGo + Rust vs Electron/TypeScript benchmark (docs/benchmarks/mygo-rust.md).
+# Experiment branch only; nothing here ships.
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiment/mygo-rust-bench]
+    paths: ["bench/**", ".github/workflows/bench-mygo-rust.yml"]
+
+concurrency:
+  group: bench-mygo-rust
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: bench (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, label: windows, exe: ".exe", features: "stems,directml", ortdir: "win32/x64", ortlib: "onnxruntime.dll", ep: auto }
+          - { os: macos-latest, label: macos, exe: "", features: "stems,coreml", ortdir: "darwin/arm64", ortlib: "libonnxruntime.1.20.1.dylib", ep: auto }
+          - { os: ubuntu-latest, label: linux-flatpak, exe: "", features: "stems", ortdir: "linux/x64", ortlib: "libonnxruntime.so.1.20.1", ep: cpu }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.27.3", cache: false }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq xvfb pulseaudio flatpak flatpak-builder libgtk-3-0t64 libnss3 libasound2t64 libgbm1 libwebkit2gtk-4.1-0 >/dev/null
+          pulseaudio -D --exit-idle-time=-1 --system=false || true
+          pactl load-module module-null-sink sink_name=bench || true
+      - run: pip install psutil
+      - run: npm ci
+      - run: npm run build
+      - name: Model cache
+        uses: actions/cache@v4
+        with: { path: model, key: htdemucs-fp16weights-d05c269d }
+      - name: Model
+        run: |
+          mkdir -p model
+          [ -f model/htdemucs_fp16weights.onnx ] || curl -sSL -o model/htdemucs_fp16weights.onnx https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx
+          node -e "const h=require('crypto').createHash('sha256').update(require('fs').readFileSync('model/htdemucs_fp16weights.onnx')).digest('hex'); if(h!=='d05c269d0178d2a72ad484b10b11dd370193fc923201c3b27a99f848745db70a'){console.error('model sha mismatch',h);process.exit(1)}"
+      - name: Fixtures
+        run: node bench/fixtures/gen.ts fx --seconds 120 --tracks 6 && du -sh fx/*
+      - name: Build TS bench bundles
+        run: node bench/ts/build.mjs
+      - name: Build Rust prototype
+        run: |
+          cd bench/rs
+          cargo build --release
+          cargo build --release --features "${{ matrix.features }}"
+          cp target/release/od-bench${{ matrix.exe }} target/release/od-stems${{ matrix.exe }} ../../
+      - name: Build MyGo shell
+        run: |
+          cd bench/shell
+          go build -trimpath -ldflags "-s -w" -o ../../od-mygo${{ matrix.exe }} .
+      - name: Existing tests and smokes (today's app)
+        run: |
+          set +e
+          X=""; [ "$RUNNER_OS" = Linux ] && X="xvfb-run -a"
+          declare -A R
+          npm test > test.log 2>&1; R[test]=$?
+          npx tsc --noEmit -p tsconfig.json > tsc.log 2>&1; R[typescript]=$?
+          $X npm run smoke:ui > smoke-ui.log 2>&1; R[smoke_ui]=$?
+          $X npm run smoke:audio > smoke-audio.log 2>&1; R[smoke_audio]=$?
+          $X npm run smoke:link > smoke-link.log 2>&1; R[smoke_link]=$?
+          (cd bench/rs && cargo test --release > ../../cargo-test.log 2>&1); R[cargo_test]=$?
+          mkdir -p results/${{ matrix.label }}
+          { echo "{"; first=1; for k in "${!R[@]}"; do [ $first = 1 ] || echo ","; first=0; echo "\"$k\": ${R[$k]}"; done; echo "}"; } > results/${{ matrix.label }}/smokes.json
+          cat results/${{ matrix.label }}/smokes.json
+          tail -n 15 test.log tsc.log smoke-ui.log smoke-audio.log smoke-link.log cargo-test.log
+          cp *.log results/${{ matrix.label }}/
+      - name: Inject first-frame probe into renderer (CI copy)
+        run: node bench/harness/prepare-renderer.mjs renderer
+      - name: Run benchmarks (native)
+        if: runner.os != 'Linux'
+        env:
+          APP: ${{ github.workspace }}
+          HOSTAPP: ${{ github.workspace }}
+          EXE: ${{ matrix.exe }}
+          FX: ${{ github.workspace }}/fx
+          MODEL: ${{ github.workspace }}/model/htdemucs_fp16weights.onnx
+          ORTLIB: ${{ github.workspace }}/node_modules/onnxruntime-node/bin/napi-v3/${{ matrix.ortdir }}/${{ matrix.ortlib }}
+          SIZE_ORT_BIN: ${{ github.workspace }}/node_modules/onnxruntime-node/bin/napi-v3/${{ matrix.ortdir }}
+          RUST_EP: ${{ matrix.ep }}
+        run: |
+          export ELECTRON="$(node -p "require('electron')")"
+          export SIZE_ELECTRON_DIST="$(dirname "$ELECTRON")"
+          [ "$RUNNER_OS" = macOS ] && export SIZE_ELECTRON_DIST="$(node -p "require('path').resolve(require('path').dirname(require('electron')), '../../..')")"
+          bench/harness/run.sh results/${{ matrix.label }}
+      - name: Build Flatpak
+        if: runner.os == 'Linux'
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          S=bench/flatpak/stage; mkdir -p $S/bench $S/node_modules
+          cp -a od-bench od-stems od-mygo package.json dist renderer $S/
+          cp -a bench/out bench/shell $S/bench/
+          for m in electron fflate signalsmith-stretch onnxruntime-node onnxruntime-common; do cp -a node_modules/$m $S/node_modules/ 2>/dev/null || true; done
+          flatpak-builder --user --install-deps-from=flathub --install --force-clean --disable-rofiles-fuse build-flatpak bench/flatpak/dev.opendecks.Bench.yml
+      - name: Run benchmarks (Flatpak)
+        if: runner.os == 'Linux'
+        env:
+          APP: /app/bench
+          HOSTAPP: ${{ github.workspace }}
+          EXE: ""
+          FX: ${{ github.workspace }}/fx
+          MODEL: ${{ github.workspace }}/model/htdemucs_fp16weights.onnx
+          ORTLIB: /app/bench/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.1.20.1
+          SIZE_ORT_BIN: ${{ github.workspace }}/node_modules/onnxruntime-node/bin/napi-v3/linux/x64
+          SIZE_ELECTRON_DIST: ${{ github.workspace }}/node_modules/electron/dist
+          RUST_EP: cpu
+          ELECTRON: /app/bench/node_modules/electron/dist/electron
+        run: |
+          # flatpak run needs --command=<binary> glued to the binary; wrap it.
+          cat > /tmp/fp <<'EOF2'
+          #!/usr/bin/env bash
+          cmd="$1"; shift
+          exec xvfb-run -a flatpak run --user --filesystem=host --env=ELECTRON_RUN_AS_NODE="${ELECTRON_RUN_AS_NODE:-}" --env=PULSE_SERVER="unix:${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pulse/native" --command="$cmd" dev.opendecks.Bench "$@"
+          EOF2
+          chmod +x /tmp/fp
+          export RUNP=/tmp/fp
+          bench/harness/run.sh results/${{ matrix.label }}
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.label }}
+          path: results/${{ matrix.label }}
+
+  summary:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: results, pattern: "results-*" }
+      - run: python3 bench/harness/summarize.py results > summary.md; cat summary.md >> "$GITHUB_STEP_SUMMARY"; cat summary.md
+      - uses: actions/upload-artifact@v4
+        with: { name: summary, path: "summary.md\nresults/verdict.json" }
