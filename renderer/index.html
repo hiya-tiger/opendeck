@@ -21,7 +21,17 @@
       <span class="status-dot" id="engineDot"></span>
       <span id="engineState" class="muted mono">audio engine idle</span>
       <span id="engineDiag" class="muted mono"></span>
-      <span id="linkStatus" class="muted mono hidden"></span>
+      <button id="linkStatus" type="button" class="chip mono cdj-status hidden" title="Session tempo link">Tempo link</button>
+      <div id="linkPanel" class="cdj-panel link-panel hidden" role="dialog" aria-label="Tempo link">
+        <div class="cdj-panel-head"><strong>Tempo link</strong></div>
+        <label class="micro"><input id="linkEnabled" type="checkbox"> Share tempo, beat and phase on the network</label>
+        <label class="micro">Protocol <select id="linkProtocol" class="mini-select" aria-label="Tempo link protocol">
+          <option value="ableton">Ableton Link compatible (clean-room)</option>
+          <option value="opendeck">opendeck-link/1 (OpenDecks only)</option>
+        </select></label>
+        <label class="micro"><input id="linkStartStop" type="checkbox"> Start/stop sync</label>
+        <div id="linkDetail" class="cdj-list mono micro"></div>
+      </div>
       <button id="cdjStatus" type="button" class="chip mono cdj-status hidden" title="Pro DJ Link and USB drives">Link</button>
       <div id="cdjPanel" class="cdj-panel hidden" role="dialog" aria-label="CDJ and USB drives">
         <div class="cdj-panel-head"><strong>CDJs &amp; USB drives</strong></div>

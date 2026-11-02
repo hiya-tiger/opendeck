@@ -1,7 +1,8 @@
 /**
  * opendeck-link/1 — a session tempo/beat/phase transport for OpenDecks.
  *
- * This is NOT Ableton Link and makes no claim to be. It is a small,
+ * This is NOT Ableton Link and makes no claim to be. Since D43 it is the
+ * fallback backend; the Ableton-compatible one is src/main/ableton-link/node.ts. It is a small,
  * independently designed multicast protocol with a Link-shaped API. See
  * docs/mobile/ADR-D34.md for why (licence) and docs/mobile/LINK-PROBE.md for
  * what a human can and cannot verify.
@@ -23,13 +24,15 @@
 
 import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
+import type { LinkBackend, LinkStatus } from "./link-backend.ts";
 
 export const LINK_PROTOCOL = "opendeck-link";
 export const LINK_PROTOCOL_VERSION = 1;
 export const LINK_PROTOCOL_ID = `${LINK_PROTOCOL}/${LINK_PROTOCOL_VERSION}`;
 
 /**
- * Deliberately NOT Ableton Link's group/port (239.255.77.77:20808). Using a
+ * Deliberately NOT Ableton Link's group/port (224.76.78.75:20808, see
+ * src/main/ableton-link/wire.ts). Using a
  * distinct group means this implementation cannot join, pollute or be mistaken
  * for a real Link session on the same LAN.
  */
@@ -42,27 +45,7 @@ const MAX_PACKET_BYTES = 512;
 const MIN_BPM = 20;
 const MAX_BPM = 300;
 
-export interface LinkStatus {
-  /** True only while the socket is bound, joined and the heartbeat is running. */
-  enabled: boolean;
-  /** Live peers (a peer is live if heard from within PEER_TTL_MS). */
-  peerCount: number;
-  /** The session tempo the network currently agrees on. */
-  sessionBpm: number;
-  /** The tempo this node contributes / would contribute to the session. */
-  localBpm: number;
-  /** Session beat at the instant of the read. */
-  beat: number;
-  /** Session phase (beat mod quantum) at the instant of the read. */
-  phase: number;
-  quantum: number;
-  /** Single-line string for the UI. Never claims Ableton compatibility. */
-  status: string;
-  protocol: string;
-  /** Last socket error, or null. */
-  error: string | null;
-  counters: { sent: number; received: number; adopted: number; rejected: number };
-}
+export type { LinkStatus } from "./link-backend.ts";
 
 export interface LinkNodeOptions {
   group?: string;
@@ -97,8 +80,10 @@ const clampBpm = (bpm: number): number => {
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
-export class LinkNode {
+export class LinkNode implements LinkBackend {
   readonly peerId: string;
+  readonly protocolId = LINK_PROTOCOL_ID;
+  readonly backend = "opendeck" as const;
   private readonly group: string;
   private readonly port: number;
   private readonly clock: () => number;
@@ -240,6 +225,11 @@ export class LinkNode {
     return this.peers.size;
   }
 
+  /** Clock in microseconds (the one beatAt/phaseAt take). */
+  now(): number {
+    return this.clock();
+  }
+
   /**
    * Contribute a tempo to the session. While enabled this becomes the session
    * tempo immediately and is published; while disabled it only sets the local
@@ -295,6 +285,7 @@ export class LinkNode {
       quantum: this.timeline.quantum,
       status,
       protocol: LINK_PROTOCOL_ID,
+      backend: "opendeck",
       error: this.lastError,
       counters: { ...this.counters },
     };

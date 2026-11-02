@@ -71,6 +71,12 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 
 ---
 
+### Tempo link (Ableton Link compatible)
+
+- **Play in time with Link apps.** The "Tempo link" chip in the top bar turns on session tempo, beat and phase sharing, with optional start/stop sync. The default protocol is a clean-room, MIT implementation of the Ableton Link wire protocol (`src/main/ableton-link/`), verified against Ableton's reference LinkHut example on Linux; how it was built and every source used is in [`docs/link-cleanroom.md`](docs/link-cleanroom.md) (D44).
+- **Fallback:** switch the protocol to `opendeck-link/1` for the original OpenDecks-only transport.
+- **Not yet verified** with Ableton Live itself or across two machines. OpenDecks is not affiliated with or endorsed by Ableton.
+
 ## Quick Start & Windows `.exe` Executable
 
 ### Run the Prebuilt Windows Executable
@@ -86,7 +92,7 @@ npm start          # builds dist/ + renderer/ bundles and launches OpenDecks Des
 npm run build      # builds dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js
 npm test           # runs all 19 TypeScript unit & integration test suites (190 tests)
 npm run smoke:audio # headless Electron: PCM playback, stems, video transport, and the deck graph transfer function
-npm run smoke:link  # headless: two Link nodes converge on tempo/beat/phase over multicast UDP
+npm run smoke:link  # headless: opendeck-link/1 and Ableton Link backends converge; set LINKHUT_BIN to also verify against a real Link peer
 npm run smoke:ui    # headless: boots the real renderer and fails on any renderer error
 npm run package:win # builds standalone Windows bundle + OpenDecks.exe launcher
 ```
@@ -103,7 +109,7 @@ cargo build --release -p opendeck-app
 ## Verification Status
 
 - **TypeScript Typecheck (`npx tsc --noEmit`):** `0 errors`
-- **Node Unit & Integration Tests (`npm test`):** `270/270 passing` across 26 test files (see the `test` script in `package.json`; `stream-sources` covers the streaming adapters)
+- **Node Unit & Integration Tests (`npm test`):** `365/365 passing` across 29 test files (see the `test` script in `package.json`; `stream-sources` covers the streaming adapters, `ableton-link` the Link codec and session rules)
 - **Rust Workspace Tests (`cargo test`):** `39/39 passing` (`opendeck-core`: 7, `opendeck-audio`: 30, `opendeck-app`: 2)
 - **Headless Electron Audio + Stems + Video Smoke Test (`npm run smoke:audio`):**
   ```json

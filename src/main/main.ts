@@ -15,6 +15,8 @@ import {
 import { MODEL, findCache, installModel, loadManifestAt, modelInfo, pickCacheDir, readCache, type SeparateRequest } from "./separation.ts";
 import { StemHost, defaultSpawner } from "./stems/host.ts";
 import { createLinkNode } from "./link.ts";
+import { createAbletonLinkNode } from "./ableton-link/node.ts";
+import { LinkManager, normalizeLinkSettings, type LinkSettings } from "./link-manager.ts";
 import { setupStreaming } from "./streaming.ts";
 import { setupDetectedMedia } from "./prolink/ipc.ts";
 import type { MediaManager } from "./prolink/manager.ts";
@@ -400,18 +402,34 @@ ipcMain.handle("video:sync-output", (_event, state: unknown) => {
   return { ok: false };
 });
 
-// Session tempo transport (opendeck-link/1). Default-off: nothing is created
-// until the renderer asks. Not Ableton Link — see docs/mobile/ADR-D34.md.
-let linkNode: ReturnType<typeof createLinkNode> | null = null;
-const requireLinkNode = (): ReturnType<typeof createLinkNode> => {
-  if (!linkNode) linkNode = createLinkNode();
-  return linkNode;
+// Session tempo transport. Default-off: nothing opens a socket until the
+// renderer asks. Backend chosen by setting (D43): "ableton" = clean-room
+// Ableton Link (docs/link-cleanroom.md), "opendeck" = opendeck-link/1 fallback
+// (docs/mobile/ADR-D34.md).
+const linkSettingsFile = (): string => path.join(app.getPath("userData"), "link-settings.json");
+let linkManager: LinkManager | null = null;
+const requireLinkManager = async (): Promise<LinkManager> => {
+  if (linkManager) return linkManager;
+  let stored: LinkSettings = normalizeLinkSettings(null);
+  try {
+    stored = normalizeLinkSettings(JSON.parse(await fs.readFile(linkSettingsFile(), "utf8")));
+  } catch {
+    /* first run: defaults */
+  }
+  linkManager ??= new LinkManager({
+    settings: stored,
+    create: (protocol) => (protocol === "ableton" ? createAbletonLinkNode() : createLinkNode()),
+    save: (settings) => fs.writeFile(linkSettingsFile(), JSON.stringify(settings, null, 2)),
+  });
+  return linkManager;
 };
 
-ipcMain.handle("link:status", () => requireLinkNode().status());
-ipcMain.handle("link:enable", async () => requireLinkNode().enable());
-ipcMain.handle("link:disable", async () => requireLinkNode().disable());
-ipcMain.handle("link:set-tempo", (_event, bpm: number) => requireLinkNode().setLocalTempo(Number(bpm)));
+ipcMain.handle("link:status", async () => (await requireLinkManager()).status());
+ipcMain.handle("link:enable", async () => (await requireLinkManager()).enable());
+ipcMain.handle("link:disable", async () => (await requireLinkManager()).disable());
+ipcMain.handle("link:set-tempo", async (_event, bpm: number) => (await requireLinkManager()).setLocalTempo(Number(bpm)));
+ipcMain.handle("link:set-playing", async (_event, playing: boolean) => (await requireLinkManager()).setPlaying(Boolean(playing)));
+ipcMain.handle("link:settings", async (_event, patch: Partial<LinkSettings>) => (await requireLinkManager()).updateSettings(patch ?? {}));
 
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
@@ -473,6 +491,6 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
   stemHost.dispose();
   rtmp?.kill();
-  void linkNode?.disable();
+  void linkManager?.shutdown();
   void detectedMedia?.stop();
 });

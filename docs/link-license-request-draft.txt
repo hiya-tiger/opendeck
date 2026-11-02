@@ -1,0 +1,22 @@
+To: link-devs@ableton.com
+From: Donovan DeCastro <donovan.dc@outlook.com>
+Subject: Proprietary Link license request for OpenDecks (free, MIT-licensed DJ app)
+
+Hello Ableton Link team,
+
+I'm the developer of OpenDecks (https://github.com/hiya-tiger/opendeck), a free, open-source desktop DJ application for Windows and macOS built with Electron and TypeScript. The project is released under the MIT License and is not sold.
+
+We would like to add Ableton Link support so OpenDecks users can play in time with Live and other Link-enabled apps. Because Link is offered under GPLv2+ or a proprietary license, and OpenDecks must stay MIT, the GPL route isn't open to us. I'm writing to ask about the proprietary license:
+
+1. Is a proprietary Link license available for a free, non-commercial, open-source application like OpenDecks, and what are its terms and any fees?
+2. Is that license compatible with distributing an MIT-licensed app? For example, could we keep our own source MIT and link Link only into the binaries we distribute (binary-only linking, with the Link code kept out of our public repository), or is there an SDK or open-source exception that covers this case?
+3. If we ship Link this way, are there conditions on how others who build OpenDecks from source would obtain or enable it?
+4. Are there requirements for using the Link name and logo, and for passing your Test Plan before release?
+
+Happy to share more detail about the project or set up a call. Thanks for your time and for making Link available.
+
+Best regards,
+Donovan DeCastro
+OpenDecks
+donovan.dc@outlook.com
+https://github.com/hiya-tiger/opendeck

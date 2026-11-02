@@ -69,6 +69,8 @@ const api = {
     enable: () => ipcRenderer.invoke("link:enable"),
     disable: () => ipcRenderer.invoke("link:disable"),
     setLocalTempo: (bpm: number) => ipcRenderer.invoke("link:set-tempo", bpm),
+    setPlaying: (playing: boolean) => ipcRenderer.invoke("link:set-playing", playing),
+    settings: (patch: { protocol?: "ableton" | "opendeck"; startStopSync?: boolean }) => ipcRenderer.invoke("link:settings", patch),
   },
   djmedia: {
     state: () => ipcRenderer.invoke("djmedia:state"),

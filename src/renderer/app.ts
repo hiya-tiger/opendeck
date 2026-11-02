@@ -161,7 +161,11 @@ interface LinkStatusPayload {
   quantum: number;
   status: string;
   protocol: string;
+  backend?: "ableton" | "opendeck";
+  startStopSync?: boolean;
+  playing?: boolean;
   error: string | null;
+  settings?: { protocol: "ableton" | "opendeck"; startStopSync: boolean };
 }
 
 interface DesktopApi {
@@ -241,6 +245,8 @@ interface DesktopApi {
     enable: () => Promise<LinkStatusPayload>;
     disable: () => Promise<LinkStatusPayload>;
     setLocalTempo: (bpm: number) => Promise<LinkStatusPayload>;
+    setPlaying?: (playing: boolean) => Promise<LinkStatusPayload>;
+    settings?: (patch: { protocol?: "ableton" | "opendeck"; startStopSync?: boolean }) => Promise<LinkStatusPayload>;
   };
   serato?: {
     running: () => Promise<boolean>;
@@ -4957,17 +4963,55 @@ renderQueue();
 updateClock();
 window.setInterval(updateClock, 30_000);
 
-// Link status readout only — no controls. See docs/mobile/ADR-D35.md.
+// Tempo link: status chip plus a small settings panel (D43). The backend is
+// Ableton Link compatible (clean-room, docs/link-cleanroom.md) or the
+// opendeck-link/1 fallback. Link feeds TempoAuthority only (D35).
 if (desktop?.link) {
   const linkApi = desktop.link;
+  const chip = $("linkStatus");
+  const panel = $("linkPanel");
+  const enabledBox = $<HTMLInputElement>("linkEnabled");
+  const protocolSel = $<HTMLSelectElement>("linkProtocol");
+  const startStopBox = $<HTMLInputElement>("linkStartStop");
+  const detail = $("linkDetail");
+  chip.classList.remove("hidden");
+  const render = (status: LinkStatusPayload): void => {
+    tempoAuthority.onLinkStatus(status as LinkTempoStatus);
+    chip.textContent = status.enabled || status.error ? status.status : "Tempo link";
+    chip.title =
+      status.backend === "ableton"
+        ? "Ableton Link compatible (clean-room implementation, not affiliated with Ableton)"
+        : `${status.protocol} · OpenDecks-only session tempo, not Ableton Link compatible`;
+    enabledBox.checked = status.enabled;
+    if (status.settings) {
+      protocolSel.value = status.settings.protocol;
+      startStopBox.checked = status.settings.startStopSync;
+    }
+    startStopBox.disabled = status.backend !== "ableton";
+    detail.textContent = status.error
+      ? status.error
+      : status.enabled
+        ? `${status.peerCount} peer${status.peerCount === 1 ? "" : "s"} · ${status.sessionBpm.toFixed(2)} BPM · beat ${status.beat.toFixed(1)} · phase ${status.phase.toFixed(2)}/${status.quantum}`
+        : "Off";
+  };
+  const run = async (op: () => Promise<LinkStatusPayload>): Promise<void> => {
+    try {
+      render(await op());
+    } catch (error) {
+      toast(`Tempo link: ${(error as Error).message}`);
+    }
+  };
+  chip.addEventListener("click", () => panel.classList.toggle("hidden"));
+  enabledBox.addEventListener("change", () => void run(() => (enabledBox.checked ? linkApi.enable() : linkApi.disable())));
+  protocolSel.addEventListener("change", () => {
+    if (linkApi.settings) void run(() => linkApi.settings!({ protocol: protocolSel.value === "opendeck" ? "opendeck" : "ableton" }));
+  });
+  startStopBox.addEventListener("change", () => {
+    if (linkApi.settings) void run(() => linkApi.settings!({ startStopSync: startStopBox.checked }));
+  });
   const pollLink = async (): Promise<void> => {
     try {
-      const status = await linkApi.status();
-      tempoAuthority.onLinkStatus(status as LinkTempoStatus);
-      const chip = $("linkStatus");
-      chip.textContent = status.status;
-      chip.title = `${status.protocol} · session tempo transport, not Ableton Link compatible`;
-      chip.classList.toggle("hidden", !status.enabled && !status.error);
+      render(await linkApi.status());
     } catch {
       /* main process not reachable yet */
     }
