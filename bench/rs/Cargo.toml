@@ -16,3 +16,28 @@ serde_json = "1"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[features]
+default = []
+# The ONNX stem path (od-stems). ort 2.0.0-rc.9 targets the ONNX Runtime 1.20
+# C API and loads the very same onnxruntime 1.20.1 library that the app's
+# onnxruntime-node ships (load-dynamic), so only the host language differs.
+stems = ["dep:ort", "dep:num_cpus"]
+directml = ["stems", "ort/directml"]
+coreml = ["stems", "ort/coreml"]
+xnnpack = ["stems", "ort/xnnpack"]
+
+[dependencies.ort]
+version = "=2.0.0-rc.9"
+optional = true
+default-features = false
+features = ["ndarray", "load-dynamic", "half"]
+
+[dependencies.num_cpus]
+version = "1.16"
+optional = true
+
+[[bin]]
+name = "od-stems"
+required-features = ["stems"]
+
