@@ -10,3 +10,5 @@ models/
 .opendeck-stems/
 release/
 *.pdb
+bench/out/
+bench/rs/target/
