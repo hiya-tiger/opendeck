@@ -147,6 +147,9 @@ export class Library {
   sortDirection: "asc" | "desc" = "asc";
   scratchOnly = false;
   fourDeckMode = false;
+  /** Keyboard selection (D45): highlighted rows and the cursor row. */
+  readonly selected = new Set<string>();
+  cursor: string | null = null;
   readonly playedLog = new PlayedLog();
   readonly scratchpad = new Scratchpad();
   readonly playlists: PlaylistStore;
@@ -430,6 +433,45 @@ export class Library {
     return this.rows.get(id)?.row ?? null;
   }
 
+  /** Select rows (keyboard or click); the cursor is the row load keys act on. */
+  select(ids: Iterable<string>, cursor: string | null = this.cursor): void {
+    this.selected.clear();
+    for (const id of ids) this.selected.add(id);
+    this.cursor = cursor;
+    for (const [id, entry] of this.rows) this.paintSelection(entry, id);
+  }
+
+  /** The selected tracks in view order, or the cursor track when nothing else is selected. */
+  selectedTracks(): Track[] {
+    const visible = this.visible();
+    const picked = visible.filter((track) => this.selected.has(track.id));
+    if (picked.length) return picked;
+    const cursor = this.cursor ? this.find(this.cursor) : undefined;
+    return cursor ? [cursor] : [];
+  }
+
+  /** Remove tracks from the library (never touches files). Returns what was removed. */
+  remove(ids: Iterable<string>): Track[] {
+    const drop = new Set(ids);
+    const removed = this.tracks.filter((track) => drop.has(track.id));
+    if (!removed.length) return removed;
+    this.tracks = this.tracks.filter((track) => !drop.has(track.id));
+    for (const id of drop) {
+      this.selected.delete(id);
+      this.scratchpad.remove(id);
+      for (const pl of this.playlists.list()) this.playlists.removeTrack(pl.id, id);
+    }
+    if (this.cursor && drop.has(this.cursor)) this.cursor = null;
+    this.saveStores();
+    this.render();
+    return removed;
+  }
+
+  private paintSelection(entry: LibraryRow, id: string): void {
+    entry.row.classList.toggle("kb-selected", this.selected.has(id));
+    entry.row.classList.toggle("kb-cursor", this.cursor === id);
+  }
+
   visible(): Track[] {
     let base: Track[] = this.tracks;
     if (this.activeView.startsWith("crate:")) {
@@ -461,6 +503,7 @@ export class Library {
 
   private createRow(track: Track): LibraryRow {
     const row = document.createElement("tr");
+    row.dataset.trackId = track.id;
     const num = document.createElement("td");
     num.className = "num";
     const title = document.createElement("td");
@@ -503,6 +546,14 @@ export class Library {
     scratch.className = "mini scratch-toggle";
     scratch.addEventListener("click", () => this.toggleScratchpad(track));
     actions.append(colorBtn, queueButton, scratch);
+    row.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button")) return;
+      const additive = event.ctrlKey || event.metaKey;
+      const ids = additive ? new Set(this.selected) : new Set<string>();
+      if (additive && ids.has(track.id)) ids.delete(track.id);
+      else ids.add(track.id);
+      this.select(ids, track.id);
+    });
     row.addEventListener("dblclick", () => {
       if (!track.missing) this.elements.onLoad(track, "A");
     });
@@ -512,6 +563,7 @@ export class Library {
 
   private updateRow(entry: LibraryRow, track: Track, position: number): void {
     entry.row.className = track.missing ? "missing" : "";
+    this.paintSelection(entry, track.id);
     if (track.color) {
       entry.row.style.borderLeft = `3px solid ${track.color}`;
       entry.colorBtn.style.color = track.color;

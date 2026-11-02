@@ -91,6 +91,8 @@ import {
 import { applyProfile, profileForDevice } from "./midi/profiles.ts";
 import { SlabController, isSlabPort, slabFilterAmount, type SlabHost } from "./midi/slab.ts";
 import { applyWaveOrientation, deckTimeText, resetDeckReadouts, storedWaveVertical } from "./ui/deck-view.ts";
+import { installShortcuts, noteFourDeckMode, noteTrackLoaded, type ShortcutDesktop } from "./keyboard/actions.ts";
+import { platformFrom } from "./keyboard/serato-keymap.ts";
 
 interface NativeAnalysis {
   bpm: number;
@@ -252,6 +254,9 @@ interface DesktopApi {
   videoCloseOutput?: () => Promise<{ open: boolean; fullscreen: boolean }>;
   videoFullscreenOutput?: (fullscreen?: boolean) => Promise<{ open: boolean; fullscreen: boolean }>;
   videoSyncOutput?: (state: unknown) => Promise<{ ok: boolean; open: boolean; fullscreen: boolean }>;
+  shell?: ShortcutDesktop["shell"];
+  app?: ShortcutDesktop["app"];
+  shortcuts?: ShortcutDesktop["shortcuts"];
 }
 
 declare global {
@@ -770,6 +775,7 @@ function buildDeck(deckId: DeckId): void {
     refs.gridLock?.setAttribute("aria-pressed", String(deck.beatgridLocked));
     if (refs.gridLock) refs.gridLock.textContent = deck.beatgridLocked ? "LOCKED" : "LOCK";
   };
+  refs.refreshGridUi = refreshGridUi;
 
   refs.cloneBtn?.addEventListener("click", async () => {
     const sourceOrder: DeckId[] = deckId === "A" ? ["B", "C", "D"] : deckId === "B" ? ["A", "D", "C"] : deckId === "C" ? ["A", "B", "D"] : ["B", "A", "C"];
@@ -778,18 +784,7 @@ function buildDeck(deckId: DeckId): void {
       toast("No active track on opposite deck to clone.");
       return;
     }
-    await deck.cloneFrom(decks[sourceId]);
-    meta[deckId] = meta[sourceId];
-    const track = meta[deckId];
-    if (track) {
-      refs.title.textContent = track.name;
-      refs.sub.textContent = track.file ? track.file.name : track.path;
-      setVinylArt(deckId, track.artwork);
-      applyTrackToDeck(track, deckId);
-    }
-    updatePads(deckId, true);
-    syncLoopButtons(deckId);
-    toast(`Instant Double ${sourceId} → ${deckId}`);
+    await instantDouble(deckId, sourceId);
   });
 
   refs.ejectBtn?.addEventListener("click", () => ejectDeck(deckId));
@@ -1167,6 +1162,24 @@ function ejectDeck(deckId: DeckId): boolean {
   updatePads(deckId, true);
   requestFrame();
   return true;
+}
+
+/** Instant Double: copy the source deck's track and playhead (clone button, Serato Ctrl+Shift+arrow). */
+async function instantDouble(deckId: DeckId, sourceId: DeckId): Promise<void> {
+  const refs = ui[deckId];
+  if (!refs || !decks[sourceId].hasTrack) return;
+  await decks[deckId].cloneFrom(decks[sourceId]);
+  meta[deckId] = meta[sourceId];
+  const track = meta[deckId];
+  if (track) {
+    refs.title.textContent = track.name;
+    refs.sub.textContent = track.file ? track.file.name : track.path;
+    setVinylArt(deckId, track.artwork);
+    applyTrackToDeck(track, deckId);
+  }
+  updatePads(deckId, true);
+  syncLoopButtons(deckId);
+  toast(`Instant Double ${sourceId} → ${deckId}`);
 }
 
 function toggleDeck(deckId: DeckId): void {
@@ -1775,6 +1788,8 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
   closeStream(deckId);
   const deck = decks[deckId];
   const refs = ui[deckId]!;
+  const previousTrack = meta[deckId];
+  const previousPosition = deck.hasTrack ? deck.currentTime : 0;
   try {
     await deck.load(source as File | string, {
       id: track.id,
@@ -1789,6 +1804,7 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
     return;
   }
   meta[deckId] = track;
+  noteTrackLoaded(deckId, previousTrack, previousPosition, track);
   deck.setBpm(track.bpm || 0, track.beatPhase || 0);
   deck.setQuantize(refs.quantize.getAttribute("aria-pressed") === "true");
   deck.setPitchRange(Number((refs.pitchRange as HTMLSelectElement).value));
@@ -4503,13 +4519,7 @@ function initSamplerUi(): void {
   $("samplerVol").addEventListener("input", (event) =>
     sampler.setVolume(Number((event.target as HTMLInputElement).value)),
   );
-  document.addEventListener("keydown", (event) => {
-    if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
-    const match = /^Numpad([1-8])$/.exec(event.code);
-    if (!match) return;
-    event.preventDefault();
-    triggerSamplerPad(samplerBankOffset() + Number(match[1]) - 1, 1);
-  });
+  // Numpad 1-8 trigger the pads through the shortcut table (keyboard/serato-keymap.ts).
 }
 
 async function toggleFullscreen(): Promise<void> {
@@ -4537,38 +4547,6 @@ async function toggleFullscreen(): Promise<void> {
   else await document.documentElement.requestFullscreen();
 }
 
-function keyHandler(event: KeyboardEvent): void {
-  const target = event.target as HTMLElement;
-  if (target.matches("input, textarea, select") || event.metaKey || event.ctrlKey) return;
-  const key = event.key.toLowerCase();
-  if (key === "f11") {
-    event.preventDefault();
-    void toggleFullscreen();
-    return;
-  }
-  if (key === "q") toggleDeck("A");
-  else if (key === "p") toggleDeck("B");
-  else if (key === "a") decks.A.jumpToCue();
-  else if (key === "l") decks.B.jumpToCue();
-  else if (key === "s") applySync("A");
-  else if (key === "d") applySync("B");
-  else if (key === "arrowleft" || key === "arrowright") {
-    const xf = $<HTMLInputElement>("crossfader");
-    const step = event.shiftKey ? 0.1 : 0.02;
-    xf.value = String(Math.max(0, Math.min(1, Number(xf.value) + (key === "arrowright" ? step : -step))));
-    mixer.setCrossfader(Number(xf.value), $<HTMLSelectElement>("xfCurve").value as CrossfaderCurve);
-    videoMixer.setAudioCrossfader(Number(xf.value), false);
-  } else if (/^[1-8]$/.test(key)) {
-    const deckId: DeckId = event.shiftKey ? "B" : "A";
-    decks[deckId].jumpHotCue(Number(key) - 1);
-    persistCues(deckId);
-  } else if (key === " ") {
-    event.preventDefault();
-    toggleDeck("A");
-  } else return;
-  event.preventDefault();
-}
-
 /* ------------------------------------------------------------------ init */
 
 for (const deckId of ALL_DECKS) {
@@ -4585,6 +4563,7 @@ function setFourDeckMode(enabled: boolean): void {
   const btn = document.getElementById("fourDeckToggle");
   btn?.setAttribute("aria-pressed", String(enabled));
   library.setFourDeckMode(enabled);
+  noteFourDeckMode(enabled);
 }
 setFourDeckMode(localStorage.getItem("opendeck.fourDecks") === "1");
 document.getElementById("fourDeckToggle")?.addEventListener("click", () => {
@@ -4950,7 +4929,46 @@ function initVideoUi(): void {
 initSamplerUi();
 initVideoUi();
 initMidiUi();
-document.addEventListener("keydown", keyHandler);
+
+// Serato-style keyboard shortcuts (D45, docs/keyboard-shortcuts.md).
+const shortcuts = installShortcuts({
+  platform: platformFrom(desktop?.platform ?? navigator.platform),
+  decks,
+  ui,
+  meta,
+  zooms,
+  library,
+  desktop,
+  toast,
+  loadTrack,
+  ejectDeck,
+  toggleDeck,
+  applyTempo,
+  applySync,
+  instantDouble,
+  persistCues,
+  updatePads,
+  requestFrame,
+  nudgeCrossfader: (delta) => {
+    const xf = $<HTMLInputElement>("crossfader");
+    xf.value = String(Math.max(0, Math.min(1, Number(xf.value) + delta)));
+    mixer.setCrossfader(Number(xf.value), $<HTMLSelectElement>("xfCurve").value as CrossfaderCurve);
+    videoMixer.setAudioCrossfader(Number(xf.value), false);
+  },
+  triggerSamplerPad: (index) => triggerSamplerPad(samplerBankOffset() + index, 1),
+  toggleFullscreen: () => void toggleFullscreen(),
+  isFourDeck: () => document.getElementById("fourDeckToggle")?.getAttribute("aria-pressed") === "true",
+  setFourDeck: (enabled) => {
+    localStorage.setItem("opendeck.fourDecks", enabled ? "1" : "0");
+    setFourDeckMode(enabled);
+  },
+  isRecording: () => mixer.recording,
+  toggleRecording,
+  persistLibraryUx,
+  refreshLibraryChrome,
+  refreshPlaylistOptions,
+  pathFor: trackPathFor,
+});
 renderProviders();
 renderStreamHead();
 renderQueue();
@@ -4979,4 +4997,4 @@ requestFrame();
 
 void refreshStreamStatus();
 
-window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, streamSources, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream, tempoAuthority };
+window.openDeck = { mixer, decks, waves, zooms, library, videoMixer, streamSources, loadTrack, addFiles, streamQueue, setVinylArt, playStreamOnDeck, closeStream, tempoAuthority, shortcuts };

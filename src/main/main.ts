@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
@@ -17,6 +17,7 @@ import { StemHost, defaultSpawner } from "./stems/host.ts";
 import { createLinkNode } from "./link.ts";
 import { setupStreaming } from "./streaming.ts";
 import { setupDetectedMedia } from "./prolink/ipc.ts";
+import { buildShortcutMenu, forwardReservedKeys, installShortcutIpc } from "./shortcuts-menu.ts";
 import type { MediaManager } from "./prolink/manager.ts";
 
 const root = (): string => app.getAppPath();
@@ -51,6 +52,7 @@ const createWindow = (): void => {
     if (/^https:\/\//i.test(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
+  forwardReservedKeys(mainWindow);
   mainWindow.loadFile(path.join(root(), "renderer", "index.html"));
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -442,6 +444,9 @@ app.whenReady().then(() => {
   });
 
   setupStreaming();
+  // D45: Serato keyboard map; the menu must not take its keys.
+  installShortcutIpc();
+  Menu.setApplicationMenu(buildShortcutMenu(() => mainWindow));
   createWindow();
   // CDJ (Pro DJ Link) and local USB drive detection. Nothing is imported
   // until the user answers the in-app prompt.
