@@ -1,0 +1,18 @@
+[package]
+name = "od-bench"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "MyGo + Rust experiment: Rust ports of the OpenDecks analysis, library-import and hashing hot paths, plus the ONNX stem path, for benchmarking only."
+publish = false
+
+[dependencies]
+rayon = "1.10"
+sha2 = "0.10"
+ring = "0.17"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
