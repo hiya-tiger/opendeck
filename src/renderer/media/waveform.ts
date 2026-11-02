@@ -325,7 +325,7 @@ export class ZoomWaveform {
   loop: LoopRegion | null = null;
   hotCues: WaveMarker[] = [];
   vertical = false;
-  private readonly span: number;
+  private span: number;
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly colors = new WaveColors();
@@ -363,6 +363,18 @@ export class ZoomWaveform {
 
   setVertical(value: boolean): void {
     this.vertical = value;
+    this.invalidate();
+  }
+
+  /** Seconds shown across the view (keyboard + / -, D45). */
+  get spanSeconds(): number {
+    return this.span;
+  }
+
+  setSpan(seconds: number): void {
+    const next = Math.max(1, Math.min(64, seconds));
+    if (next === this.span) return;
+    this.span = next;
     this.invalidate();
   }
 

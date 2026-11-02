@@ -84,6 +84,19 @@ const api = {
     onRemoved: (handler: (payload: unknown) => void) => on("djmedia:removed", handler),
     onProgress: (handler: (payload: unknown) => void) => on("djmedia:progress", handler),
   },
+  shell: {
+    reveal: (target: string) => ipcRenderer.invoke("shell:reveal", target),
+    open: (target: string) => ipcRenderer.invoke("shell:open", target),
+    trash: (target: string) => ipcRenderer.invoke("shell:trash", target),
+  },
+  app: {
+    quit: () => ipcRenderer.invoke("app:quit"),
+    zoom: (direction: "in" | "out" | "reset") => ipcRenderer.invoke("app:zoom", direction),
+  },
+  shortcuts: {
+    onShow: (handler: () => void) => on("shortcuts:show", () => handler()),
+    onKey: (handler: (payload: unknown) => void) => on("shortcuts:key", handler),
+  },
   videoOpenOutput: videoApi.openOutput,
   videoCloseOutput: videoApi.closeOutput,
   videoFullscreenOutput: videoApi.fullscreenOutput,
