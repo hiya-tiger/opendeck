@@ -485,3 +485,44 @@ test("ID3 TBPM and TKEY text frames round-trip alongside Serato GEOB frames", ()
   assert.equal(updatedMeta.key, "6A");
   assert.equal(updatedMeta.title, "Night Drive");
 });
+
+// Regression (Nov 2 2026): wrap72() must emit each 72-char base64 line once.
+// A duplicated push loop would store every Markers2 payload twice.
+const EIGHT_CUES = {
+  cues: Array.from({ length: 8 }, (_, i) => ({ index: i, positionMs: 1000 * i + 7, color: "#CC0000", name: `Cue ${i}` })),
+  loops: [],
+  trackColor: "#FFFFFF",
+  bpmLocked: false,
+};
+const EIGHT_CUES_PAYLOAD =
+  "AQFDT0xPUgAAAAAEAP///0NVRQAAAAASAAAAAAAHAMwAAAAAQ3VlIDAAQ1VFAAAAABIAAQAA\n" +
+  "A+8AzAAAAABDdWUgMQBDVUUAAAAAEgACAAAH1wDMAAAAAEN1ZSAyAENVRQAAAAASAAMAAAu/\n" +
+  "AMwAAAAAQ3VlIDMAQ1VFAAAAABIABAAAD6cAzAAAAABDdWUgNABDVUUAAAAAEgAFAAATjwDM\n" +
+  "AAAAAEN1ZSA1AENVRQAAAAASAAYAABd3AMwAAAAAQ3VlIDYAQ1VFAAAAABIABwAAG18AzAAA\n" +
+  "AABDdWUgNwBCUE1MT0NLAAAAAAEAAAAA";
+
+function markers2Text(raw: Uint8Array): string {
+  const end = raw.indexOf(0, 2);
+  return new TextDecoder().decode(raw.slice(2, end < 0 ? raw.length : end));
+}
+
+test("Markers2 payload is single-wrapped base64 (no duplicated 72-char lines)", () => {
+  const text = markers2Text(encodeMarkers2(EIGHT_CUES));
+  assert.equal(text, EIGHT_CUES_PAYLOAD);
+  const lines = text.split("\n");
+  assert.ok(lines.length > 1, "payload must span several lines to exercise the wrap");
+  assert.ok(lines.slice(0, -1).every((line) => line.length === 72));
+  assert.equal(new Set(lines).size, lines.length, "a line was written twice");
+  // Decoded independently of the codec (Node's base64): each cue exactly once.
+  const inner = Buffer.from(lines.join(""), "base64").toString("latin1");
+  for (let i = 0; i < 8; i += 1) assert.equal(inner.split(`Cue ${i}`).length - 1, 1, `Cue ${i}`);
+  assert.equal(inner.split("BPMLOCK").length - 1, 1);
+  assert.deepEqual(decodeMarkers2(encodeMarkers2(EIGHT_CUES)), EIGHT_CUES);
+});
+
+test("Markers2 re-encode is byte-exact against the Serato-written fixture", () => {
+  const original = fixture(MARKERS2);
+  const again = encodeMarkers2(decodeMarkers2(original), original.length);
+  assert.deepEqual(Array.from(again), Array.from(original));
+  assert.equal(markers2Text(encodeMarkers2(decodeMarkers2(original))), markers2Text(original));
+});
