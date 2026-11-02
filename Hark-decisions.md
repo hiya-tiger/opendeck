@@ -26,3 +26,14 @@ So the verdict is missing. The bar is at least a 1.5x geometric-mean speedup on 
 3. there are no new audio underruns vs Electron in the 5-minute 4-deck AudioWorklet run;
 4. all smoke tests pass.
 Any missing measurement counts as not passing. Numbers are reported per workload and never rounded up into a pass.
+
+## 2026-11-02 15:20 EST: prototype built, CI benchmark running
+
+**Decisions:**
+- The prototype is benchmark-only and lives under `bench/`; `src/` is untouched. The existing `rust/` Tauri crates were not reused: their analysis is a different algorithm (spectral flux, not a port), so they couldn't give an output-equivalent comparison.
+- The Rust analysis port keeps JavaScript's numerics exactly (f64 maths, f32 only where TS stores into a Float32Array, JS `Math.round`). Locally it is bit-identical to the TS on BPM, key, beat phase, confidences, peaks and bands, and the library scan's canonical output hashes match.
+- Hashing uses `ring` (MIT/ISC-style licence), not `sha2`: `sha2` was 1.8x *slower* than Node on arm64 because it lacks the ARMv8 SHA path that OpenSSL/BoringSSL have. Comparing against a slow hash would have been unfair to Rust; comparing against a slow Node path would be unfair the other way, so both now use the same assembly.
+- Stems in Rust load **the same onnxruntime 1.20.1 library** that onnxruntime-node ships (`ort` rc.9, `load-dynamic`): `ort`'s binary download was unreachable from the sandbox, and using the identical runtime isolates the host-language difference. Local check: chunk output bit-identical to onnxruntime-node (SDR = inf).
+- The Rust thread pool is the same size as the app's analysis pool (`defaultPoolSize`), so the speedup is not just "more threads".
+- Linux: today's Electron build and the prototype both run inside one Flatpak (GNOME 47 runtime, which carries the WebKitGTK 4.1 MyGo needs). Electron runs with `--no-sandbox` inside Flatpak (no zypak in this test package).
+- Underrun metric: the app's own `PcmSource.underruns` plus AudioContext clock stalls, so the comparison uses the app's definition of an xrun.
