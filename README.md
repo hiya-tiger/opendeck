@@ -48,14 +48,22 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 ### P3 — 4-Part Stem Separation (`htDemucs`)
 - **4-Part Offline & Real-Time Stems (`Drums`, `Bass`, `Other`, `Vocals`):** Local `htDemucs` ONNX separation cached in `.opendeck-stems/` by track hash, per-stem level sliders, Mute (`M`), Solo (`S`), Filter (`F`), and Stem FX (`X`) controls, quick **Acapella (`VOCALS`)** and **Instrumental (`INST`)** isolation buttons, and full stem voice tracking during platter and DVS scratching.
 
+### Resume last session & background stems ([D45](docs/decisions.md))
+- **Resume last session:** on launch OpenDecks offers to restore the decks (track, position, cues, loops, tempo, key shift, key lock, EQ/trim/FX), the mixer and the library view; "Always resume" skips the question. Moved files are found again by content; missing ones get a **Locate…** button.
+- **Nothing is computed twice:** analysis (BPM, key, beatgrid, waveform) and stems are kept in a content-addressed cache in the app's data folder, keyed by the file's SHA-256 plus model/version, with a size limit, least-recently-used eviction and **Clear cache** in the Session panel. A separation that was interrupted continues from its last finished chunk.
+- **Closing while stems separate** asks *Keep separating stems in the background?* (**Keep going in tray** / **Quit now**, **Remember my choice**). In the tray it runs at low priority with fewer threads, shows progress with Open / Pause / Quit, and notifies when done. The tray, dialog and notifications are built for Windows and macOS but not yet tried on real Windows or Mac machines.
+
 ### P4 & P5 — Zero-Loss Serato Library Interoperability, Smart Crates & Day Mode
 - **Zero-Loss Serato Round-Trip:** Reads and writes `_Serato_/database V2`, `_Serato_/Subcrates/*.crate`, `GEOB`/`covr`/`APIC` embedded markers (`Serato Markers_`, `Serato Markers2`, `Serato Autotags`, `Serato BeatGrid`, `Serato Overview`), and Serato 4.x `master.sqlite` (`container_asset_list_columns`) while preserving unknown `otrk` sub-chunks and `utpc` play counts byte-for-byte.
 - **Unified Undo Backup:** Every embedded tag write and `_Serato_` library export creates an automatic backup snapshot that can be restored in one click (`Undo tags` / `restoreLibraryBackup`).
 - **Smart Crates, Scratchpad & History:** Rule-based Smart Crates (`contains`, `equals`, `>=`, `<=`, `inRange` across BPM, key, crate, title, and play count), Prepare Scratchpad, Played History with CSV export, high-contrast **Day Mode**, and **Offline / Practice Mode**.
 
-### Direct Commercial Streaming DRM & 8-Provider Catalog Integration
-- **W3C Encrypted Media Extensions (EME) DRM Engine (`src/renderer/streaming/drm.ts`):** Native `MediaKeySystemAccess` / `MediaKeys` / `MediaKeySession` negotiation across **Widevine (`com.widevine.alpha`)**, **FairPlay (`com.apple.fps.1_0`)**, **PlayReady (`com.microsoft.playready`)**, and **ClearKey (`org.w3.clearkey`)** with OAuth2 PKCE (`S256`) and per-provider Developer/Bearer token management.
-- **8 Commercial Streaming Services on Decks A–D:** Direct catalog search, EME license exchange, and in-deck playback across **TIDAL**, **Beatport**, **Beatsource**, **SoundCloud Go+**, **Spotify**, **Apple Music**, **Deezer**, and **YouTube Music**.
+### Streaming sources (in-deck, partner APIs; see [D42](docs/decisions.md) and [setup](docs/streaming-setup.md))
+- **What it is:** a pluggable `StreamSource` interface (`src/renderer/streaming/`) with adapters for **Beatport LINK**, **Beatsource LINK**, **TIDAL** and **SoundCloud**, written against their official APIs. Streamed tracks sit in the library and load onto decks A–D like local files. Nothing opens a separate player window.
+- **Needs partner API keys.** OpenDecks ships no service credentials. Until you paste a key from the service's developer or partner programme, each source says "needs partner API key" and does nothing else. Beatport/Beatsource LINK keys are issued only to licensed DJ-software partners, and each DJ also needs their own subscription.
+- **Full deck features only for audio the service hands out unencrypted** (for example SoundCloud's public-API MP3 streams). That audio is decoded once and gets BPM/key analysis, waveform, stems and FX.
+- **DRM services are monitor-only.** When a service only allows its own Widevine player (most of TIDAL, Spotify, Apple Music, Deezer), OpenDecks embeds that official player in the deck panel and labels it monitor-only: DRM audio cannot reach Web Audio, so no EQ, FX, waveform, sync or analysis. Mix it in with System audio capture. Stock Electron has no Widevine CDM, so in this build those players show previews only; full tracks need a Widevine-enabled Electron (castlabs ECS).
+- **Not verified against live partner accounts yet.** The OAuth flows and API calls follow the public docs and are covered by unit tests with recorded response shapes, but have not run against real partner keys. OpenDecks never decrypts streams, scrapes service pages or uses yt-dlp.
 
 ### P6 — DVS Timecode Control & 195 Supported Hardware Devices
 - **Real DVS Timecode Decoder (`src/timecode`, `src/dvs`):** Supports **Serato CV02 Vinyl (Side A/B, 1 kHz)**, **Serato Control CD**, **Traktor Scratch MK2 (2 kHz)**, **MixVibes V2 / 7" (1.3 kHz)**, and **Pioneer rekordbox DVS (1 kHz)** with Absolute (`ABS`), Relative (`REL`), and Internal (`INT`) modes, needle-drop seeking, 1-second reference level & phase calibration (`Set needle position`), drift correction, and circular X-Y scope display.
@@ -67,6 +75,12 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 - **Second Fullscreen Output Window (`renderer/video-output.html`):** Open a dedicated secondary output window (`Open 2nd Output Window` / `Fullscreen Output`) synced at 60 fps via `BroadcastChannel` and Electron IPC for external projectors, monitors, or OBS capture.
 
 ---
+
+### Tempo link (Ableton Link compatible)
+
+- **Play in time with Link apps.** The "Tempo link" chip in the top bar turns on session tempo, beat and phase sharing, with optional start/stop sync. The default protocol is a clean-room, MIT implementation of the Ableton Link wire protocol (`src/main/ableton-link/`), verified against Ableton's reference LinkHut example on Linux; how it was built and every source used is in [`docs/link-cleanroom.md`](docs/link-cleanroom.md) (D44).
+- **Fallback:** switch the protocol to `opendeck-link/1` for the original OpenDecks-only transport.
+- **Not yet verified** with Ableton Live itself or across two machines. OpenDecks is not affiliated with or endorsed by Ableton.
 
 ## Quick Start & Windows `.exe` Executable
 
@@ -83,7 +97,7 @@ npm start          # builds dist/ + renderer/ bundles and launches OpenDecks Des
 npm run build      # builds dist/main.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js
 npm test           # runs all 19 TypeScript unit & integration test suites (190 tests)
 npm run smoke:audio # headless Electron: PCM playback, stems, video transport, and the deck graph transfer function
-npm run smoke:link  # headless: two Link nodes converge on tempo/beat/phase over multicast UDP
+npm run smoke:link  # headless: opendeck-link/1 and Ableton Link backends converge; set LINKHUT_BIN to also verify against a real Link peer
 npm run smoke:ui    # headless: boots the real renderer and fails on any renderer error
 npm run package:win # builds standalone Windows bundle + OpenDecks.exe launcher
 ```
@@ -100,7 +114,7 @@ cargo build --release -p opendeck-app
 ## Verification Status
 
 - **TypeScript Typecheck (`npx tsc --noEmit`):** `0 errors`
-- **Node Unit & Integration Tests (`npm test`):** `190/190 passing` across 19 test files (`defs`, `timecode`, `dvs`, `engine`, `streaming`, `artwork`, `midi` [195-device catalogue], `formats`, `pcm-transport`, `serato`, `serato-write`, `serato-extra`, `cue-store`, `library-ux`, `pad-modes`, `pcm-worklet`, `platter`, `parts`, and `video-mixer`)
+- **Node Unit & Integration Tests (`npm test`):** `365/365 passing` across 29 test files (see the `test` script in `package.json`; `stream-sources` covers the streaming adapters, `ableton-link` the Link codec and session rules)
 - **Rust Workspace Tests (`cargo test`):** `39/39 passing` (`opendeck-core`: 7, `opendeck-audio`: 30, `opendeck-app`: 2)
 - **Headless Electron Audio + Stems + Video Smoke Test (`npm run smoke:audio`):**
   ```json

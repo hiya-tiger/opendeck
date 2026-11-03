@@ -4,6 +4,7 @@ import { createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { ContentCache } from "./cache/content-cache.ts";
 import { DEFAULT_OVERLAP, decodeCachePart, planChunksWith, type StemPart } from "./stems/core.ts";
 
 export const MODEL = {
@@ -93,6 +94,8 @@ export interface SeparateRequest {
   deck?: string;
   /** Frame (at `sampleRate`) to separate first: the playhead or first cue. */
   focusFrame?: number;
+  /** Track name for the tray progress menu. */
+  title?: string;
 }
 
 export interface StemManifest {
@@ -176,12 +179,23 @@ export const installModel = async (
   return modelPath;
 };
 
+/** Root of the content-addressed cache (D45). */
+export const contentCacheRoot = (appData: string): string => path.join(appData, "cache");
+
+/** Where a track's stems live in the content cache: SHA-256 of the file + model id + model version. */
+export const contentStemDir = (hash: string, appData: string): string =>
+  new ContentCache({ root: contentCacheRoot(appData) }).dirFor("stems", hash, MODEL.id, MODEL.version);
+
+/**
+ * Content cache first (D45); then the pre-D45 locations (next to the track,
+ * userData/stems), still read so existing caches are not separated again.
+ */
 export const cacheCandidates = (trackPath: string | null | undefined, hash: string, appData: string): string[] => {
   const name = cacheDirName(hash, MODEL.version);
   const roots: string[] = [];
   if (trackPath && path.isAbsolute(trackPath)) roots.push(path.dirname(trackPath));
   roots.push(path.join(appData, "stems"));
-  return roots.map((root) => path.join(root, ".opendeck-stems", name));
+  return [contentStemDir(hash, appData), ...roots.map((root) => path.join(root, ".opendeck-stems", name))];
 };
 
 const readManifest = async (dir: string): Promise<StemManifest | null> => {
@@ -208,6 +222,7 @@ export const findCache = async (trackPath: string | null | undefined, hash: stri
   return null;
 };
 
+/** New stems are always written to the content cache in userData (D45); legacy dirs are fallbacks if it is not writable. */
 export const pickCacheDir = async (trackPath: string | null | undefined, hash: string, appData: string): Promise<string> => {
   const candidates = cacheCandidates(trackPath, hash, appData);
   for (const dir of candidates) {

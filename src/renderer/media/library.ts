@@ -425,6 +425,11 @@ export class Library {
     return this.tracks.find((track) => track.id === id);
   }
 
+  /** The rendered table row of a track, when it is on screen. */
+  rowFor(id: string): HTMLTableRowElement | null {
+    return this.rows.get(id)?.row ?? null;
+  }
+
   visible(): Track[] {
     let base: Track[] = this.tracks;
     if (this.activeView.startsWith("crate:")) {

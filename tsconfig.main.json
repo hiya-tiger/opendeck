@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ES2022", "DOM"] },
+  "include": [],
+  "files": ["src/main/main.ts", "src/main/stems/worker.ts", "src/preload/preload.ts"]
+}

@@ -12,6 +12,16 @@ export interface WorkerHandle {
   onMessage(handler: (message: WorkerMessage) => void): void;
   onExit(handler: (code: number) => void): void;
   kill(): void;
+  /** OS process id when the worker is its own process (utilityProcess). */
+  pid?: () => number | undefined;
+}
+
+/** What the tray shows while separation runs in the background (D45). */
+export interface StemActivity {
+  /** Jobs queued or running. */
+  jobs: Array<{ hash: string; title: string; percent: number; running: boolean }>;
+  paused: boolean;
+  background: boolean;
 }
 
 export type SpawnWorker = () => WorkerHandle;
@@ -29,6 +39,8 @@ interface HostJob {
   subscribers: Map<string, Subscriber>;
   waiters: Map<string, { resolve: (manifest: Record<string, unknown>) => void; reject: (error: Error) => void }>;
   started: number;
+  title: string;
+  percent: number;
 }
 
 export class StemHost {
@@ -38,6 +50,10 @@ export class StemHost {
   private forceCpu = false;
   private provider = "starting";
   private lastStats: { provider: string; ms: number; firstRegionMs: number } | null = null;
+  private paused = false;
+  private background: { on: boolean; threads: number } = { on: false, threads: 0 };
+  private activityListeners = new Set<(activity: StemActivity) => void>();
+  private doneListeners = new Set<(job: { hash: string; title: string; ok: boolean; manifest: Record<string, unknown> | null }) => void>();
 
   private readonly spawn: SpawnWorker;
   private readonly config: { modelPath: () => string; statePath: string; overlap?: number };
@@ -72,6 +88,8 @@ export class StemHost {
       force: this.forceCpu ? "cpu" : (process.env.OPENDECK_STEM_EP ?? null),
       overlap: this.config.overlap,
     });
+    if (this.paused) worker.postMessage({ type: "pause", paused: true });
+    if (this.background.on) worker.postMessage({ type: "background", on: true, threads: this.background.threads });
     return worker;
   }
 
@@ -81,7 +99,7 @@ export class StemHost {
   }
 
   run(
-    request: { hash: string; sampleRate: number; left: Float32Array; right: Float32Array; focusFrame?: number; cacheDir: string },
+    request: { hash: string; sampleRate: number; left: Float32Array; right: Float32Array; focusFrame?: number; cacheDir: string; title?: string },
     subscriber: Subscriber,
   ): Promise<Record<string, unknown>> {
     // A deck asks for one track at a time: anything else it was waiting on goes.
@@ -105,9 +123,12 @@ export class StemHost {
         subscribers: new Map(),
         waiters: new Map(),
         started: Date.now(),
+        title: request.title || request.hash.slice(0, 12),
+        percent: 0,
       };
       this.jobs.set(id, job);
       this.ensure().postMessage(job.message);
+      this.emitActivity();
     }
     job.subscribers.set(subscriber.deck, subscriber);
     job.waiters.get(subscriber.deck)?.reject(new Error("cancelled"));
@@ -138,6 +159,65 @@ export class StemHost {
     }
   }
 
+  /** Queued or running separation work (the close dialog asks only when true). */
+  get busy(): boolean {
+    return this.jobs.size > 0;
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  get isBackground(): boolean {
+    return this.background.on;
+  }
+
+  /** Content hashes being separated right now (pinned against cache eviction). */
+  get activeHashes(): string[] {
+    return [...this.jobs.values()].map((job) => job.hash);
+  }
+
+  activity(): StemActivity {
+    const jobs = [...this.jobs.values()].map((job, index) => ({ hash: job.hash, title: job.title, percent: job.percent, running: index === 0 }));
+    return { jobs, paused: this.paused, background: this.background.on };
+  }
+
+  onActivity(listener: (activity: StemActivity) => void): () => void {
+    this.activityListeners.add(listener);
+    return () => this.activityListeners.delete(listener);
+  }
+
+  onJobDone(listener: (job: { hash: string; title: string; ok: boolean; manifest: Record<string, unknown> | null }) => void): () => void {
+    this.doneListeners.add(listener);
+    return () => this.doneListeners.delete(listener);
+  }
+
+  private emitActivity(): void {
+    const activity = this.activity();
+    for (const listener of this.activityListeners) listener(activity);
+  }
+
+  /** Tray Pause/Resume: the worker holds at the next chunk boundary. */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    this.worker?.postMessage({ type: "pause", paused });
+    this.emitActivity();
+  }
+
+  /**
+   * Window hidden to the tray: lowest OS priority and `threads` inference
+   * threads; `on = false` restores the foreground settings.
+   */
+  setBackground(on: boolean, threads = 1): void {
+    this.background = { on, threads: on ? Math.max(1, Math.floor(threads)) : 0 };
+    this.worker?.postMessage({ type: "background", on, threads: this.background.threads });
+    this.emitActivity();
+  }
+
+  get workerPid(): number | undefined {
+    return this.worker?.pid?.();
+  }
+
   dispose(): void {
     const worker = this.worker;
     this.worker = null;
@@ -145,7 +225,10 @@ export class StemHost {
   }
 
   private finish(job: HostJob, manifest: Record<string, unknown> | null, error: Error | null): void {
-    this.jobs.delete(job.id);
+    if (!this.jobs.delete(job.id)) return;
+    const cancelled = error?.message === "cancelled";
+    if (!cancelled) for (const listener of this.doneListeners) listener({ hash: job.hash, title: job.title, ok: Boolean(manifest), manifest });
+    this.emitActivity();
     const waiters = [...job.waiters.values()];
     job.waiters.clear();
     for (const waiter of waiters) {
@@ -171,6 +254,11 @@ export class StemHost {
       case "progress": {
         const job = this.jobs.get(message.id);
         if (!job) return;
+        if (message.stage === "separate" || message.stage === "write") {
+          const before = job.percent;
+          job.percent = message.percent;
+          if (before !== job.percent) this.emitActivity();
+        }
         for (const subscriber of job.subscribers.values()) {
           subscriber.onProgress({ hash: job.hash, stage: message.stage, percent: message.percent, detail: message.detail, provider: this.provider });
         }
@@ -226,6 +314,7 @@ export const defaultSpawner = (workerFile: string): SpawnWorker => () => {
       kill: () => {
         child.kill();
       },
+      pid: () => child.pid,
     };
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports

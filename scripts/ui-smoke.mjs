@@ -16,13 +16,27 @@ app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 // real dist/main.cjs registers do not exist. Stub the two the renderer polls,
 // otherwise the probe reports "No handler registered" instead of renderer bugs.
 ipcMain.handle("rtmp:available", () => false);
-ipcMain.handle("streaming:status", () => ({ providers: [], active: null }));
+// Stream sources with no partner keys stored: every partner source must say so.
+ipcMain.handle("stream:status", () => ({ sources: [], widevineBuild: false, redirectUri: "http://127.0.0.1:43827/callback" }));
 // Detected-media stub: one pending CDJ prompt, so the probe can check it renders.
 const prompt = { sourceId: "cdj-2-usb", origin: "cdj", mediaKey: "cdj:smoke", sourceName: "CDJ 2 · USB · SMOKE", mediaName: "SMOKE", slot: "usb", where: "CDJ 2", trackCount: 412, kind: "rekordbox", message: "USB drive 'SMOKE' found on CDJ 2 (412 tracks). Add it to your library?" };
 ipcMain.handle("djmedia:state", () => ({
   libraries: [],
   snapshot: { enabled: true, running: true, interfaceName: "eth0", address: "169.254.1.5", deviceNumber: 1, players: [{ deviceNumber: 2, name: "CDJ-3000", ip: "169.254.1.2", kind: "player", usb: "mounted", sd: "empty" }], media: [], prompts: [prompt], error: null, interfaces: [], settings: { enabled: true, interface: "auto", deviceNumber: "auto", localDrives: true, remembered: {} } },
 }));
+// Session resume (D45): one saved deck whose file is gone, so the probe sees
+// the resume offer and then the "Locate…" row.
+const savedSession = { version: 1, savedAt: "2026-11-03T19:00:00.000Z", fourDecks: false, decks: [{ deck: "A", path: "/gone/smoke-track.mp3", name: "smoke-track.mp3", hash: "c".repeat(64), position: 12 }], mixer: { crossfader: 0.5, curve: "smooth", reverse: false, master: 0.8, aux: 0.8, channels: {} }, library: { view: "all", filter: "", sortKey: "title", sortDirection: "asc", colorFilter: "" } };
+const sessionSaves = [];
+ipcMain.handle("session:get", () => ({ session: savedSession, settings: { alwaysResume: false, closeWhileSeparating: "ask", cacheLimitBytes: 10737418240 } }));
+ipcMain.handle("session:save", (_e, snap) => { sessionSaves.push(snap); return { ok: true }; });
+ipcMain.on("session:save-sync", (event) => { event.returnValue = true; });
+ipcMain.handle("session:open-file", () => ({ ok: false, missing: true, path: "/gone/smoke-track.mp3" }));
+ipcMain.handle("settings:get", () => ({ settings: { alwaysResume: false, closeWhileSeparating: "ask", cacheLimitBytes: 10737418240 }, cacheLimitChoices: [2147483648, 10737418240] }));
+ipcMain.handle("cache:usage", () => ({ bytes: 0, limit: 10737418240, entries: 0, byKind: { analysis: { bytes: 0, entries: 0 }, stems: { bytes: 0, entries: 0 } } }));
+ipcMain.handle("cache:get-analysis", () => null);
+ipcMain.handle("cache:put-analysis", () => ({ ok: true }));
+ipcMain.handle("cache:record-path", () => ({ ok: true }));
 const errors = [];
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -49,8 +63,74 @@ app.whenReady().then(async () => {
       mediaPrompt: (document.querySelector('#mediaPrompts .media-prompt-text') || {}).textContent || null,
       mediaPromptButtons: document.querySelectorAll('#mediaPrompts button').length,
       cdjStatus: (document.getElementById('cdjStatus') || {}).textContent || null,
+      streamSources: Array.from(document.querySelectorAll('#providerList .provider')).map(b => b.dataset.source + '=' + (b.querySelector('span') || {}).textContent),
+      streamLogin: (document.getElementById('loginState') || {}).textContent || null,
+      streamWidevine: (document.getElementById('drmStatusChip') || {}).textContent || null,
     }))()\`, true);
+    const partners = (probe.streamSources || []).filter((s) => /^(beatport|beatsource|tidal|soundcloud)=/.test(s));
+    if (partners.length !== 4 || !partners.every((s) => s.endsWith("=needs partner API key"))) errors.push("stream sources did not show 'needs partner API key': " + JSON.stringify(probe.streamSources));
+    if (probe.streamLogin !== "needs partner API key") errors.push("stream head state: " + probe.streamLogin);
     if (!probe.mediaPrompt || !probe.mediaPrompt.includes("SMOKE") || probe.mediaPromptButtons !== 2) errors.push("detected-media prompt did not render");
+    // Vertical waveform switch on all four decks, and a full eject reset (Nov 1 2026 fixes).
+    const decks = await win.webContents.executeJavaScript(\`(async () => {
+      const od = window.openDeck;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const four = document.getElementById('fourDeckToggle');
+      if (four && four.getAttribute('aria-pressed') !== 'true') four.click();
+      const waveBtn = document.getElementById('waveMode');
+      if (!document.body.classList.contains('vertical-waves')) waveBtn.click();
+      const vertical = ['A','B','C','D'].map((id) => Boolean(od.zooms[id] && od.zooms[id].vertical));
+      // A 3 s sine as a real file, loaded through the normal path onto deck C.
+      const rate = 44100, n = rate * 3, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+      const w = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+      w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true);
+      v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+      v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+      for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.round(Math.sin(i * 2 * Math.PI * 220 / rate) * 12000 * (1 + Math.sin(i / 4000)) / 2), true);
+      const file = new File([buf], 'smoke-sine.wav', { type: 'audio/wav' });
+      const [track] = od.addFiles([file]);
+      const waitPeaks = async () => { for (let i = 0; i < 80 && !(od.zooms.C.peaks && od.waves.C.peaks); i++) await sleep(100); return Boolean(od.zooms.C.peaks && od.waves.C.peaks); };
+      await od.loadTrack(track, 'C');
+      const loadedPeaks = await waitPeaks();
+      const slot = document.getElementById('deckSlotC');
+      slot.querySelector('.eject-btn').click();
+      await sleep(150);
+      const after = {
+        zoomPeaks: od.zooms.C.peaks, overviewPeaks: od.waves.C.peaks, zoomColumns: od.zooms.C.holdsColumns,
+        time: slot.querySelector('.deck-time').textContent, title: slot.querySelector('.deck-title').textContent,
+        bpm: slot.querySelector('.deck-bpm').textContent, cues: od.zooms.C.hotCues.length, stillVertical: od.zooms.C.vertical,
+      };
+      await od.loadTrack(track, 'C');
+      const reloadedPeaks = await waitPeaks();
+      return { vertical, loadedPeaks, after: { ...after, zoomPeaks: Boolean(after.zoomPeaks), overviewPeaks: Boolean(after.overviewPeaks) }, reloadedPeaks, reloadedTime: slot.querySelector('.deck-time').textContent };
+    })()\`, true);
+    if (!decks.vertical.every(Boolean)) errors.push("vertical waveform switch missed a deck: " + JSON.stringify(decks.vertical));
+    if (!decks.loadedPeaks) errors.push("deck C never drew its waveform");
+    if (decks.after.zoomPeaks || decks.after.overviewPeaks || decks.after.zoomColumns) errors.push("eject left waveform data on deck C");
+    if (decks.after.time !== "0:00 / 0:00" || decks.after.title !== "No track" || decks.after.bpm !== "-- BPM" || decks.after.cues !== 0) errors.push("eject left readouts: " + JSON.stringify(decks.after));
+    if (!decks.after.stillVertical) errors.push("eject reset the waveform orientation");
+    if (!decks.reloadedPeaks) errors.push("a track loaded after eject did not draw");
+    // Restart: the stored switch must reach C and D again.
+    await win.webContents.reloadIgnoringCache();
+    await new Promise((r) => setTimeout(r, 3000));
+    const restart = await win.webContents.executeJavaScript(\`['A','B','C','D'].map((id) => Boolean(window.openDeck.zooms[id] && window.openDeck.zooms[id].vertical))\`, true);
+    if (!restart.every(Boolean)) errors.push("vertical waveform not restored on every deck after restart: " + JSON.stringify(restart));
+    probe.deckChecks = { ...decks, restart };
+    // Resume offer after the restart, then resuming a session whose file is missing.
+    const resume = await win.webContents.executeJavaScript(\`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const offer = document.querySelector('#resumePrompt .resume-offer .media-prompt-text');
+      const text = offer ? offer.textContent : null;
+      const chip = !document.getElementById('sessionStatus').classList.contains('hidden');
+      document.querySelector('#resumePrompt .resume-yes').click();
+      for (let i = 0; i < 30 && !document.querySelector('#resumePrompt .resume-missing'); i++) await sleep(100);
+      const missing = document.querySelector('#resumePrompt .resume-missing .media-prompt-text');
+      return { text, chip, missing: missing ? missing.textContent : null, locate: Boolean(document.querySelector('#resumePrompt .resume-locate')), offerGone: !document.querySelector('#resumePrompt .resume-offer') };
+    })()\`, true);
+    if (!resume.text || !resume.text.startsWith("Resume last session?") || !resume.text.includes("A: smoke-track")) errors.push("resume offer did not render: " + JSON.stringify(resume));
+    if (!resume.chip) errors.push("session settings chip hidden");
+    if (!resume.missing || !resume.missing.includes("smoke-track.mp3") || !resume.locate || !resume.offerGone) errors.push("missing-file row did not render on resume: " + JSON.stringify(resume));
+    probe.resume = resume;
     console.log("UI_RESULT " + JSON.stringify({ ok: errors.length === 0, errors, probe }));
     process.exitCode = errors.length === 0 ? 0 : 1;
   } catch (error) {
@@ -75,7 +155,7 @@ const timer = setTimeout(() => {
   console.error("UI_TIMEOUT");
   child.kill();
   process.exitCode = 1;
-}, 60_000);
+}, 90_000);
 child.on("exit", (code) => {
   clearTimeout(timer);
   process.exit(code ?? 1);

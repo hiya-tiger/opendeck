@@ -15,7 +15,15 @@ export type HostMessage =
       cacheDir: string;
     }
   | { type: "cancel"; id: string }
-  | { type: "focus"; id: string; frame: number };
+  | { type: "focus"; id: string; frame: number }
+  /** Tray "Pause"/"Resume": the running job stops at the next chunk boundary until resumed (D45). */
+  | { type: "pause"; paused: boolean }
+  /**
+   * The window went to the tray (D45): lowest priority and fewer inference
+   * threads (the session is rebuilt at the next chunk boundary), or back to the
+   * normal foreground settings.
+   */
+  | { type: "background"; on: boolean; threads: number };
 
 export interface WorkerRegion {
   type: "region";

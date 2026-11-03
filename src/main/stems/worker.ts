@@ -15,23 +15,17 @@ import {
   DEFAULT_OVERLAP,
   JobQueue,
   MODEL_FRAME_COUNT,
-  MODEL_SAMPLE_RATE,
-  PART_ORDER,
-  StemAccumulator,
   openSession,
-  orderChunksFromFocus,
   outputLooksBroken,
-  planChunksWith,
   providerPlans,
-  reorderRemaining,
-  resampleLinear,
   type OpenedSession,
   type OrtLike,
   type ProviderState,
 } from "./core.ts";
 import { physicalCores } from "./cores.ts";
 import type { HostMessage, WorkerMessage } from "./protocol.ts";
-import { writeCache } from "../separation.ts";
+import { MODEL, writeCache } from "../separation.ts";
+import { runStemJob } from "./job-runner.ts";
 
 const req = createRequire(typeof __filename === "string" ? __filename : import.meta.url);
 
@@ -125,12 +119,13 @@ const getSession = (): Promise<OpenedSession> => {
     arch: process.arch,
     supported,
     state,
-    threads: physicalCores(),
+    threads: threadTarget || physicalCores(),
     force,
     optimization: process.env.OPENDECK_STEM_OPT || null,
     cudaInstalled: process.platform === "linux" && process.arch === "x64" && cudaInstalled(),
   });
   validated = false;
+  sessionThreads = threadTarget || physicalCores();
   opening = openSession(ort!, modelPath, plans, disable).then((opened) => {
     send({ type: "ready", provider: opened.provider, createMs: opened.createMs });
     return opened;
@@ -176,85 +171,68 @@ const runChunk = async (input: Float32Array): Promise<Float32Array> => {
 
 type Job = Extract<HostMessage, { type: "job" }>;
 const focusUpdates = new Map<string, number>();
-const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+// Tray controls (D45). Pause holds the running job at its next chunk boundary.
+let paused = false;
+let resumeWaiters: Array<() => void> = [];
+const waitWhilePaused = (): Promise<void> =>
+  paused ? new Promise<void>((resolve) => resumeWaiters.push(resolve)) : Promise.resolve();
+const setPaused = (next: boolean): void => {
+  paused = next;
+  if (!paused) {
+    const waiters = resumeWaiters;
+    resumeWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+};
+
+// Background mode: fewer CPU threads. onnxruntime fixes the pool size when the
+// session is created, so a CPU session is rebuilt at the next chunk boundary;
+// threads it creates then also inherit the lowered priority (Linux nice is per thread).
+let threadTarget = 0; // 0 = physical cores (foreground default)
+let sessionThreads = -1;
+const applyThreadTarget = async (): Promise<void> => {
+  if (!opening) return;
+  let opened: OpenedSession;
+  try {
+    opened = await opening;
+  } catch {
+    return;
+  }
+  const want = threadTarget || physicalCores();
+  if (opened.provider !== "cpu" || sessionThreads === want) return;
+  try {
+    await opened.session.release?.();
+  } catch {
+    // ignore
+  }
+  opening = null;
+};
 
 const runJob = async (job: Job, isCancelled: () => boolean): Promise<void> => {
-  const t0 = performance.now();
   try {
-    const left = resampleLinear(job.left, job.sampleRate, MODEL_SAMPLE_RATE);
-    const right = resampleLinear(job.right, job.sampleRate, MODEL_SAMPLE_RATE);
-    const frames = Math.min(left.length, right.length);
-    const chunks = planChunksWith(frames, MODEL_FRAME_COUNT, overlap);
-    if (!chunks.length) throw new Error("No audio to separate");
-    const toModel = MODEL_SAMPLE_RATE / job.sampleRate;
-    const acc = new StemAccumulator(frames, { left: job.left, right: job.right, sampleRate: job.sampleRate }, MODEL_FRAME_COUNT, overlap);
-    const done = new Set<number>();
-    let order = orderChunksFromFocus(chunks, job.focusFrame * toModel);
-    send({ type: "progress", id: job.id, stage: "prepare", percent: 0, detail: `Preparing ${chunks.length} chunks` });
-    await getSession();
-    const input = new Float32Array(2 * MODEL_FRAME_COUNT);
-    let firstRegionMs = 0;
-    while (order.length) {
-      if (isCancelled()) {
-        send({ type: "cancelled", id: job.id });
-        return;
-      }
-      const focus = focusUpdates.get(job.id);
-      if (focus !== undefined) {
+    await runStemJob(job, {
+      runChunk: async (input) => {
+        await applyThreadTarget();
+        if (process.env.OPENDECK_STEM_DEBUG) process.stderr.write(`[stems] chunk start (${threadTarget || "default"} threads)\n`);
+        return runChunk(input);
+      },
+      send,
+      isCancelled,
+      takeFocus: () => {
+        const frame = focusUpdates.get(job.id);
         focusUpdates.delete(job.id);
-        order = reorderRemaining(chunks, done, focus * toModel);
-      }
-      const plan = order.shift()!;
-      input.fill(0);
-      input.set(left.subarray(plan.start, plan.start + plan.length), 0);
-      input.set(right.subarray(plan.start, plan.start + plan.length), MODEL_FRAME_COUNT);
-      if (process.env.OPENDECK_STEM_DEBUG) process.stderr.write(`[stems] chunk ${plan.index} start\n`);
-      const data = await runChunk(input);
-      if (process.env.OPENDECK_STEM_DEBUG) process.stderr.write(`[stems] chunk ${plan.index} ran\n`);
-      const region = acc.add(plan, data);
-      done.add(plan.index);
-      if (!firstRegionMs) firstRegionMs = performance.now() - t0;
-      const transfer: ArrayBuffer[] = [];
-      for (const id of PART_ORDER) for (const channel of region.parts[id]) transfer.push(channel.buffer as ArrayBuffer);
-      send(
-        {
-          type: "region",
-          id: job.id,
-          start: region.start,
-          sampleRate: job.sampleRate,
-          totalFrames: acc.outFrames,
-          chunksDone: done.size,
-          chunksTotal: chunks.length,
-          parts: region.parts,
-        },
-        transfer,
-      );
-      send({
-        type: "progress",
-        id: job.id,
-        stage: "separate",
-        percent: Math.round((done.size / chunks.length) * 100),
-        detail: `Chunk ${done.size} of ${chunks.length}`,
-      });
-      await tick();
-    }
-    if (isCancelled()) {
-      send({ type: "cancelled", id: job.id });
-      return;
-    }
-    send({ type: "progress", id: job.id, stage: "write", percent: 100, detail: "Writing stem cache" });
-    const manifest = await writeCache(job.cacheDir, job.hash, frames, acc.toInt16());
-    const opened = await getSession();
-    send({
-      type: "done",
-      id: job.id,
-      manifest: manifest as unknown as Record<string, unknown>,
-      ms: Math.round(performance.now() - t0),
-      provider: opened.provider,
-      firstRegionMs: Math.round(firstRegionMs),
+        return frame;
+      },
+      waitWhilePaused,
+      prepare: async () => {
+        await getSession();
+      },
+      writeCache: async (dir, hash, frames, parts) => (await writeCache(dir, hash, frames, parts)) as unknown as Record<string, unknown>,
+      provider: async () => (await getSession()).provider,
+      model: { id: MODEL.id, version: MODEL.version },
+      overlap,
     });
-  } catch (error) {
-    send({ type: "error", id: job.id, message: (error as Error)?.message ?? String(error) });
   } finally {
     focusUpdates.delete(job.id);
   }
@@ -283,6 +261,17 @@ onMessage((message) => {
       break;
     case "focus":
       focusUpdates.set(message.id, message.frame);
+      break;
+    case "pause":
+      setPaused(Boolean(message.paused));
+      break;
+    case "background":
+      threadTarget = message.on ? Math.max(1, Math.floor(message.threads) || 1) : 0;
+      try {
+        os.setPriority(message.on ? os.constants.priority.PRIORITY_LOW : os.constants.priority.PRIORITY_BELOW_NORMAL);
+      } catch {
+        // not permitted (raising back from LOW needs privileges on Linux/macOS)
+      }
       break;
   }
 });

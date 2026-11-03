@@ -20,14 +20,13 @@ const api = {
   platform: process.platform,
   versions: { electron: process.versions.electron, chrome: process.versions.chrome },
   streaming: {
-    login: (provider: string, url: string, hints: string[]) => ipcRenderer.invoke("streaming:login", provider, url, hints),
-    open: (provider: string, url: string, hints: string[]) => ipcRenderer.invoke("streaming:open", provider, url, hints),
-    status: (provider: string, hints: string[]) => ipcRenderer.invoke("streaming:status", provider, hints),
-    logout: (provider: string) => ipcRenderer.invoke("streaming:logout", provider),
-    search: (provider: string, url: string, token?: string) => ipcRenderer.invoke("streaming:search", provider, url, token),
-    license: (provider: string, licenseUrl: string, challenge: Uint8Array, token?: string) =>
-      ipcRenderer.invoke("streaming:license", provider, licenseUrl, challenge, token),
-    onLogin: (handler: (payload: unknown) => void) => on("streaming:login", handler),
+    status: () => ipcRenderer.invoke("stream:status"),
+    setKey: (source: string, clientId: string, clientSecret?: string) => ipcRenderer.invoke("stream:set-key", source, clientId, clientSecret),
+    clearKey: (source: string) => ipcRenderer.invoke("stream:clear-key", source),
+    signIn: (source: string) => ipcRenderer.invoke("stream:sign-in", source),
+    signOut: (source: string) => ipcRenderer.invoke("stream:sign-out", source),
+    request: (source: string, req: unknown) => ipcRenderer.invoke("stream:request", source, req),
+    audio: (source: string, plan: unknown) => ipcRenderer.invoke("stream:audio", source, plan),
   },
   media: {
     fetch: (url: string) => ipcRenderer.invoke("media:fetch", url),
@@ -43,6 +42,26 @@ const api = {
     focus: (deck: string, hash: string, frame: number) => ipcRenderer.invoke("separation:focus", { deck, hash, frame }),
     onProgress: (handler: (payload: unknown) => void) => on("separation:progress", handler),
     onRegion: (handler: (payload: unknown) => void) => on("separation:region", handler),
+  },
+  session: {
+    get: () => ipcRenderer.invoke("session:get"),
+    save: (snapshot: unknown) => ipcRenderer.invoke("session:save", snapshot),
+    saveSync: (snapshot: unknown): boolean => ipcRenderer.sendSync("session:save-sync", JSON.stringify(snapshot)) as boolean,
+    clear: () => ipcRenderer.invoke("session:clear"),
+    openFile: (request: { path: string; hash?: string }) => ipcRenderer.invoke("session:open-file", request),
+    locate: (name: string) => ipcRenderer.invoke("session:locate", name),
+    onBackground: (handler: (payload: unknown) => void) => on("app:background", handler),
+  },
+  appSettings: {
+    get: () => ipcRenderer.invoke("settings:get"),
+    set: (patch: unknown) => ipcRenderer.invoke("settings:set", patch),
+  },
+  cache: {
+    usage: () => ipcRenderer.invoke("cache:usage"),
+    clear: () => ipcRenderer.invoke("cache:clear"),
+    recordPath: (hash: string, filePath: string) => ipcRenderer.invoke("cache:record-path", hash, filePath),
+    getAnalysis: (hash: string, version: string) => ipcRenderer.invoke("cache:get-analysis", hash, version),
+    putAnalysis: (hash: string, version: string, result: unknown) => ipcRenderer.invoke("cache:put-analysis", hash, version, result),
   },
   serato: {
     running: () => ipcRenderer.invoke("serato:running"),
@@ -70,6 +89,8 @@ const api = {
     enable: () => ipcRenderer.invoke("link:enable"),
     disable: () => ipcRenderer.invoke("link:disable"),
     setLocalTempo: (bpm: number) => ipcRenderer.invoke("link:set-tempo", bpm),
+    setPlaying: (playing: boolean) => ipcRenderer.invoke("link:set-playing", playing),
+    settings: (patch: { protocol?: "ableton" | "opendeck"; startStopSync?: boolean }) => ipcRenderer.invoke("link:settings", patch),
   },
   djmedia: {
     state: () => ipcRenderer.invoke("djmedia:state"),
