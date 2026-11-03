@@ -19,3 +19,5 @@ serde_json.workspace = true
 eframe = { version = "0.33", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
 egui = "0.33"
 midir = "0.10"
+rayon.workspace = true
+assert_no_alloc = "1.1"

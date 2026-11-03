@@ -77,3 +77,18 @@ for (const st of [0x80, 0x86, 0x87, 0x88, 0x90, 0x96, 0x97, 0x98, 0xa7, 0xb0, 0x
 }
 w(vec, "slab.json", { decode: slabv, filter: [0, 1, 32, 63, 64, 65, 100, 127].map((v) => [v, slab.slabFilterAmount(v)]), colors: ["#ff0000", "#00ff00", "#0000ff", "#ffffff", "#000000", "#e8a33d", null, "nope"].map((c) => [c, slab.provisionalColorNumber(c)]) });
 console.log("exported");
+
+// stems chunk planning (src/main/stems/core.ts)
+const stems = await imp("src/main/stems/core.ts");
+const stemv = { plans: [], orders: [], windows: [], coverage: [] };
+for (const total of [0, 1000, 343980, 343981, 5292000, 10584000]) {
+  const plan = stems.planChunksWith(total);
+  stemv.plans.push([total, plan.map((c) => [c.index, c.start, c.length])]);
+  for (const focus of [0, 100000, 2646000, 9e9, -5]) stemv.orders.push([total, focus, stems.orderChunksFromFocus(plan, focus).map((c) => c.index)]);
+}
+for (const [len, ov] of [[16, 4], [10, 0], [100, 30]]) stemv.windows.push([len, ov, Array.from(stems.transitionWindowFor(len, ov))]);
+const set = new stems.IntervalSet(); set.add(1000, 5000); set.add(20000, 30000); set.add(4000, 9000);
+for (const f of [0, 999, 1000, 3000, 8999, 9000, 25000, 29999, 30000]) stemv.coverage.push([f, stems.coverageAt(set, f, 30000)]);
+stemv.intervals = set.list;
+w(vec, "stems.json", stemv);
+console.log("exported stems");

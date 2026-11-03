@@ -2244,6 +2244,7 @@ version = "0.1.6"
 dependencies = [
  "od-core",
  "ort",
+ "serde_json",
 ]
 
 [[package]]
