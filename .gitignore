@@ -11,3 +11,4 @@ models/
 release/
 *.pdb
 linux/target/
+bench/out/

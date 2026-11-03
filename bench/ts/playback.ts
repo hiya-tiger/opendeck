@@ -11,6 +11,7 @@ import { PcmSource } from "../../src/renderer/engine/pcm-source.ts";
 
 const params = new URLSearchParams(location.search);
 const SECONDS = Number(params.get("seconds") ?? 300);
+const FX = params.get("fx") === "1";
 const status = (t: string): void => { document.body.textContent = t; };
 
 async function main(): Promise<void> {
@@ -30,7 +31,17 @@ async function main(): Promise<void> {
         ch[i] = 0.12 * Math.sin(2 * Math.PI * (55 + 70 * Math.exp(-ib / 900)) * (ib / sr)) * Math.exp(-ib / 5000) + 0.03 * Math.sin(2 * Math.PI * (220 + 30 * d) * (i / sr));
       }
     }
-    const src = new PcmSource(ctx, ctx.destination, { gain: 0.25 });
+    // FX (Linux run, D46): echo on deck A, reverb on deck B, as the Rust run does.
+    let dest: AudioNode = ctx.destination;
+    if (FX && d === 0) {
+      const input = ctx.createGain(); const delay = ctx.createDelay(4); delay.delayTime.value = 60 / bpm; const fb = ctx.createGain(); fb.gain.value = 0.49; const wet = ctx.createGain(); wet.gain.value = 0.55;
+      input.connect(ctx.destination); input.connect(delay); delay.connect(fb); fb.connect(delay); delay.connect(wet); wet.connect(ctx.destination); dest = input;
+    } else if (FX && d === 1) {
+      const input = ctx.createGain(); const conv = ctx.createConvolver(); const ir = ctx.createBuffer(2, Math.floor(sr * 2), sr);
+      for (let c = 0; c < 2; c += 1) { const ch = ir.getChannelData(c); for (let i = 0; i < ch.length; i += 1) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / ch.length, 3); }
+      conv.buffer = ir; const wet = ctx.createGain(); wet.gain.value = 0.4; input.connect(ctx.destination); input.connect(conv); conv.connect(wet); wet.connect(ctx.destination); dest = input;
+    }
+    const src = new PcmSource(ctx, dest, { gain: 0.25 });
     await src.load(buf, 0);
     src.setLoop(0, len - 1);
     if (d >= 2) { src.setKeylock(true); src.setRate(1.03); }
@@ -61,7 +72,7 @@ async function main(): Promise<void> {
   });
   clearInterval(tick);
   const result = {
-    host: params.get("host"), userAgent: navigator.userAgent, seconds: SECONDS, sampleRate: sr, baseLatency: ctx.baseLatency, outputLatency: (ctx as { outputLatency?: number }).outputLatency ?? null,
+    host: params.get("host"), fx: FX, userAgent: navigator.userAgent, seconds: SECONDS, sampleRate: sr, baseLatency: ctx.baseLatency, outputLatency: (ctx as { outputLatency?: number }).outputLatency ?? null,
     ctxState: ctx.state, engines: decks.map((s) => s.engineMode),
     appUnderruns: decks.map((s) => s.underruns), contextStalls: stalls, audioSeconds: ctx.currentTime,
   };

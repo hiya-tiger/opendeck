@@ -6,7 +6,10 @@ for (const [entry, out] of [["bench/ts/bench.ts", "bench/out/ts-bench.cjs"], ["b
   await build({ entryPoints: [root + entry], outfile: root + out, bundle: true, platform: "node", format: "cjs", target: "node20", logLevel: "error", external: ["onnxruntime-node", "electron"] });
 }
 await build({ entryPoints: [root + "bench/ts/playback.ts"], outfile: root + "bench/out/playback/playback.js", bundle: true, format: "iife", target: "es2020", logLevel: "error" });
+await build({ entryPoints: [root + "bench/ts/scroll.ts"], outfile: root + "bench/out/scroll/scroll.js", bundle: true, format: "iife", target: "es2020", logLevel: "error" });
 const { writeFileSync, mkdirSync } = await import("node:fs");
+mkdirSync(root + "bench/out/scroll", { recursive: true });
+writeFileSync(root + "bench/out/scroll/index.html", '<!doctype html><meta charset="utf-8"><title>scroll</title><body></body><script src="scroll.js"></script>');
 mkdirSync(root + "bench/out/playback", { recursive: true });
 writeFileSync(root + "bench/out/playback/index.html", '<!doctype html><meta charset="utf-8"><title>playback</title><body>loading</body><script src="playback.js"></script>');
 console.log("bench/out built");

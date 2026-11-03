@@ -1,0 +1,20 @@
+# Benchmark-only Flatpak carrying today's Electron build (same runtime as the
+# egui Flatpak: freedesktop 24.08) so both sides run sandboxed.
+app-id: dev.opendecks.ElectronBench
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: "24.08"
+command: electron
+finish-args: [--share=ipc, --share=network, --socket=x11, --socket=pulseaudio, --device=dri, --filesystem=host]
+modules:
+  - name: bench
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/bench /app/bin
+      - cp -a . /app/bench/
+      - ln -s /app/bench/node_modules/electron/dist/electron /app/bin/electron
+    sources:
+      - type: dir
+        path: stage

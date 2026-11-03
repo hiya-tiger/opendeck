@@ -8,12 +8,12 @@ const path = require("node:path");
 const [mode, dir, seconds] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 app.whenReady().then(() => {
-  if (mode !== "playback") { console.error("only playback"); app.exit(2); return; }
+  if (mode !== "playback" && mode !== "scroll") { console.error("only playback"); app.exit(2); return; }
   const server = http.createServer((req, res) => {
     if (req.url === "/result") {
       let body = "";
       req.on("data", (d) => (body += d));
-      req.on("end", () => { process.stdout.write(`PLAYBACK ${body}\n`); res.writeHead(204); res.end(); setTimeout(() => app.exit(0), 200); });
+      req.on("end", () => { process.stdout.write(`${mode === "scroll" ? "SCROLL" : "PLAYBACK"} ${body}\n`); res.writeHead(204); res.end(); setTimeout(() => app.exit(0), 200); });
       return;
     }
     const file = path.join(dir, decodeURIComponent(req.url.split("?")[0]).replace(/^\/+/, "") || "index.html");
@@ -24,7 +24,7 @@ app.whenReady().then(() => {
     });
   });
   server.listen(0, "127.0.0.1", () => {
-    const win = new BrowserWindow({ width: 800, height: 600, webPreferences: { backgroundThrottling: false } });
-    win.loadURL(`http://127.0.0.1:${server.address().port}/index.html?seconds=${seconds || 300}&host=electron`);
+    const win = new BrowserWindow({ width: 1440, height: 900, webPreferences: { backgroundThrottling: false } });
+    win.loadURL(`http://127.0.0.1:${server.address().port}/index.html?seconds=${seconds || 300}&host=electron&fx=${process.env.OD_FX || "0"}`);
   });
 });

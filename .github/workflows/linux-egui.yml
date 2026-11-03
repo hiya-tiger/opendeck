@@ -1,0 +1,113 @@
+# Native Linux build (egui + Rust engine): build, test, benchmark against the
+# Electron build on ubuntu-latest natively AND inside Flatpaks, package the
+# Flatpak, upload everything. See docs/benchmarks/linux-egui.md.
+name: linux-egui
+on:
+  push:
+    branches: [feat/linux-egui]
+    paths: ["linux/**", "bench/**", "packaging/linux/**", ".github/workflows/linux-egui.yml"]
+  workflow_dispatch:
+    inputs:
+      play_seconds: { description: "playback run length (s)", default: "600" }
+permissions: { contents: read }
+env:
+  CARGO_TERM_COLOR: never
+  PLAY_SECONDS: ${{ github.event.inputs.play_seconds || '600' }}
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: system packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq xvfb xauth flatpak flatpak-builder pkg-config clang libclang-dev libasound2-dev libjack-jackd2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev mesa-vulkan-drivers libvulkan1 libudev-dev libgtk-3-0t64 libnss3 libgbm1 >/dev/null
+          pip install psutil
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/cache@v4
+        with: { path: "~/.cargo/registry\nlinux/target", key: "cargo-${{ hashFiles('linux/Cargo.lock') }}" }
+      - name: JS tests (existing, untouched)
+        run: npm ci && npm test
+      - name: cargo test
+        working-directory: linux
+        run: cargo test --workspace 2>&1 | tee ../cargo-test.log
+      - name: cargo clippy
+        working-directory: linux
+        run: cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee ../clippy.log
+      - name: release build
+        working-directory: linux
+        run: cargo build --release --workspace && cargo build --release -p od-stems --features ort --bin od-stems-bench
+      - name: fixtures, TS bench bundle, Electron app build
+        run: |
+          node bench/fixtures/gen.ts bench-fixtures
+          node bench/ts/build.mjs
+          npm run build
+          node bench/harness/prepare-renderer.mjs renderer
+      - uses: actions/cache@v4
+        with: { path: model, key: htdemucs-fp16weights-d05c269d }
+      - name: stem model
+        run: |
+          mkdir -p model
+          [ -f model/htdemucs_fp16weights.onnx ] || curl -sSL -o model/htdemucs_fp16weights.onnx https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx
+          sha256sum model/htdemucs_fp16weights.onnx | grep -q d05c269d0178d2a72ad484b10b11dd370193fc923201c3b27a99f848745db70a
+      - name: benchmark (native)
+        env:
+          FX: ${{ github.workspace }}/bench-fixtures
+          BIN: ${{ github.workspace }}/linux/target/release
+          APP: ${{ github.workspace }}
+          MODEL: ${{ github.workspace }}/model/htdemucs_fp16weights.onnx
+          ORTLIB: ${{ github.workspace }}/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.1.20.1
+          X: xvfb-run -a
+        run: |
+          export ELECTRON="$(node -p "require('electron')")"
+          bash bench/linux/run.sh results/native
+          python3 bench/harness/shell.py size --name egui --out results/native/size-egui.json linux/target/release/opendecks
+          python3 bench/harness/shell.py size --name electron --out results/native/size-electron.json "$(dirname "$ELECTRON")" dist renderer node_modules/fflate node_modules/signalsmith-stretch node_modules/onnxruntime-node/dist node_modules/onnxruntime-node/lib node_modules/onnxruntime-node/bin/napi-v3/linux/x64
+      - name: Flatpaks (egui app + Electron bench)
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          bash packaging/linux/stage.sh linux/target/release
+          flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse --repo=flatpak-repo build-egui packaging/linux/io.opendeck.OpenDecks.yml
+          flatpak build-bundle flatpak-repo OpenDecks-linux-egui.flatpak io.opendeck.OpenDecks
+          flatpak remote-add --user --no-gpg-verify --if-not-exists od-local flatpak-repo
+          flatpak install --user -y od-local io.opendeck.OpenDecks
+          S=bench/linux/flatpak/stage; mkdir -p $S/node_modules
+          mkdir -p $S/bench && cp -a bench/out bench/shell bench/harness bench/equivalence.mjs $S/bench/ && cp -a dist renderer package.json $S/ ; for m in electron fflate signalsmith-stretch onnxruntime-node onnxruntime-common; do cp -a node_modules/$m $S/node_modules/ 2>/dev/null || true; done
+          flatpak-builder --user --install-deps-from=flathub --install --force-clean --disable-rofiles-fuse build-electron bench/linux/flatpak/dev.opendecks.ElectronBench.yml
+          du -sb build-egui/files > results-flatpak-size-egui.txt; du -sb build-electron/files > results-flatpak-size-electron.txt
+      - name: benchmark (inside the Flatpaks)
+        env:
+          FX: ${{ github.workspace }}/bench-fixtures
+          MODEL: ${{ github.workspace }}/model/htdemucs_fp16weights.onnx
+        run: |
+          # egui legs run in io.opendeck.OpenDecks, Electron legs in dev.opendecks.ElectronBench.
+          export BIN=/app/bin APP=/app/bench ELECTRON=/app/bench/node_modules/electron/dist/electron ORTLIB=$GITHUB_WORKSPACE/node_modules/onnxruntime-node/bin/napi-v3/linux/x64/libonnxruntime.so.1.20.1
+          printf '#!/bin/sh\ncmd="$1"; shift\ncase "$cmd" in /app/bin/*) id=io.opendeck.OpenDecks;; *) id=dev.opendecks.ElectronBench;; esac\nexec flatpak run --user --filesystem=host --env=ELECTRON_RUN_AS_NODE="${ELECTRON_RUN_AS_NODE:-}" --env=OD_FX="${OD_FX:-}" --command="$cmd" "$id" "$@"\n' > /tmp/fprun; chmod +x /tmp/fprun
+          RUNP=/tmp/fprun X="xvfb-run -a" bash bench/linux/run.sh results/flatpak
+          echo "{\"egui\": $(cut -f1 results-flatpak-size-egui.txt), \"electron\": $(cut -f1 results-flatpak-size-electron.txt)}" > results/flatpak/flatpak-size-bytes.json
+      - name: summarize
+        if: always()
+        run: python3 bench/linux/summarize.py results > results/summary.md; cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-egui-results
+          path: |
+            results/
+            cargo-test.log
+            clippy.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: OpenDecks-linux-egui-flatpak
+          path: OpenDecks-linux-egui.flatpak
+      - name: tarball
+        if: always()
+        run: tar -C packaging/linux/stage -czf OpenDecks-linux-egui-x86_64.tar.gz .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: OpenDecks-linux-egui-tarball, path: OpenDecks-linux-egui-x86_64.tar.gz }

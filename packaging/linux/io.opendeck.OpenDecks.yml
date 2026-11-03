@@ -1,0 +1,35 @@
+# OpenDecks for Linux (native egui + Rust build). Windows and macOS stay on
+# Electron. packaging/linux/stage/ is filled by CI (or scripts/linux-flatpak.sh)
+# with the release binary built against glibc <= the runtime's (Ubuntu 24.04
+# builds run on freedesktop 24.08). The binary links libasound (PipeWire/
+# Pulse via the ALSA plugins in the runtime) and loads Vulkan/GL at run time.
+app-id: io.opendeck.OpenDecks
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: opendecks
+finish-args:
+  - --share=ipc
+  - --share=network          # opendeck-link/1 multicast, Pro DJ Link
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio      # PipeWire/Pulse through the ALSA pulse plugin
+  - --device=all             # MIDI (ALSA seq), USB sticks, DRI
+  - --filesystem=xdg-music
+  - --filesystem=/media:ro
+  - --filesystem=/run/media:ro
+modules:
+  - name: opendecks
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 opendecks /app/bin/opendecks
+      - install -Dm755 od-bench /app/bin/od-bench
+      - if [ -f od-stems-bench ]; then install -Dm755 od-stems-bench /app/bin/od-stems-bench; fi
+      - install -Dm644 io.opendeck.OpenDecks.desktop /app/share/applications/io.opendeck.OpenDecks.desktop
+      - install -Dm644 io.opendeck.OpenDecks.metainfo.xml /app/share/metainfo/io.opendeck.OpenDecks.metainfo.xml
+      - install -Dm644 icon.png /app/share/icons/hicolor/256x256/apps/io.opendeck.OpenDecks.png
+      - install -Dm644 LICENSE /app/share/licenses/io.opendeck.OpenDecks/LICENSE
+      - install -Dm644 THIRD-PARTY.md /app/share/licenses/io.opendeck.OpenDecks/THIRD-PARTY.md
+    sources:
+      - type: dir
+        path: stage
