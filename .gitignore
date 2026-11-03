@@ -10,3 +10,4 @@ models/
 .opendeck-stems/
 release/
 *.pdb
+linux/target/

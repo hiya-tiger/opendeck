@@ -1,0 +1,248 @@
+{
+ "names": [
+  [
+   "Numark Party Mix III",
+   "numark-party-mix-iii",
+   "numark-party-mix-iii"
+  ],
+  [
+   "PartyMix 3 MIDI 1",
+   "numark-party-mix-iii",
+   "numark-party-mix-iii"
+  ],
+  [
+   "Party Mix",
+   "numark-party-mix-iii",
+   "numark-party-mix-iii"
+  ],
+  [
+   "Numark Party Mix",
+   "numark-party-mix-iii",
+   "numark-party-mix-iii"
+  ],
+  [
+   "Hercules DJControl T10",
+   "hercules-djcontrol-t10",
+   "hercules-djcontrol-t10"
+  ],
+  [
+   "DJControl T10 MIDI",
+   "hercules-djcontrol-t10",
+   "hercules-djcontrol-t10"
+  ],
+  [
+   "RANE ONE",
+   "rane-one",
+   "rane-one"
+  ],
+  [
+   "Rane One MK2",
+   null,
+   null
+  ],
+  [
+   "Mixars DUO",
+   "mixars-duo",
+   "mixars-duo"
+  ],
+  [
+   "Omnis Duo",
+   "alphatheta-omnis-duo",
+   "alphatheta-omnis-duo"
+  ],
+  [
+   "SLAB",
+   "alphatheta-slab",
+   "alphatheta-slab"
+  ],
+  [
+   "AlphaTheta SLAB",
+   "alphatheta-slab",
+   "alphatheta-slab"
+  ],
+  [
+   "Pioneer DDJ-FLX4",
+   "pioneer-dj-ddj-flx4",
+   "pioneer-dj-ddj-flx4"
+  ],
+  [
+   "DDJ-FLX4 MIDI 1",
+   "pioneer-dj-ddj-flx4",
+   "pioneer-dj-ddj-flx4"
+  ],
+  [
+   "DDJ-1000",
+   null,
+   null
+  ],
+  [
+   "Traktor Kontrol S4 MK3",
+   null,
+   null
+  ],
+  [
+   "Kontrol S2",
+   null,
+   null
+  ],
+  [
+   "Reloop RP8000 MK2",
+   "reloop-rp8000-mk2",
+   "reloop-rp8000-mk2"
+  ],
+  [
+   "Reloop RP-8000",
+   "reloop-rp-8000",
+   "reloop-rp-8000"
+  ],
+  [
+   "Denon DJ SC6000",
+   null,
+   null
+  ],
+  [
+   "Unknown Thing",
+   null,
+   null
+  ],
+  [
+   "Roland DJ-202",
+   "roland-dj-202",
+   "roland-dj-202"
+  ],
+  [
+   "Pioneer DJM-900NXS2",
+   "pioneer-dj-djm-900nxs2",
+   "pioneer-dj-djm-900nxs2"
+  ],
+  [
+   "Serato Control Vinyl",
+   null,
+   null
+  ]
+ ],
+ "slabPorts": [
+  [
+   "SLAB",
+   true
+  ],
+  [
+   "AlphaTheta SLAB MIDI 1",
+   true
+  ],
+  [
+   "Slabs",
+   false
+  ],
+  [
+   "my-slab-2",
+   true
+  ],
+  [
+   "Kontrol",
+   false
+  ]
+ ],
+ "parse": [
+  [
+   [
+    144,
+    36,
+    100
+   ],
+   {
+    "type": "noteon",
+    "channel": 1,
+    "note": 36,
+    "velocity": 100,
+    "normalized": 0.7874015748031497
+   }
+  ],
+  [
+   [
+    144,
+    36,
+    0
+   ],
+   {
+    "type": "noteoff",
+    "channel": 1,
+    "note": 36,
+    "velocity": 0,
+    "normalized": 0
+   }
+  ],
+  [
+   [
+    128,
+    40,
+    64
+   ],
+   {
+    "type": "noteoff",
+    "channel": 1,
+    "note": 40,
+    "velocity": 64,
+    "normalized": 0
+   }
+  ],
+  [
+   [
+    179,
+    7,
+    127
+   ],
+   {
+    "type": "cc",
+    "channel": 4,
+    "controller": 7,
+    "value": 127,
+    "normalized": 1
+   }
+  ],
+  [
+   [
+    176,
+    1,
+    0
+   ],
+   {
+    "type": "cc",
+    "channel": 1,
+    "controller": 1,
+    "value": 0,
+    "normalized": 0
+   }
+  ],
+  [
+   [
+    224,
+    0,
+    64
+   ],
+   null
+  ],
+  [
+   [
+    64,
+    1,
+    1
+   ],
+   null
+  ],
+  [
+   [
+    159,
+    127,
+    127
+   ],
+   {
+    "type": "noteon",
+    "channel": 16,
+    "note": 127,
+    "velocity": 127,
+    "normalized": 1
+   }
+  ]
+ ]
+}

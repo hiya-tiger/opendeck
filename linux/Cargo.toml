@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/od-core", "crates/od-audio", "crates/od-stems", "crates/od-app", "crates/od-bench"]
+
+[workspace.package]
+version = "0.1.6"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+od-core = { path = "crates/od-core" }
+od-audio = { path = "crates/od-audio" }
+od-stems = { path = "crates/od-stems" }
+rayon = "1.10"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = false
+strip = true
+
+[profile.bench-fast]
+inherits = "release"
+lto = false

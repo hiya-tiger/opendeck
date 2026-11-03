@@ -1,0 +1,15 @@
+[package]
+name = "od-bench"
+description = "Benchmarks for the Linux build (same fixtures and workloads as bench/ts)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+od-core.workspace = true
+od-audio.workspace = true
+od-stems.workspace = true
+rayon.workspace = true
+ring.workspace = true
+serde_json.workspace = true
