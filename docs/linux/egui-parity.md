@@ -60,7 +60,7 @@ xvfb only. Windows and macOS stay on Electron.
 | Overview waveforms, beat grid, cue/hot-cue/loop marks | Have | |
 | 10 pad modes | Have / Building | hot cue, cue loop, loop roll, slicer, beat jump, transport, pitch play: Have. Scratch: scans backward/forward from a cue (no platter scratch engine). Sequence: records pad presses and replays them, no timing. Part FX: Building (needs stems in playback). |
 | Mixer, FX controls, sampler, settings | Have | |
-| Keyboard: full Serato map, overlay, input-focus guard, Settings toggle | Have | The table is exported from serato-keymap.ts, not copied; every chord x modifier x repeat x text-field case matches the TS matcher (test). egui has no separate numpad keys, so Numpad sampler keys act like the digit row's codes do not: **Numpad 1-8 sampler: Gap**. |
+| Keyboard: full Serato map, overlay, input-focus guard, Settings toggle | Have | The table is exported from serato-keymap.ts, not copied; every chord x modifier x repeat x text-field case matches the TS matcher (test). egui does not report numpad keys separately, so the Numpad 1-8 sampler keys do not fire: **Gap**. |
 | MIDI (midir), all 194 profiles, SLAB driver, Party Mix III | Building | Profiles are the exported TS table; device lookup matches the TS for the tested names. Note/CC bindings drive play, cue, sync, loop, pitch, trim, EQ, FX wet, pads, faders, crossfader, sampler. SLAB: decoder is byte-exact with the TS; pads, play, deck select, encoders (EQ) and strip (filter) are mapped; LED/colour feedback and the rest of SlabController: Gap. Untested on hardware. |
 | MIDI learn / custom mappings UI | Gap | |
 | Link (opendeck-link/1, 239.255.77.88:29876) | Have | Wire format byte-compatible with the TS node (test). Not Ableton Link. |

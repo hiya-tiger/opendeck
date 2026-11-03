@@ -10,6 +10,7 @@ on:
     inputs:
       play_seconds: { description: "playback run length (s)", default: "600" }
 permissions: { contents: read }
+concurrency: { group: linux-egui-${{ github.ref }}, cancel-in-progress: true }
 env:
   CARGO_TERM_COLOR: never
   PLAY_SECONDS: ${{ github.event.inputs.play_seconds || '600' }}
