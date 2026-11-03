@@ -43,6 +43,26 @@ const api = {
     onProgress: (handler: (payload: unknown) => void) => on("separation:progress", handler),
     onRegion: (handler: (payload: unknown) => void) => on("separation:region", handler),
   },
+  session: {
+    get: () => ipcRenderer.invoke("session:get"),
+    save: (snapshot: unknown) => ipcRenderer.invoke("session:save", snapshot),
+    saveSync: (snapshot: unknown): boolean => ipcRenderer.sendSync("session:save-sync", JSON.stringify(snapshot)) as boolean,
+    clear: () => ipcRenderer.invoke("session:clear"),
+    openFile: (request: { path: string; hash?: string }) => ipcRenderer.invoke("session:open-file", request),
+    locate: (name: string) => ipcRenderer.invoke("session:locate", name),
+    onBackground: (handler: (payload: unknown) => void) => on("app:background", handler),
+  },
+  appSettings: {
+    get: () => ipcRenderer.invoke("settings:get"),
+    set: (patch: unknown) => ipcRenderer.invoke("settings:set", patch),
+  },
+  cache: {
+    usage: () => ipcRenderer.invoke("cache:usage"),
+    clear: () => ipcRenderer.invoke("cache:clear"),
+    recordPath: (hash: string, filePath: string) => ipcRenderer.invoke("cache:record-path", hash, filePath),
+    getAnalysis: (hash: string, version: string) => ipcRenderer.invoke("cache:get-analysis", hash, version),
+    putAnalysis: (hash: string, version: string, result: unknown) => ipcRenderer.invoke("cache:put-analysis", hash, version, result),
+  },
   serato: {
     running: () => ipcRenderer.invoke("serato:running"),
     writeTags: (request: unknown) => ipcRenderer.invoke("serato:write-tags", request),

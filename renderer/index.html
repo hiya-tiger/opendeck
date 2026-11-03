@@ -32,6 +32,20 @@
         <label class="micro"><input id="linkStartStop" type="checkbox"> Start/stop sync</label>
         <div id="linkDetail" class="cdj-list mono micro"></div>
       </div>
+      <button id="sessionStatus" type="button" class="chip mono cdj-status hidden" title="Session resume and cache">Session</button>
+      <div id="sessionPanel" class="cdj-panel session-panel hidden" role="dialog" aria-label="Session and cache">
+        <div class="cdj-panel-head"><strong>Session &amp; cache</strong></div>
+        <label class="micro"><input id="sessionAlwaysResume" type="checkbox"> Always resume last session on launch</label>
+        <label class="micro">Closing while stems separate <select id="sessionCloseChoice" class="mini-select" aria-label="Closing while stems separate">
+          <option value="ask">Ask every time</option>
+          <option value="tray">Keep going in tray</option>
+          <option value="quit">Quit now</option>
+        </select></label>
+        <label class="micro">Cache size limit <select id="cacheLimit" class="mini-select" aria-label="Cache size limit"></select></label>
+        <div id="cacheUsage" class="cdj-list mono micro">…</div>
+        <div class="micro muted">Least recently used analyses and stems go first when the cache is full.</div>
+        <button id="cacheClear" type="button" class="ghost small">Clear cache</button>
+      </div>
       <button id="cdjStatus" type="button" class="chip mono cdj-status hidden" title="Pro DJ Link and USB drives">Link</button>
       <div id="cdjPanel" class="cdj-panel hidden" role="dialog" aria-label="CDJ and USB drives">
         <div class="cdj-panel-head"><strong>CDJs &amp; USB drives</strong></div>
@@ -51,6 +65,7 @@
       <a id="saveMix" class="pill-btn hidden" download="opendeck-mix.webm">Save mix</a>
     </div>
   </header>
+  <div id="resumePrompt" class="media-prompts hidden" role="status" aria-live="polite"></div>
   <div id="mediaPrompts" class="media-prompts hidden" role="status" aria-live="polite"></div>
 
   <main class="workspace" id="workspace">

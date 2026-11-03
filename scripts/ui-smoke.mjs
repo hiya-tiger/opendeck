@@ -24,6 +24,19 @@ ipcMain.handle("djmedia:state", () => ({
   libraries: [],
   snapshot: { enabled: true, running: true, interfaceName: "eth0", address: "169.254.1.5", deviceNumber: 1, players: [{ deviceNumber: 2, name: "CDJ-3000", ip: "169.254.1.2", kind: "player", usb: "mounted", sd: "empty" }], media: [], prompts: [prompt], error: null, interfaces: [], settings: { enabled: true, interface: "auto", deviceNumber: "auto", localDrives: true, remembered: {} } },
 }));
+// Session resume (D45): one saved deck whose file is gone, so the probe sees
+// the resume offer and then the "Locate…" row.
+const savedSession = { version: 1, savedAt: "2026-11-03T19:00:00.000Z", fourDecks: false, decks: [{ deck: "A", path: "/gone/smoke-track.mp3", name: "smoke-track.mp3", hash: "c".repeat(64), position: 12 }], mixer: { crossfader: 0.5, curve: "smooth", reverse: false, master: 0.8, aux: 0.8, channels: {} }, library: { view: "all", filter: "", sortKey: "title", sortDirection: "asc", colorFilter: "" } };
+const sessionSaves = [];
+ipcMain.handle("session:get", () => ({ session: savedSession, settings: { alwaysResume: false, closeWhileSeparating: "ask", cacheLimitBytes: 10737418240 } }));
+ipcMain.handle("session:save", (_e, snap) => { sessionSaves.push(snap); return { ok: true }; });
+ipcMain.on("session:save-sync", (event) => { event.returnValue = true; });
+ipcMain.handle("session:open-file", () => ({ ok: false, missing: true, path: "/gone/smoke-track.mp3" }));
+ipcMain.handle("settings:get", () => ({ settings: { alwaysResume: false, closeWhileSeparating: "ask", cacheLimitBytes: 10737418240 }, cacheLimitChoices: [2147483648, 10737418240] }));
+ipcMain.handle("cache:usage", () => ({ bytes: 0, limit: 10737418240, entries: 0, byKind: { analysis: { bytes: 0, entries: 0 }, stems: { bytes: 0, entries: 0 } } }));
+ipcMain.handle("cache:get-analysis", () => null);
+ipcMain.handle("cache:put-analysis", () => ({ ok: true }));
+ipcMain.handle("cache:record-path", () => ({ ok: true }));
 const errors = [];
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -103,6 +116,21 @@ app.whenReady().then(async () => {
     const restart = await win.webContents.executeJavaScript(\`['A','B','C','D'].map((id) => Boolean(window.openDeck.zooms[id] && window.openDeck.zooms[id].vertical))\`, true);
     if (!restart.every(Boolean)) errors.push("vertical waveform not restored on every deck after restart: " + JSON.stringify(restart));
     probe.deckChecks = { ...decks, restart };
+    // Resume offer after the restart, then resuming a session whose file is missing.
+    const resume = await win.webContents.executeJavaScript(\`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const offer = document.querySelector('#resumePrompt .resume-offer .media-prompt-text');
+      const text = offer ? offer.textContent : null;
+      const chip = !document.getElementById('sessionStatus').classList.contains('hidden');
+      document.querySelector('#resumePrompt .resume-yes').click();
+      for (let i = 0; i < 30 && !document.querySelector('#resumePrompt .resume-missing'); i++) await sleep(100);
+      const missing = document.querySelector('#resumePrompt .resume-missing .media-prompt-text');
+      return { text, chip, missing: missing ? missing.textContent : null, locate: Boolean(document.querySelector('#resumePrompt .resume-locate')), offerGone: !document.querySelector('#resumePrompt .resume-offer') };
+    })()\`, true);
+    if (!resume.text || !resume.text.startsWith("Resume last session?") || !resume.text.includes("A: smoke-track")) errors.push("resume offer did not render: " + JSON.stringify(resume));
+    if (!resume.chip) errors.push("session settings chip hidden");
+    if (!resume.missing || !resume.missing.includes("smoke-track.mp3") || !resume.locate || !resume.offerGone) errors.push("missing-file row did not render on resume: " + JSON.stringify(resume));
+    probe.resume = resume;
     console.log("UI_RESULT " + JSON.stringify({ ok: errors.length === 0, errors, probe }));
     process.exitCode = errors.length === 0 ? 0 : 1;
   } catch (error) {

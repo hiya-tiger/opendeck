@@ -48,6 +48,11 @@ Open-source 4-deck DJ application with sample-accurate PCM transport, real DVS t
 ### P3 — 4-Part Stem Separation (`htDemucs`)
 - **4-Part Offline & Real-Time Stems (`Drums`, `Bass`, `Other`, `Vocals`):** Local `htDemucs` ONNX separation cached in `.opendeck-stems/` by track hash, per-stem level sliders, Mute (`M`), Solo (`S`), Filter (`F`), and Stem FX (`X`) controls, quick **Acapella (`VOCALS`)** and **Instrumental (`INST`)** isolation buttons, and full stem voice tracking during platter and DVS scratching.
 
+### Resume last session & background stems ([D45](docs/decisions.md))
+- **Resume last session:** on launch OpenDecks offers to restore the decks (track, position, cues, loops, tempo, key shift, key lock, EQ/trim/FX), the mixer and the library view; "Always resume" skips the question. Moved files are found again by content; missing ones get a **Locate…** button.
+- **Nothing is computed twice:** analysis (BPM, key, beatgrid, waveform) and stems are kept in a content-addressed cache in the app's data folder, keyed by the file's SHA-256 plus model/version, with a size limit, least-recently-used eviction and **Clear cache** in the Session panel. A separation that was interrupted continues from its last finished chunk.
+- **Closing while stems separate** asks *Keep separating stems in the background?* (**Keep going in tray** / **Quit now**, **Remember my choice**). In the tray it runs at low priority with fewer threads, shows progress with Open / Pause / Quit, and notifies when done. The tray, dialog and notifications are built for Windows and macOS but not yet tried on real Windows or Mac machines.
+
 ### P4 & P5 — Zero-Loss Serato Library Interoperability, Smart Crates & Day Mode
 - **Zero-Loss Serato Round-Trip:** Reads and writes `_Serato_/database V2`, `_Serato_/Subcrates/*.crate`, `GEOB`/`covr`/`APIC` embedded markers (`Serato Markers_`, `Serato Markers2`, `Serato Autotags`, `Serato BeatGrid`, `Serato Overview`), and Serato 4.x `master.sqlite` (`container_asset_list_columns`) while preserving unknown `otrk` sub-chunks and `utpc` play counts byte-for-byte.
 - **Unified Undo Backup:** Every embedded tag write and `_Serato_` library export creates an automatic backup snapshot that can be restored in one click (`Undo tags` / `restoreLibraryBackup`).

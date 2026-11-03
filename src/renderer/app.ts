@@ -26,6 +26,17 @@ import {
   type SavedLoop,
 } from "./media/cue-store.ts";
 import type { PlayedEntry, TrackSortKey, LivePlaylistRule } from "./media/library-ux.ts";
+import {
+  keyShiftDelta,
+  normaliseSession,
+  restoreOrder,
+  restorePosition,
+  resumeDecision,
+  sessionSummary,
+  SESSION_VERSION,
+  type DeckSnapshot,
+  type SessionSnapshot,
+} from "./session/session-state.ts";
 import { zipSync } from "fflate";
 import { artworkQuery, lookupCoverArt, type LookupResult } from "./media/artwork-lookup.ts";
 import { PlayQueue, type QueueTrack } from "./streaming/queue.ts";
@@ -168,6 +179,33 @@ interface LinkStatusPayload {
   settings?: { protocol: "ableton" | "opendeck"; startStopSync: boolean };
 }
 
+interface AppSettingsPayload {
+  alwaysResume: boolean;
+  closeWhileSeparating: "ask" | "tray" | "quit";
+  cacheLimitBytes: number;
+}
+
+interface CacheUsagePayload {
+  bytes: number;
+  limit: number;
+  entries: number;
+  byKind: Record<"analysis" | "stems", { bytes: number; entries: number }>;
+}
+
+interface CachedAnalysisPayload {
+  bpm: number;
+  beatPhase: number;
+  key: string;
+  camelot: string;
+  duration: number;
+  peaks: Float32Array;
+  bands: { low: Float32Array; mid: Float32Array; high: Float32Array } | null;
+}
+
+type SessionFileResult =
+  | { ok: true; bytes: Uint8Array; name: string; lastModified: number; size: number; path: string; moved?: boolean; from?: string | null }
+  | { ok: false; missing?: boolean; path?: string; error?: string };
+
 interface DesktopApi {
   platform: string;
   analysis?: {
@@ -208,6 +246,7 @@ interface DesktopApi {
       trackPath?: string | null;
       deck?: string;
       focusFrame?: number;
+      title?: string;
     }) => Promise<StemManifest & { cancelled?: boolean; provider?: string }>;
     read: (
       dir: string,
@@ -217,6 +256,26 @@ interface DesktopApi {
     focus?: (deck: string, hash: string, frame: number) => Promise<unknown>;
     onProgress: (handler: (payload: unknown) => void) => () => void;
     onRegion?: (handler: (payload: unknown) => void) => () => void;
+  };
+  session?: {
+    get: () => Promise<{ session: unknown; settings: AppSettingsPayload }>;
+    save: (snapshot: unknown) => Promise<{ ok: boolean }>;
+    saveSync?: (snapshot: unknown) => boolean;
+    clear: () => Promise<{ ok: boolean }>;
+    openFile: (request: { path: string; hash?: string }) => Promise<SessionFileResult>;
+    locate: (name: string) => Promise<SessionFileResult>;
+    onBackground?: (handler: (payload: unknown) => void) => () => void;
+  };
+  appSettings?: {
+    get: () => Promise<{ settings: AppSettingsPayload; cacheLimitChoices: number[] }>;
+    set: (patch: Partial<AppSettingsPayload>) => Promise<{ settings: AppSettingsPayload; cacheLimitChoices: number[] }>;
+  };
+  cache?: {
+    usage: () => Promise<CacheUsagePayload>;
+    clear: () => Promise<{ removed: number; bytes: number; kept: number; usage: CacheUsagePayload }>;
+    recordPath: (hash: string, filePath: string) => Promise<unknown>;
+    getAnalysis: (hash: string, version: string) => Promise<CachedAnalysisPayload | null>;
+    putAnalysis: (hash: string, version: string, result: CachedAnalysisPayload) => Promise<{ ok: boolean }>;
   };
   video?: {
     openOutput: (opts?: { fullscreen?: boolean }) => Promise<{ open: boolean; fullscreen: boolean }>;
@@ -1159,6 +1218,7 @@ function ejectDeck(deckId: DeckId): boolean {
   }
   releasePadHold(deckId);
   delete meta[deckId];
+  sessionTouched = true;
   synced[deckId] = false;
   refs.sync.classList.remove("active");
   refs.syncChip.classList.add("hidden");
@@ -1342,9 +1402,36 @@ async function extractArtwork(track: Track, data: ArrayBuffer | null): Promise<v
  * only its own track down (that track is retried on the main thread). */
 const nativeResults = new Map<string, NativeAnalysis>();
 
+/* Analysis results are kept in the content cache (D45), keyed by the file's
+ * SHA-256 + this version: a track seen before (any path, any launch) skips
+ * decode and analysis. Bump the version when analyzeBuffer's output changes. */
+const ANALYSIS_CACHE_VERSION = "analyze-v1-2000";
+const cachedAnalyses = new Map<string, CachedAnalysisPayload>();
+const trackHashes = new Map<string, string>();
+
+const sha256Hex = async (data: ArrayBuffer): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
 const decodeForAnalysis = async (track: Track): Promise<AudioBuffer | null> => {
   const data = track.file ? await track.file.arrayBuffer() : null;
   await extractArtwork(track, data);
+  if (data && desktop?.cache) {
+    try {
+      const hash = await sha256Hex(data);
+      trackHashes.set(track.id, hash);
+      const path = trackPathFor(track);
+      if (path) void desktop.cache.recordPath(hash, path).catch(() => undefined);
+      const hit = await desktop.cache.getAnalysis(hash, ANALYSIS_CACHE_VERSION);
+      if (hit && hit.peaks?.length) {
+        cachedAnalyses.set(track.id, hit);
+        return null;
+      }
+    } catch {
+      // cache unavailable: analyse as before
+    }
+  }
   const native = await nativeAnalysis(track, data);
   if (native) {
     nativeResults.set(track.id, native);
@@ -1382,7 +1469,33 @@ async function analyseTrack(track: Track, priority: AnalysisPriority): Promise<v
   const result = await analysisScheduler.analyse(track, priority);
   const native = nativeResults.get(track.id);
   nativeResults.delete(track.id);
-  if (result) {
+  const cached = cachedAnalyses.get(track.id);
+  cachedAnalyses.delete(track.id);
+  const hash = trackHashes.get(track.id);
+  if (result && hash && desktop?.cache) {
+    void desktop.cache
+      .putAnalysis(hash, ANALYSIS_CACHE_VERSION, {
+        bpm: result.bpm,
+        beatPhase: result.beatPhase,
+        key: result.key.key,
+        camelot: result.key.camelot,
+        duration: result.duration,
+        peaks: result.peaks,
+        bands: result.bands ?? null,
+      })
+      .catch(() => undefined);
+  }
+  if (!result && !native && cached) {
+    track.bpm = cached.bpm;
+    track.beatPhase = cached.beatPhase;
+    track.key = cached.key;
+    track.camelot = cached.camelot;
+    track.duration = cached.duration;
+    track.peaks = Float32Array.from(cached.peaks);
+    track.bands = cached.bands
+      ? { low: Float32Array.from(cached.bands.low), mid: Float32Array.from(cached.bands.mid), high: Float32Array.from(cached.bands.high) }
+      : null;
+  } else if (result) {
     track.bpm = result.bpm;
     track.beatPhase = result.beatPhase;
     track.key = result.key.key;
@@ -1439,6 +1552,8 @@ function enqueueAnalysis(track: Track, priority: AnalysisPriority = "background"
 /* -------------------------------------------------------------- stems */
 
 const separating: Partial<Record<DeckId, boolean>> = {};
+/** A deck was loaded or ejected since launch (answers a pending resume prompt). */
+let sessionTouched = false;
 
 const trackPathFor = (track: Track | null): string | null => {
   if (!track) return null;
@@ -1662,6 +1777,7 @@ const separateDeck = async (deckId: DeckId): Promise<void> => {
       trackPath: trackPathFor(track),
       deck: deckId,
       focusFrame: state.lastFocus,
+      title: track.name,
     });
     if (manifest.cancelled || deck.audioHash !== manifest.hash) return;
     await state.chain;
@@ -1795,6 +1911,9 @@ async function loadTrack(track: Track, deckId: DeckId): Promise<void> {
     return;
   }
   meta[deckId] = track;
+  const loadedPath = trackPathFor(track);
+  if (loadedPath && deck.audioHash) void desktop?.cache?.recordPath(deck.audioHash, loadedPath).catch(() => undefined);
+  sessionTouched = true;
   deck.setBpm(track.bpm || 0, track.beatPhase || 0);
   deck.setQuantize(refs.quantize.getAttribute("aria-pressed") === "true");
   deck.setPitchRange(Number((refs.pitchRange as HTMLSelectElement).value));
@@ -5018,6 +5137,396 @@ if (desktop?.link) {
   };
   void pollLink();
   window.setInterval(() => void pollLink(), 1_000);
+}
+
+/* ------------------------------------------------ resume last session (D45) */
+
+let sessionReady = false;
+let lastSessionJson = "";
+
+function captureSession(): SessionSnapshot {
+  const deckSnaps: DeckSnapshot[] = [];
+  for (const deckId of ALL_DECKS) {
+    const track = meta[deckId];
+    const deck = decks[deckId];
+    const refs = ui[deckId] as any;
+    if (!track || !refs || !deck.hasTrack || !deck.audioHash) continue;
+    const path = trackPathFor(track);
+    if (!path) continue; // streams and unsaved blobs cannot be reopened
+    deckSnaps.push({
+      deck: deckId,
+      path,
+      name: track.file?.name || track.name,
+      hash: deck.audioHash,
+      position: Math.round(deck.currentTime * 100) / 100,
+      cuePoint: Math.round(deck.cuePoint * 1000) / 1000,
+      hotCues: deck.hotCues.map((cue) => (cue ? { time: cue.time, color: cue.color, name: cue.name ?? "" } : null)),
+      loop: { start: deck.loopStart, end: deck.loopEnd, active: deck.loopActive, beats: deck.loopBeats },
+      savedLoops: savedLoops[deckId],
+      tempoPercent: Number(refs.pitch.value) || 0,
+      pitchRange: Number(refs.pitchRange.value) || 8,
+      keylock: deck.keylockOn,
+      keyShift: deck.pitchShift,
+      quantize: refs.quantize.getAttribute("aria-pressed") === "true",
+      eq: { high: Number(refs.eqHigh.value), mid: Number(refs.eqMid.value), low: Number(refs.eqLow.value) },
+      trim: Number(refs.trim.value),
+      fx: { type: refs.fxType.value, wet: Number(refs.fxWet.value), division: refs.fxDiv.value },
+    });
+  }
+  const value = (id: string, fallback: number): number => {
+    const node = document.getElementById(id) as HTMLInputElement | null;
+    return node ? Number(node.value) : fallback;
+  };
+  const channels: Partial<Record<DeckId, number>> = {};
+  for (const deckId of ALL_DECKS) if (document.getElementById(`ch${deckId}`)) channels[deckId] = value(`ch${deckId}`, 0.85);
+  return {
+    version: SESSION_VERSION,
+    savedAt: "",
+    fourDecks: document.getElementById("fourDeckToggle")?.getAttribute("aria-pressed") === "true",
+    decks: deckSnaps,
+    mixer: {
+      crossfader: value("crossfader", 0.5),
+      curve: (document.getElementById("xfCurve") as HTMLSelectElement | null)?.value ?? "smooth",
+      reverse: mixer.crossfaderReverse,
+      master: value("master", 0.8),
+      aux: value("auxGain", 0.8),
+      channels,
+    },
+    library: {
+      view: library.activeView,
+      filter: library.filter,
+      sortKey: library.sortKey,
+      sortDirection: library.sortDirection,
+      colorFilter: library.colorFilter,
+    },
+  };
+}
+
+function saveSessionNow(sync = false): void {
+  const api = desktop?.session;
+  if (!api) return;
+  if (!sessionReady) {
+    // A prompt is still up: keep the saved session until the user answers or loads something.
+    if (!sessionTouched) return;
+    dismissResumePrompt();
+  }
+  let snap: SessionSnapshot;
+  try {
+    snap = captureSession();
+  } catch {
+    return;
+  }
+  const json = JSON.stringify(snap);
+  if (json === lastSessionJson) return;
+  lastSessionJson = json;
+  snap.savedAt = new Date().toISOString();
+  if (sync && api.saveSync) api.saveSync(snap);
+  else void api.save(snap).catch(() => undefined);
+}
+
+const setInput = (node: HTMLInputElement | HTMLSelectElement | null | undefined, value: string | number, event: "input" | "change"): void => {
+  if (!node) return;
+  node.value = String(value);
+  node.dispatchEvent(new Event(event, { bubbles: true }));
+};
+
+function restoreMixerAndLibrary(session: SessionSnapshot): void {
+  if (session.fourDecks) {
+    localStorage.setItem("opendeck.fourDecks", "1");
+    setFourDeckMode(true);
+  }
+  const m = session.mixer;
+  setInput(document.getElementById("xfCurve") as HTMLSelectElement | null, m.curve, "change");
+  setInput(document.getElementById("crossfader") as HTMLInputElement | null, m.crossfader, "input");
+  setInput(document.getElementById("master") as HTMLInputElement | null, m.master, "input");
+  setInput(document.getElementById("auxGain") as HTMLInputElement | null, m.aux, "input");
+  for (const deckId of ALL_DECKS) {
+    const level = m.channels[deckId];
+    if (level !== undefined) setInput(document.getElementById(`ch${deckId}`) as HTMLInputElement | null, level, "input");
+  }
+  if (m.reverse !== mixer.crossfaderReverse) document.getElementById("xfReverse")?.click();
+  const lib = session.library;
+  const search = document.getElementById("search") as HTMLInputElement | null;
+  if (search) search.value = lib.filter;
+  library.setFilter(lib.filter);
+  const sortBy = document.getElementById("sortBy") as HTMLSelectElement | null;
+  if (sortBy && [...sortBy.options].some((o) => o.value === lib.sortKey)) sortBy.value = lib.sortKey;
+  library.setSort((sortBy?.value ?? lib.sortKey) as TrackSortKey, lib.sortDirection);
+  if (lib.colorFilter) library.setColorFilter(lib.colorFilter);
+  const view = document.getElementById("playlistFilter") as HTMLSelectElement | null;
+  if (view && [...view.options].some((o) => o.value === lib.view)) {
+    view.value = lib.view;
+    library.setActiveView(lib.view);
+  }
+  refreshLibraryChrome();
+}
+
+function applyDeckSnapshot(deckId: DeckId, snap: DeckSnapshot): void {
+  const deck = decks[deckId];
+  const refs = ui[deckId] as any;
+  if (!refs) return;
+  setInput(refs.pitchRange, snap.pitchRange, "change");
+  applyTempo(deckId, snap.tempoPercent);
+  if (deck.keylockOn !== snap.keylock) deck.setKeylock(snap.keylock);
+  refs.keylock.setAttribute("aria-pressed", String(deck.keylockOn));
+  const steps = keyShiftDelta(deck.pitchShift, snap.keyShift);
+  if (steps) deck.shiftKeySemitones(steps);
+  if (refs.keyVal) refs.keyVal.textContent = `${deck.pitchShift > 0 ? "+" : ""}${deck.pitchShift} st`;
+  refs.quantize.setAttribute("aria-pressed", String(snap.quantize));
+  deck.setQuantize(snap.quantize);
+  setInput(refs.eqHigh, snap.eq.high, "input");
+  setInput(refs.eqMid, snap.eq.mid, "input");
+  setInput(refs.eqLow, snap.eq.low, "input");
+  setInput(refs.trim, snap.trim, "input");
+  if ([...refs.fxType.options].some((o: HTMLOptionElement) => o.value === snap.fx.type)) {
+    setInput(refs.fxType, snap.fx.type, "change");
+    setInput(refs.fxWet, snap.fx.wet, "input");
+    if ([...refs.fxDiv.options].some((o: HTMLOptionElement) => o.value === snap.fx.division)) setInput(refs.fxDiv, snap.fx.division, "change");
+  }
+  deck.hotCues = normaliseCues(snap.hotCues, HOT_CUE_COLORS);
+  updatePads(deckId, true);
+  persistCues(deckId);
+  savedLoops[deckId] = snap.savedLoops;
+  renderSavedLoops(deckId);
+  persistLoops(deckId);
+  deck.setLoopBeats(snap.loop.beats);
+  if (snap.loop.end > snap.loop.start) deck.setLoopRange(snap.loop.start, snap.loop.end, snap.loop.active);
+  syncLoopButtons(deckId);
+  deck.setCue(snap.cuePoint);
+  waves[deckId]?.setCue(deck.cuePoint);
+  deck.seek(restorePosition(snap, deck.duration));
+  requestFrame();
+}
+
+async function restoreDeckFrom(deckId: DeckId, snap: DeckSnapshot, opened: Extract<SessionFileResult, { ok: true }>): Promise<boolean> {
+  const file = new File([opened.bytes as BlobPart], opened.name, { type: mimeFor(opened.name), lastModified: opened.lastModified });
+  const id = `${file.name}:${file.size}:${file.lastModified}`;
+  let track = addFiles([file])[0] ?? library.tracks.find((entry) => entry.id === id);
+  if (track && !track.file) track.file = file;
+  if (!track) {
+    toast(`Could not restore ${snap.name} on deck ${deckId}.`);
+    return false;
+  }
+  track.path = opened.path;
+  await loadTrack(track, deckId);
+  if (meta[deckId] !== track) return false;
+  if (decks[deckId].audioHash && decks[deckId].audioHash !== snap.hash) {
+    toast(`${snap.name} changed since your last session: cues and loops restored as saved, check them.`);
+  }
+  applyDeckSnapshot(deckId, snap);
+  return true;
+}
+
+async function resumeSession(session: SessionSnapshot): Promise<void> {
+  const api = desktop?.session;
+  sessionReady = true;
+  hideResumeRow();
+  if (!api) return;
+  restoreMixerAndLibrary(session);
+  const missing: DeckSnapshot[] = [];
+  let restored = 0;
+  for (const snap of restoreOrder(session)) {
+    const deckId = snap.deck as DeckId;
+    if (!ui[deckId]) continue;
+    try {
+      const opened = await api.openFile({ path: snap.path, hash: snap.hash });
+      if (!opened.ok) {
+        if (opened.missing) missing.push(snap);
+        else toast(`Could not open ${snap.name}: ${opened.error ?? "read failed"}`);
+        continue;
+      }
+      if (opened.moved) toast(`${snap.name} moved: found it at ${opened.path}`);
+      if (await restoreDeckFrom(deckId, snap, opened)) restored += 1;
+    } catch (error) {
+      toast(`Could not restore deck ${deckId}: ${(error as Error).message}`);
+    }
+  }
+  renderMissingTracks(missing);
+  if (restored) toast(`Resumed ${restored} deck${restored === 1 ? "" : "s"}${missing.length ? `, ${missing.length} track${missing.length === 1 ? "" : "s"} to locate` : ""}.`);
+}
+
+function resumeHost(): HTMLElement | null {
+  return document.getElementById("resumePrompt");
+}
+
+function hideResumeRow(): void {
+  resumeHost()?.querySelector(".resume-offer")?.remove();
+  const host = resumeHost();
+  if (host && !host.children.length) host.classList.add("hidden");
+}
+
+function dismissResumePrompt(): void {
+  sessionReady = true;
+  hideResumeRow();
+}
+
+function renderResumePrompt(session: SessionSnapshot): void {
+  const host = resumeHost();
+  if (!host) {
+    sessionReady = true;
+    return;
+  }
+  const row = document.createElement("div");
+  row.className = "media-prompt resume-offer";
+  const text = document.createElement("span");
+  text.className = "media-prompt-text";
+  const when = session.savedAt ? new Date(session.savedAt) : null;
+  text.textContent = `Resume last session? ${sessionSummary(session)}${when && !Number.isNaN(when.getTime()) ? ` (saved ${when.toLocaleString([], { dateStyle: "short", timeStyle: "short" })})` : ""}`;
+  const always = document.createElement("label");
+  always.className = "media-prompt-always micro";
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.className = "resume-always";
+  always.append(check, document.createTextNode(" Always resume"));
+  const resume = document.createElement("button");
+  resume.type = "button";
+  resume.className = "pill-btn resume-yes";
+  resume.textContent = "Resume last session";
+  const fresh = document.createElement("button");
+  fresh.type = "button";
+  fresh.className = "ghost resume-no";
+  fresh.textContent = "Start fresh";
+  const remember = async (): Promise<void> => {
+    if (check.checked) {
+      await desktop?.appSettings?.set({ alwaysResume: true }).catch(() => undefined);
+      void refreshSessionPanel();
+    }
+  };
+  resume.addEventListener("click", () => {
+    void remember();
+    void resumeSession(session);
+  });
+  fresh.addEventListener("click", () => {
+    void remember();
+    dismissResumePrompt();
+  });
+  row.append(text, always, resume, fresh);
+  host.prepend(row);
+  host.classList.remove("hidden");
+}
+
+function renderMissingTracks(missing: DeckSnapshot[]): void {
+  const host = resumeHost();
+  if (!host) return;
+  for (const snap of missing) {
+    const row = document.createElement("div");
+    row.className = "media-prompt resume-missing";
+    row.dataset.deck = snap.deck;
+    const text = document.createElement("span");
+    text.className = "media-prompt-text";
+    text.textContent = `Can't find "${snap.name}" for deck ${snap.deck}. It was at ${snap.path}.`;
+    const locate = document.createElement("button");
+    locate.type = "button";
+    locate.className = "pill-btn resume-locate";
+    locate.textContent = "Locate…";
+    const skip = document.createElement("button");
+    skip.type = "button";
+    skip.className = "ghost resume-skip";
+    skip.textContent = "Skip";
+    const close = (): void => {
+      row.remove();
+      if (!host.children.length) host.classList.add("hidden");
+    };
+    locate.addEventListener("click", async () => {
+      const chosen = await desktop?.session?.locate(snap.name).catch(() => null);
+      if (!chosen || !chosen.ok) {
+        if (chosen && "error" in chosen && chosen.error) toast(chosen.error);
+        return;
+      }
+      close();
+      if (await restoreDeckFrom(snap.deck as DeckId, { ...snap, path: chosen.path }, chosen)) toast(`Deck ${snap.deck} restored from ${chosen.path}`);
+    });
+    skip.addEventListener("click", close);
+    row.append(text, locate, skip);
+    host.append(row);
+  }
+  if (missing.length) host.classList.remove("hidden");
+}
+
+/* Session & cache settings panel. */
+const formatBytes = (bytes: number): string =>
+  bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(bytes >= 10 * 1024 ** 3 ? 0 : 1)} GB` : bytes >= 1024 ** 2 ? `${Math.round(bytes / 1024 ** 2)} MB` : `${Math.round(bytes / 1024)} KB`;
+
+async function refreshSessionPanel(): Promise<void> {
+  const settingsApi = desktop?.appSettings;
+  const cacheApi = desktop?.cache;
+  if (!settingsApi) return;
+  try {
+    const { settings, cacheLimitChoices } = await settingsApi.get();
+    ($("sessionAlwaysResume") as HTMLInputElement).checked = settings.alwaysResume;
+    ($("sessionCloseChoice") as HTMLSelectElement).value = settings.closeWhileSeparating;
+    const limit = $("cacheLimit") as HTMLSelectElement;
+    const choices = [...new Set([...cacheLimitChoices, settings.cacheLimitBytes])].sort((a, b) => a - b);
+    limit.replaceChildren(...choices.map((bytes) => {
+      const option = document.createElement("option");
+      option.value = String(bytes);
+      option.textContent = formatBytes(bytes);
+      return option;
+    }));
+    limit.value = String(settings.cacheLimitBytes);
+    if (cacheApi) {
+      const usage = await cacheApi.usage();
+      $("cacheUsage").textContent = `${formatBytes(usage.bytes)} of ${formatBytes(usage.limit)} · ${usage.byKind.stems.entries} stem sets, ${usage.byKind.analysis.entries} analyses`;
+    }
+  } catch (error) {
+    $("cacheUsage").textContent = `Unavailable: ${(error as Error).message}`;
+  }
+}
+
+if (desktop?.session && desktop.appSettings) {
+  const chip = document.getElementById("sessionStatus");
+  const panel = document.getElementById("sessionPanel");
+  chip?.classList.remove("hidden");
+  chip?.addEventListener("click", () => {
+    panel?.classList.toggle("hidden");
+    if (!panel?.classList.contains("hidden")) void refreshSessionPanel();
+  });
+  const update = async (patch: Partial<AppSettingsPayload>): Promise<void> => {
+    try {
+      await desktop.appSettings!.set(patch);
+    } catch (error) {
+      toast(`Could not save the setting: ${(error as Error).message}`);
+    }
+    void refreshSessionPanel();
+  };
+  document.getElementById("sessionAlwaysResume")?.addEventListener("change", (event) => void update({ alwaysResume: (event.target as HTMLInputElement).checked }));
+  document.getElementById("sessionCloseChoice")?.addEventListener("change", (event) => {
+    const value = (event.target as HTMLSelectElement).value;
+    void update({ closeWhileSeparating: value === "tray" || value === "quit" ? value : "ask" });
+  });
+  document.getElementById("cacheLimit")?.addEventListener("change", (event) => void update({ cacheLimitBytes: Number((event.target as HTMLSelectElement).value) }));
+  document.getElementById("cacheClear")?.addEventListener("click", async () => {
+    if (!desktop.cache) return;
+    if (!confirm("Clear the analysis and stem cache? Tracks on the decks and stems being separated are kept.")) return;
+    try {
+      const result = await desktop.cache.clear();
+      toast(`Cache cleared: ${formatBytes(result.bytes)} freed${result.kept ? `, ${result.kept} in use kept` : ""}.`);
+    } catch (error) {
+      toast(`Could not clear the cache: ${(error as Error).message}`);
+    }
+    void refreshSessionPanel();
+  });
+
+  // Window hidden to the tray while stems separate: stop the music, save the session.
+  desktop.session.onBackground?.(() => {
+    for (const deckId of ALL_DECKS) if (decks[deckId].playing) decks[deckId].pause();
+    saveSessionNow();
+  });
+  window.setInterval(() => saveSessionNow(), 2000);
+  window.addEventListener("beforeunload", () => saveSessionNow(true));
+
+  void (async () => {
+    try {
+      const payload = await desktop.session!.get();
+      const session = normaliseSession(payload.session);
+      const decision = resumeDecision(session, payload.settings);
+      if (decision === "auto" && session && !sessionTouched) await resumeSession(session);
+      else if (decision === "ask" && session && !sessionTouched) renderResumePrompt(session);
+      else sessionReady = true;
+    } catch {
+      sessionReady = true;
+    }
+  })();
 }
 requestFrame();
 

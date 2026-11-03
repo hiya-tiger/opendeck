@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { promises as fs } from "node:fs";
@@ -12,7 +13,12 @@ import {
   type SeratoSqliteColumnsRequest,
   type SeratoWriteRequest,
 } from "./serato-files.ts";
-import { MODEL, findCache, installModel, loadManifestAt, modelInfo, pickCacheDir, readCache, type SeparateRequest } from "./separation.ts";
+import { MODEL, contentCacheRoot, findCache, installModel, loadManifestAt, modelInfo, pickCacheDir, readCache, type SeparateRequest } from "./separation.ts";
+import { ContentCache, type CachedAnalysis } from "./cache/content-cache.ts";
+import { SessionFile, SettingsStore, cacheLimitChoices, type AppSettings } from "./app-settings.ts";
+import { readTrackFile, resolveTrackFile, MEDIA_FILE_RE } from "./session-files.ts";
+import { CLOSE_DIALOG, resolveClose } from "./background/close-policy.ts";
+import { TrayController } from "./background/tray-controller.ts";
 import { StemHost, defaultSpawner } from "./stems/host.ts";
 import { createLinkNode } from "./link.ts";
 import { createAbletonLinkNode } from "./ableton-link/node.ts";
@@ -54,6 +60,12 @@ const createWindow = (): void => {
     return { action: "deny" };
   });
   mainWindow.loadFile(path.join(root(), "renderer", "index.html"));
+  // Closing while stems are queued or running asks first (D45).
+  mainWindow.on("close", (event) => {
+    if (quitConfirmed || !stemHost.busy) return;
+    event.preventDefault();
+    requestClose();
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -186,6 +198,8 @@ ipcMain.handle("separation:install", async (event) => {
 
 ipcMain.handle("separation:cache", async (_event, request: { hash: string; trackPath?: string | null }) => {
   const manifest = await findCache(request.trackPath, request.hash, app.getPath("userData"));
+  const dir = (manifest as { dir?: string } | null)?.dir;
+  if (dir && dir.startsWith(contentCache.root)) void contentCache.touch(dir); // a hit is a use (LRU)
   return manifest ? { found: true, manifest } : { found: false };
 });
 
@@ -195,6 +209,162 @@ const stemHost = new StemHost(defaultSpawner(path.join(__dirname, "separation-wo
   modelPath: stemModelPath,
   statePath: path.join(app.getPath("userData"), "stems-providers.json"),
 });
+
+/* ---------------------------------------------- session resume + cache (D45) */
+
+const userDataDir = (): string => app.getPath("userData");
+const contentCache = new ContentCache({ root: contentCacheRoot(userDataDir()) });
+const settingsStore = new SettingsStore(userDataDir());
+const sessionFile = new SessionFile(userDataDir());
+/** Hashes on the decks in the last saved session: never evicted or cleared. */
+let sessionHashes: string[] = [];
+
+const pinnedHashes = (): string[] => [...new Set([...sessionHashes, ...stemHost.activeHashes])];
+const hashesOf = (snapshot: unknown): string[] => {
+  const decksList = (snapshot as { decks?: Array<{ hash?: unknown }> } | null)?.decks;
+  return Array.isArray(decksList) ? decksList.map((deck) => String(deck?.hash ?? "")).filter((hash) => /^[a-f0-9]{16,128}$/i.test(hash)) : [];
+};
+let evicting: Promise<unknown> | null = null;
+const evictSoon = (): void => {
+  if (evicting) return;
+  evicting = contentCache
+    .evict(pinnedHashes())
+    .catch((error) => console.warn("cache eviction failed", error))
+    .finally(() => {
+      evicting = null;
+    });
+};
+
+ipcMain.handle("settings:get", async () => ({ settings: await settingsStore.get(), cacheLimitChoices: cacheLimitChoices() }));
+ipcMain.handle("settings:set", async (_event, patch: Partial<AppSettings>) => {
+  const settings = await settingsStore.update(patch ?? {});
+  contentCache.setLimit(settings.cacheLimitBytes);
+  evictSoon();
+  return { settings, cacheLimitChoices: cacheLimitChoices() };
+});
+
+ipcMain.handle("session:get", async () => {
+  const snapshot = await sessionFile.read();
+  sessionHashes = hashesOf(snapshot);
+  return { session: snapshot, settings: await settingsStore.get() };
+});
+ipcMain.handle("session:save", async (_event, snapshot: unknown) => {
+  sessionHashes = hashesOf(snapshot);
+  return { ok: await sessionFile.write(snapshot).catch(() => false) };
+});
+// beforeunload: synchronous, so the last state is on disk before the window goes.
+ipcMain.on("session:save-sync", (event, text: string) => {
+  try {
+    if (typeof text === "string" && text.length < 512 * 1024) {
+      const file = path.join(userDataDir(), "last-session.json");
+      mkdirSync(userDataDir(), { recursive: true });
+      writeFileSync(`${file}.tmp`, text);
+      renameSync(`${file}.tmp`, file);
+      sessionHashes = hashesOf(JSON.parse(text));
+    }
+    event.returnValue = true;
+  } catch {
+    event.returnValue = false;
+  }
+});
+ipcMain.handle("session:clear", async () => {
+  await sessionFile.clear();
+  sessionHashes = [];
+  return { ok: true };
+});
+ipcMain.handle("session:open-file", async (_event, request: { path: string; hash?: string }) => {
+  const resolved = await resolveTrackFile({ path: String(request?.path ?? ""), hash: request?.hash ?? null }, contentCache);
+  if (resolved.status === "missing") return { ok: false, missing: true, path: resolved.from };
+  const read = await readTrackFile(resolved.path);
+  if (!read.ok) return { ok: false, missing: false, path: resolved.path, error: read.error };
+  if (request?.hash) void contentCache.recordPath(request.hash, resolved.path);
+  return { ...read, path: resolved.path, moved: resolved.status === "moved", from: resolved.status === "moved" ? resolved.from : null };
+});
+ipcMain.handle("session:locate", async (_event, name: string) => {
+  const options: Electron.OpenDialogOptions = {
+    title: `Locate ${String(name ?? "track")}`,
+    properties: ["openFile"],
+    filters: [{ name: "Audio and video", extensions: ["mp3", "wav", "ogg", "flac", "m4a", "aac", "aif", "aiff", "opus", "webm", "mp4", "m4v", "mov", "mkv"] }],
+  };
+  const result = mainWindow ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+  const chosen = result.filePaths?.[0];
+  if (result.canceled || !chosen || !MEDIA_FILE_RE.test(chosen)) return { ok: false };
+  return { ...(await readTrackFile(chosen)), path: chosen };
+});
+
+ipcMain.handle("cache:record-path", async (_event, hash: string, filePath: string) => {
+  await contentCache.recordPath(String(hash), String(filePath));
+  return { ok: true };
+});
+ipcMain.handle("cache:get-analysis", async (_event, hash: string, version: string) => contentCache.getAnalysis(String(hash), String(version)));
+ipcMain.handle("cache:put-analysis", async (_event, hash: string, version: string, result: CachedAnalysis) => {
+  if (!/^[a-f0-9]{16,128}$/i.test(String(hash)) || !result?.peaks) return { ok: false };
+  await contentCache.putAnalysis(String(hash), String(version), result);
+  evictSoon();
+  return { ok: true };
+});
+ipcMain.handle("cache:usage", async () => contentCache.usage());
+ipcMain.handle("cache:clear", async () => {
+  const result = await contentCache.clear(pinnedHashes());
+  return { ...result, usage: await contentCache.usage() };
+});
+
+/* ------------------------------------------- close while separating (D45) */
+
+let quitConfirmed = false;
+let closing: Promise<void> | null = null;
+const trayController = new TrayController({
+  host: stemHost,
+  window: () => mainWindow,
+  quit: () => {
+    quitConfirmed = true;
+    app.quit();
+  },
+});
+
+const askKeepGoing = async (): Promise<{ response: number; checkboxChecked: boolean }> => {
+  const options: Electron.MessageBoxOptions = {
+    type: "question",
+    title: CLOSE_DIALOG.title,
+    message: CLOSE_DIALOG.message,
+    detail: "Separation keeps running at low priority from the tray. Finished parts are saved, so the next launch picks them up either way.",
+    buttons: [...CLOSE_DIALOG.buttons],
+    defaultId: CLOSE_DIALOG.defaultId,
+    cancelId: CLOSE_DIALOG.cancelId,
+    checkboxLabel: CLOSE_DIALOG.checkboxLabel,
+    checkboxChecked: false,
+    noLink: true,
+  };
+  const win = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
+  return win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options);
+};
+
+function requestClose(): void {
+  if (closing) return;
+  closing = (async () => {
+    const settings = await settingsStore.get();
+    const { result, savePreference } = await resolveClose(
+      { busy: stemHost.busy, preference: settings.closeWhileSeparating, quitConfirmed },
+      askKeepGoing,
+    );
+    if (savePreference) await settingsStore.update({ closeWhileSeparating: savePreference });
+    if (result.action === "tray") {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("app:background", { on: true });
+      trayController.enter();
+      return;
+    }
+    quitConfirmed = true;
+    app.quit();
+  })()
+    .catch((error) => {
+      console.error("close handling failed", error);
+      quitConfirmed = true;
+      app.quit();
+    })
+    .finally(() => {
+      closing = null;
+    });
+}
 
 ipcMain.handle("separation:run", async (event, request: SeparateRequest) => {
   const target = stemModelPath();
@@ -212,6 +382,7 @@ ipcMain.handle("separation:run", async (event, request: SeparateRequest) => {
         right: request.right,
         focusFrame: request.focusFrame ?? 0,
         cacheDir,
+        title: typeof request.title === "string" ? request.title.slice(0, 200) : undefined,
       },
       {
         deck,
@@ -223,6 +394,7 @@ ipcMain.handle("separation:run", async (event, request: SeparateRequest) => {
         },
       },
     );
+    void contentCache.touch(cacheDir, { kind: "stems", hash: request.hash, model: MODEL.id, version: MODEL.version }).then(evictSoon);
     return { ...manifest, provider: stemHost.stats?.provider ?? stemHost.activeProvider, stats: stemHost.stats };
   } catch (error) {
     if ((error as Error).message === "cancelled") return { cancelled: true, hash: request.hash };
@@ -434,7 +606,36 @@ ipcMain.handle("link:settings", async (_event, patch: Partial<LinkSettings>) => 
 
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
+// One instance: launching again while separation runs in the tray brings the
+// window back instead of starting a second app (and a second worker).
+if (!process.env.OPENDECK_ALLOW_MULTI && !app.requestSingleInstanceLock()) {
+  quitConfirmed = true;
+  app.quit();
+}
+app.on("second-instance", () => {
+  if (trayController.inBackground) trayController.open();
+  else if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
+app.on("before-quit", (event) => {
+  if (quitConfirmed || !stemHost.busy) {
+    quitConfirmed = true;
+    return;
+  }
+  // Cmd+Q / taskbar Quit / tray-less quit while separating: same question.
+  event.preventDefault();
+  requestClose();
+});
+
 app.whenReady().then(() => {
+  void settingsStore.get().then((settings) => {
+    contentCache.setLimit(settings.cacheLimitBytes);
+    setTimeout(evictSoon, 15_000);
+  });
   const allowMedia = (permission: string): boolean =>
     permission === "media" ||
     permission === "audioCapture" ||
@@ -469,7 +670,8 @@ app.whenReady().then(() => {
     })
     .catch((error) => console.error("detected media setup failed", error));
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (trayController.inBackground) trayController.open();
+    else if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
   // Build the stem session in the background once the window is up, so the
   // first separation does not pay for it. The worker runs at low priority.
@@ -489,6 +691,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
+  trayController.destroy();
   stemHost.dispose();
   rtmp?.kill();
   void linkManager?.shutdown();
