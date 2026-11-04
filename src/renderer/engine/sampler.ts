@@ -67,6 +67,11 @@ export class Sampler {
     this.gain.gain.setTargetAtTime(clamp01(value), this.ctx.currentTime, 0.01);
   }
 
+  /** True when the slot holds a sample. */
+  has(index: number): boolean {
+    return this.buffers.has(index);
+  }
+
   trigger(index: number, velocity = 1): void {
     const buffer = this.buffers.get(index);
     if (!buffer) return;

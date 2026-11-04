@@ -20,14 +20,13 @@ const api = {
   platform: process.platform,
   versions: { electron: process.versions.electron, chrome: process.versions.chrome },
   streaming: {
-    login: (provider: string, url: string, hints: string[]) => ipcRenderer.invoke("streaming:login", provider, url, hints),
-    open: (provider: string, url: string, hints: string[]) => ipcRenderer.invoke("streaming:open", provider, url, hints),
-    status: (provider: string, hints: string[]) => ipcRenderer.invoke("streaming:status", provider, hints),
-    logout: (provider: string) => ipcRenderer.invoke("streaming:logout", provider),
-    search: (provider: string, url: string, token?: string) => ipcRenderer.invoke("streaming:search", provider, url, token),
-    license: (provider: string, licenseUrl: string, challenge: Uint8Array, token?: string) =>
-      ipcRenderer.invoke("streaming:license", provider, licenseUrl, challenge, token),
-    onLogin: (handler: (payload: unknown) => void) => on("streaming:login", handler),
+    status: () => ipcRenderer.invoke("stream:status"),
+    setKey: (source: string, clientId: string, clientSecret?: string) => ipcRenderer.invoke("stream:set-key", source, clientId, clientSecret),
+    clearKey: (source: string) => ipcRenderer.invoke("stream:clear-key", source),
+    signIn: (source: string) => ipcRenderer.invoke("stream:sign-in", source),
+    signOut: (source: string) => ipcRenderer.invoke("stream:sign-out", source),
+    request: (source: string, req: unknown) => ipcRenderer.invoke("stream:request", source, req),
+    audio: (source: string, plan: unknown) => ipcRenderer.invoke("stream:audio", source, plan),
   },
   media: {
     fetch: (url: string) => ipcRenderer.invoke("media:fetch", url),
@@ -83,6 +82,19 @@ const api = {
     onLibrary: (handler: (payload: unknown) => void) => on("djmedia:library", handler),
     onRemoved: (handler: (payload: unknown) => void) => on("djmedia:removed", handler),
     onProgress: (handler: (payload: unknown) => void) => on("djmedia:progress", handler),
+  },
+  shell: {
+    reveal: (target: string) => ipcRenderer.invoke("shell:reveal", target),
+    open: (target: string) => ipcRenderer.invoke("shell:open", target),
+    trash: (target: string) => ipcRenderer.invoke("shell:trash", target),
+  },
+  app: {
+    quit: () => ipcRenderer.invoke("app:quit"),
+    zoom: (direction: "in" | "out" | "reset") => ipcRenderer.invoke("app:zoom", direction),
+  },
+  shortcuts: {
+    onShow: (handler: () => void) => on("shortcuts:show", () => handler()),
+    onKey: (handler: (payload: unknown) => void) => on("shortcuts:key", handler),
   },
   videoOpenOutput: videoApi.openOutput,
   videoCloseOutput: videoApi.closeOutput,

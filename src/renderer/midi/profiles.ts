@@ -19,6 +19,13 @@ export interface MidiDeviceProfile {
   dvsReady?: boolean;
   dvsUpgrade?: boolean;
   aliases?: string[];
+  /**
+   * A dedicated driver handles this device instead of note/CC bindings
+   * ("slab" = src/renderer/midi/slab.ts). Its bindings are then empty.
+   */
+  driver?: "slab";
+  /** False until someone has run the mapping on the physical unit. */
+  testedOnHardware?: boolean;
 }
 
 export interface HardwareCatalogueEntry {
@@ -31,6 +38,7 @@ export interface HardwareCatalogueEntry {
   decks: 1 | 2 | 4;
   dvsReady: boolean;
   dvsUpgrade: boolean;
+  driver?: "slab";
 }
 
 const cc = (number: number, channel: number): MidiBinding => ({ message: "cc", number, channel });
@@ -684,6 +692,7 @@ function classifyDevice(rawLabel: string): {
   bindings: MidiBindings;
   pattern: RegExp;
   aliases?: string[];
+  driver?: "slab";
 } {
   const dvsUpgrade = /\.\s*$/.test(rawLabel);
   const label = rawLabel.replace(/[\s.]+$/, "").trim();
@@ -694,7 +703,16 @@ function classifyDevice(rawLabel: string): {
   let dvsReady = false;
   let bindings: MidiBindings;
 
-  if (label === "Hercules DJControl T10") {
+  let driver: "slab" | undefined;
+  if (label === "AlphaTheta SLAB") {
+    // Pad controller with its own driver built from AlphaTheta's official
+    // MIDI message list. The generic accessory bindings collided with it
+    // (ch1 notes 0x18-0x1B are SLAB's encoder touch sensors).
+    category = "accessory";
+    decks = 2;
+    driver = "slab";
+    bindings = {};
+  } else if (label === "Hercules DJControl T10") {
     category = "controller-2deck";
     decks = 2;
     bindings = {
@@ -767,6 +785,7 @@ function classifyDevice(rawLabel: string): {
     bindings,
     pattern,
     aliases,
+    driver,
   };
 }
 
@@ -782,6 +801,7 @@ export const HARDWARE_CATALOGUE: HardwareCatalogueEntry[] = classifiedList.map((
   decks: item.decks,
   dvsReady: item.dvsReady,
   dvsUpgrade: item.dvsUpgrade,
+  ...(item.driver ? { driver: item.driver } : {}),
 }));
 
 function specificityRank(item: ReturnType<typeof classifyDevice>): number {
@@ -805,6 +825,7 @@ export const DEVICE_PROFILES: MidiDeviceProfile[] = classifiedList
     dvsReady: item.dvsReady,
     dvsUpgrade: item.dvsUpgrade,
     aliases: item.aliases,
+    ...(item.driver ? { driver: item.driver, testedOnHardware: false } : {}),
   }));
 
 export function normalizeHardwareName(name: string | null | undefined): string {

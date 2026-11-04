@@ -21,7 +21,6 @@ other DJ vendor. Product names are used only to describe compatibility.
 | serde, serde_json | Rust serialization | MIT OR Apache-2.0 |
 | ureq | HTTP client in the Tauri shell | MIT OR Apache-2.0 |
 | rfd | Native file dialogs in the Tauri shell | MIT |
-| sha1 | YouTube Music request signing | MIT OR Apache-2.0 |
 | webview2-com | WebView2 host bindings (Windows) | MIT OR Apache-2.0 |
 | signalsmith-stretch 1.3.2 | Time stretching, pitch hold and tempo-independent pitch shift in the PCM engine | MIT |
 | onnxruntime-node 1.20.1 | Offline ONNX inference for source separation | MIT |
