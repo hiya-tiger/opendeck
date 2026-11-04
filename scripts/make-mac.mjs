@@ -77,6 +77,10 @@ for (const arch of arches) {
   plist = setPlist(plist, "CFBundleVersion", version);
   plist = setPlist(plist, "NSMicrophoneUsageDescription", "OpenDecks reads timecode vinyl and line inputs from your audio interface.");
   plist = setPlist(plist, "NSCameraUsageDescription", "OpenDecks can use a camera as a video source.");
+  // D46: USB drive import reads /Volumes, and Pro DJ Link talks to CDJs on the
+  // local network; macOS asks the user for both and shows these strings.
+  plist = setPlist(plist, "NSRemovableVolumesUsageDescription", "OpenDecks reads rekordbox and music folders from USB drives you choose to add.");
+  plist = setPlist(plist, "NSLocalNetworkUsageDescription", "OpenDecks finds CDJs and mixers on your DJ network (Pro DJ Link).");
   if (haveIcon) {
     fs.copyFileSync(icnsOut, path.join(res, "opendecks.icns"));
     plist = setPlist(plist, "CFBundleIconFile", "opendecks.icns");

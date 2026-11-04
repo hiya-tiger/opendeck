@@ -19,6 +19,7 @@ import { setupStreaming } from "./streaming.ts";
 import { setupDetectedMedia } from "./prolink/ipc.ts";
 import { buildShortcutMenu, forwardReservedKeys, installShortcutIpc } from "./shortcuts-menu.ts";
 import type { MediaManager } from "./prolink/manager.ts";
+import { installAppPermissions } from "./permissions.ts";
 
 const root = (): string => app.getAppPath();
 
@@ -419,19 +420,11 @@ ipcMain.handle("link:set-tempo", (_event, bpm: number) => requireLinkNode().setL
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 app.whenReady().then(() => {
-  const allowMedia = (permission: string): boolean =>
-    permission === "media" ||
-    permission === "audioCapture" ||
-    permission === "display-capture" ||
-    permission === "speaker-selection" ||
-    // EME for the official players embedded in a deck (D42). Only has an effect
-    // on a Widevine-enabled (castlabs ECS) build; stock Electron has no CDM.
-    permission === "mediaKeySystem";
-
-  session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
-    callback(allowMedia(permission));
-  });
-  session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowMedia(permission));
+  // D46: capture as before; Web MIDI / WebUSB / WebHID / Web Serial only for
+  // the app's own file:// pages, never for streaming iframes or remote sites.
+  // mediaKeySystem: EME for the official players embedded in a deck (D42). Only
+  // has an effect on a Widevine-enabled (castlabs ECS) build; stock Electron has no CDM.
+  installAppPermissions(session.defaultSession, ["mediaKeySystem"]);
 
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
     const { desktopCapturer } = await import("electron");

@@ -25,7 +25,7 @@ import type {
   ProlinkSnapshot,
 } from "./types.ts";
 import { DEFAULT_PROLINK_SETTINGS } from "./types.ts";
-import { defaultScanner, VolumeWatcher, type LocalVolume } from "./volumes.ts";
+import { defaultScanner, driveAccessError, VolumeWatcher, type LocalVolume } from "./volumes.ts";
 
 interface Entry {
   sourceId: string;
@@ -247,7 +247,7 @@ export class MediaManager extends EventEmitter {
     } catch (error) {
       if (!this.current(sourceId, g)) return;
       entry.state = "error";
-      entry.error = (error as Error).message;
+      entry.error = driveAccessError(error);
       this.emit("change");
     }
   }
@@ -343,7 +343,7 @@ export class MediaManager extends EventEmitter {
       this.emit("library", library);
     } catch (error) {
       entry.state = "error";
-      entry.error = (error as Error).message;
+      entry.error = entry.origin === "local" ? driveAccessError(error) : (error as Error).message;
     }
     this.emit("change");
   }
