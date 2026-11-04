@@ -59,3 +59,19 @@ method: `docs/benchmarks/rust-native.md`.
   hard rule ("no LGPL linked"), the Linux path needs PipeWire's native API (libpipewire, MIT)
   or a clean-room ALSA kernel-ioctl backend, unless Donovan allows dynamically linking
   OS-provided LGPL libraries. Tauri on Linux has the same problem (WebKitGTK and GTK are LGPL).
+
+## 2026-11-04 16:30 EST: stop point (run 1)
+
+- Pushed: prototype commit 2c66af8 (native/ workspace, fixtures, Electron baseline, stems derivation,
+  UI mocks, deny.toml, CI workflow). CI run 41908439059 was still running at the stop. The licence job passed;
+  the UI prototype build step failed on all three platforms, and stems SDR failed on Linux.
+- Lost in a sandbox reset before commit, so these must be redone: fp16 derivation via ORT's own converter
+  (the onnxconverter-common output doesn't load in ORT), per-variant SDR error handling, Symphonia gapless
+  trimming, on-screen jog (screen_jog.rs) and the vinyl-mode check, MIDI unit tests, ui_measure.py watchdogs,
+  workflow step timeouts (GNU timeout on macOS), docs/benchmarks/midi-provenance.md, native/tools/summarize_logs.py.
+- Local sandbox results (2-core arm64, no audio device or GPU): Symphonia decodes 2-9x faster than Electron
+  and handles AIFF and ALAC, which Electron fails on. SQLite: sort and update are far faster, import is about
+  2.6x slower. Stretch costs 1-2% CPU per deck. Jog through Stretch is about 48 ms (too slow for scratch);
+  the direct read head is 0.25 ms. Recommendation: Stretch for key lock and nudge, direct read head for scratch.
+- Next run: redo the lost fixes, push, read both CI runs' logs, write docs/benchmarks/rust-native.md.
+  Stems int8/fp16 speed and SDR, vello frame times and audio I/O are still unmeasured. No model switch made.
