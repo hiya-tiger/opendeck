@@ -18,6 +18,7 @@ import { createLinkNode } from "./link.ts";
 import { setupDetectedMedia } from "./prolink/ipc.ts";
 import { buildShortcutMenu, forwardReservedKeys, installShortcutIpc } from "./shortcuts-menu.ts";
 import type { MediaManager } from "./prolink/manager.ts";
+import { installAppPermissions, installRemotePermissions } from "./permissions.ts";
 
 const root = (): string => app.getAppPath();
 
@@ -87,7 +88,16 @@ const createWindow = (): void => {
 
 const partitionFor = (provider: string): string => `persist:provider-${provider.replace(/[^a-z0-9-]/gi, "")}`;
 
-const sessionFor = (provider: string): Electron.Session => session.fromPartition(partitionFor(provider));
+const guardedPartitions = new Set<string>();
+const sessionFor = (provider: string): Electron.Session => {
+  const partition = partitionFor(provider);
+  const ses = session.fromPartition(partition);
+  if (!guardedPartitions.has(partition)) {
+    guardedPartitions.add(partition);
+    installRemotePermissions(ses); // D46: remote sites never get MIDI/USB/HID/serial
+  }
+  return ses;
+};
 
 const providerLoginStatus = async (provider: string, hints: string[]): Promise<boolean> => {
   const cookies = await sessionFor(provider).cookies.get({});
@@ -118,7 +128,7 @@ const openProviderWindow = async (
     parent: mainWindow ?? undefined,
     autoHideMenuBar: true,
     webPreferences: {
-      partition: partitionFor(provider),
+      session: sessionFor(provider),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -569,16 +579,9 @@ ipcMain.handle("link:set-tempo", (_event, bpm: number) => requireLinkNode().setL
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
 app.whenReady().then(() => {
-  const allowMedia = (permission: string): boolean =>
-    permission === "media" ||
-    permission === "audioCapture" ||
-    permission === "display-capture" ||
-    permission === "speaker-selection";
-
-  session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
-    callback(allowMedia(permission));
-  });
-  session.defaultSession.setPermissionCheckHandler((_contents, permission) => allowMedia(permission));
+  // D46: capture as before; Web MIDI / WebUSB / WebHID / Web Serial only for
+  // the app's own file:// pages, never for streaming iframes or remote sites.
+  installAppPermissions(session.defaultSession);
 
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
     const { desktopCapturer } = await import("electron");

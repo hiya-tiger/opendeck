@@ -25,6 +25,8 @@ ipcMain.handle("djmedia:state", () => ({
 }));
 const errors = [];
 app.whenReady().then(async () => {
+  // D46: the real session permission policy from the app build.
+  require(path.join(__dirname, "..", "permissions.cjs")).installAppPermissions(require("electron").session.defaultSession);
   const win = new BrowserWindow({
     show: false,
     width: 1500,
@@ -256,6 +258,23 @@ app.whenReady().then(async () => {
     await new Promise((r) => setTimeout(r, 200));
     const shot2 = await win.webContents.capturePage();
     require("node:fs").writeFileSync(path.join(__dirname, "decks-focus.png"), shot2.toPNG());
+    // D46: Web MIDI must not be refused for the app page. xvfb has no ALSA
+    // sequencer, so after the grant Chromium may still fail platform init
+    // (InvalidStateError); only NotAllowedError/SecurityError mean "denied".
+    // Embeds/sub-frames being refused is covered by test/permissions.test.ts.
+    const midi = await win.webContents.executeJavaScript(\`(async () => {
+      const race = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r({ outcome: "timeout" }), 8000))]);
+      const ask = (opts) => race(navigator.requestMIDIAccess(opts).then(
+        (a) => ({ outcome: "resolved", inputs: a.inputs.size, outputs: a.outputs.size }),
+        (e) => ({ outcome: "rejected", name: e.name, message: e.message })));
+      const plain = await ask();
+      const sysex = await ask({ sysex: true });
+      return { plain, sysex, usb: typeof navigator.usb, hid: typeof navigator.hid };
+    })()\`, true);
+    const denied = (r) => r.outcome === "timeout" || (r.outcome === "rejected" && (r.name === "NotAllowedError" || r.name === "SecurityError"));
+    if (denied(midi.plain)) errors.push("requestMIDIAccess() refused for the app page: " + JSON.stringify(midi.plain));
+    if (denied(midi.sysex)) errors.push("requestMIDIAccess({sysex:true}) refused for the app page: " + JSON.stringify(midi.sysex));
+    probe.midi = midi;
     console.log("UI_RESULT " + JSON.stringify({ ok: errors.length === 0, errors, probe }));
     process.exitCode = errors.length === 0 ? 0 : 1;
   } catch (error) {

@@ -30,6 +30,17 @@ await build({
   logOverride: { "empty-import-meta": "silent" },
 });
 
+// Session permission policy on its own, so smoke:ui installs the real handler.
+await build({
+  entryPoints: [`${root}src/main/permissions.ts`],
+  outfile: `${out}/permissions.cjs`,
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node20",
+  external: ["electron"],
+});
+
 await build({
   entryPoints: [`${root}src/preload/preload.ts`],
   outfile: `${out}/preload.cjs`,
@@ -69,7 +80,7 @@ await build({
 });
 
 console.log(
-  "built dist/main.cjs, dist/separation-worker.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js",
+  "built dist/main.cjs, dist/separation-worker.cjs, dist/permissions.cjs, dist/preload.cjs, renderer/app.js, renderer/dvs.js, renderer/analysis-worker.js",
 );
 
 

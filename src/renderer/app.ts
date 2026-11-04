@@ -4312,7 +4312,11 @@ async function enableMidi(): Promise<void> {
       }),
     ]);
   } catch (error) {
-    setMidiHint(`MIDI permission denied: ${(error as Error).message}`);
+    const err = error as Error;
+    // NotAllowedError/SecurityError = the host refused; anything else (e.g.
+    // InvalidStateError) means the OS MIDI service failed to start.
+    const refused = err.name === "NotAllowedError" || err.name === "SecurityError";
+    setMidiHint(refused ? `MIDI permission denied: ${err.message}` : `MIDI unavailable on this system: ${err.message}`);
     return;
   }
   midiAccess.addEventListener("statechange", refreshMidiInputs);

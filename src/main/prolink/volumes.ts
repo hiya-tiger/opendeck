@@ -182,6 +182,24 @@ export class LinuxScanner implements VolumeScanner {
   }
 }
 
+/**
+ * Turns an OS refusal to read a drive (EPERM / EACCES) into something the user
+ * can act on. macOS gates removable volumes behind a Files and Folders
+ * permission; Windows refuses BitLocker-locked or policy-blocked drives.
+ */
+export function driveAccessError(error: unknown, platform: NodeJS.Platform = process.platform): string {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  const message = (error as Error | null)?.message ?? String(error);
+  if (code !== "EPERM" && code !== "EACCES") return message;
+  if (platform === "darwin") {
+    return "macOS blocked access to this drive. Allow OpenDecks under System Settings > Privacy & Security > Files and Folders > Removable Volumes, then unplug and replug the drive.";
+  }
+  if (platform === "win32") {
+    return "Windows refused access to this drive. Unlock it if it uses BitLocker, or check that USB storage is not blocked by policy, then replug it.";
+  }
+  return `No permission to read this drive (${code}). Check that it is mounted readable for your user.`;
+}
+
 export function defaultScanner(): VolumeScanner | null {
   if (process.platform === "win32") return new WindowsScanner();
   if (process.platform === "darwin") return new MacScanner();
