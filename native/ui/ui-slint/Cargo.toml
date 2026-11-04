@@ -1,0 +1,11 @@
+[package]
+name = "ui-slint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Slint is GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0.
+# Benchmark only; see docs/benchmarks/rust-native.md for what each licence allows.
+[dependencies]
+slint = { version = "1.18", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2"] }

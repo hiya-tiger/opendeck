@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ui-tauri",
+  "version": "0.0.1",
+  "identifier": "dev.opendecks.uitauri",
+  "build": { "frontendDist": "dist" },
+  "app": { "withGlobalTauri": true, "windows": [ { "title": "ui-tauri", "width": 1920, "height": 1080 } ], "security": { "csp": null } },
+  "bundle": { "active": false, "icon": ["icons/icon.png", "icons/icon.ico"] }
+}

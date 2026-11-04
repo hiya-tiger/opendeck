@@ -1,0 +1,12 @@
+[package]
+name = "rn-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rn-engine = { path = "../rn-engine" }
+rn-render = { path = "../rn-render" }
+cpal = "0.15"
+serde_json = "1"

@@ -1,0 +1,11 @@
+[package]
+name = "rn-render"
+description = "wgpu + vello scenes: scrolling waveforms, overview, jog platter; headless frame-time bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vello = "0.6"
+pollster = "0.4"

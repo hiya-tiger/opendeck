@@ -1,0 +1,99 @@
+{
+ "seconds": 20,
+ "rate": 44100,
+ "channels": 2,
+ "seed": 2026,
+ "encoded_with": "ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers",
+ "files": [
+  {
+   "file": "wav16.wav",
+   "bytes": 3528044,
+   "sha256": "873b9619288f635269bcab7da612fa5082cefa262f6815fcfadee6af5a26f4f4",
+   "encoder_args": "-c:a pcm_s16le"
+  },
+  {
+   "file": "wav24.wav",
+   "bytes": 5292068,
+   "sha256": "49b7bc2d67724754f9af415bf86b83e1fac8868909e77a40a40d038be84d92aa",
+   "encoder_args": "-c:a pcm_s24le"
+  },
+  {
+   "file": "wavf32.wav",
+   "bytes": 7056058,
+   "sha256": "186145435a0311301e2c13d297233072e8cf05aa7fd6a159b5435821bf88108c",
+   "encoder_args": "-c:a pcm_f32le"
+  },
+  {
+   "file": "aiff16.aiff",
+   "bytes": 3528054,
+   "sha256": "751a3e5f705f75fa16bdfbd663a6789397f938d838acecfa23fd6f8aef072752",
+   "encoder_args": "-c:a pcm_s16be"
+  },
+  {
+   "file": "aiff24.aif",
+   "bytes": 5292054,
+   "sha256": "8ea6c16ff24850edef73f8d393410e5e8b5e1f10441274d118fd00618b1516b4",
+   "encoder_args": "-c:a pcm_s24be"
+  },
+  {
+   "file": "flac16.flac",
+   "bytes": 1515569,
+   "sha256": "0f89f5af3b425e6ab2ea0a95cb6b70bffbcd9834dcafe56a9e69dd28ad0cf55a",
+   "encoder_args": "-c:a flac -compression_level 8"
+  },
+  {
+   "file": "flac24.flac",
+   "bytes": 1545252,
+   "sha256": "82a39eb7829bcd1bf030af8cafac189cdefe0789a24e00724eb4e40d0a2616b7",
+   "encoder_args": "-c:a flac -sample_fmt s32 -bits_per_raw_sample 24"
+  },
+  {
+   "file": "alac.m4a",
+   "bytes": 1252320,
+   "sha256": "36a75396fee7ac40e34b176dc25d9e5740712753cb0656c0ee33d4bd436ffbe7",
+   "encoder_args": "-c:a alac"
+  },
+  {
+   "file": "mp3-cbr320.mp3",
+   "bytes": 802500,
+   "sha256": "6803eb3ae27c42da980d42145dddc712c1892e933074e8cbb9979274e722f24f",
+   "encoder_args": "-c:a libmp3lame -b:a 320k"
+  },
+  {
+   "file": "mp3-vbr0.mp3",
+   "bytes": 699046,
+   "sha256": "c8d0a8f6654e0e92e0e887ca6282cfe9d7343e68e57da8bbb1116a389670106f",
+   "encoder_args": "-c:a libmp3lame -q:a 0"
+  },
+  {
+   "file": "aac-lc256.m4a",
+   "bytes": 665823,
+   "sha256": "114ca3bb2aab9800354c4958864b34961186ca605b85622d26effbe3e5b93bc5",
+   "encoder_args": "-c:a aac -b:a 256k"
+  },
+  {
+   "file": "aac-lc192.aac",
+   "bytes": 506308,
+   "sha256": "d6b1ebe372e3a5776cd2451467b09d0e5596c82aff2a814c20bcec2447dd0aa8",
+   "encoder_args": "-c:a aac -b:a 192k -f adts"
+  },
+  {
+   "file": "vorbis-q6.ogg",
+   "bytes": 545586,
+   "sha256": "7bc1206f085ee1adab5f126db4e38a537beb0f7953c339bd63d4d241e5141263",
+   "encoder_args": "-c:a libvorbis -q:a 6"
+  },
+  {
+   "file": "opus160.opus",
+   "bytes": 690550,
+   "sha256": "1ffe522a8f9d8d6ebcceb1c71d1de4b49834675a06eb9b7c312324298db9e030",
+   "encoder_args": "-c:a libopus -b:a 160k"
+  },
+  {
+   "file": "opus160.webm",
+   "bytes": 694158,
+   "sha256": "b7263858160a68d1e429fb4089451564616472a21f7e5a66be7707370be12c8e",
+   "encoder_args": "-c:a libopus -b:a 160k"
+  }
+ ]
+}

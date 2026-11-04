@@ -1,0 +1,11 @@
+[package]
+name = "ui-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# default_fonts OFF: egui's bundled fonts (Ubuntu-Light under the Ubuntu Font Licence,
+# Noto Emoji / emoji-icon-font under OFL) are not shipped; this prototype draws no text.
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "wayland", "x11"] }
